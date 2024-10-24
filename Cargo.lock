@@ -2480,8 +2480,8 @@ name = "solana-account-plugins"
 version = "0.1.0"
 dependencies = [
  "agave-geyser-plugin-interface",
- "base58",
  "anyhow",
+ "base58",
  "cargo-lock",
  "config",
  "crossbeam-channel",
