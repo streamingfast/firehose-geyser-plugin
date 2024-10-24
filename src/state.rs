@@ -57,8 +57,8 @@ impl State {
         self.last_purged_block = block_num;
     }
 
-    pub fn stats(&mut self) -> String {
-        format!(
+    pub fn stats(&mut self) {
+        println!(
             "last_confirmed_block: {}, last_purged_block: {}, block_account_changes: {}",
             self.last_confirmed_block, self.last_purged_block, self.block_account_changes.len()
         )
