@@ -1,47 +1,31 @@
+use agave_geyser_plugin_interface::geyser_plugin_interface::SlotStatus;
 use {
+    crate::{
+        state::State,
+    },
     agave_geyser_plugin_interface::geyser_plugin_interface::{
-        GeyserPlugin, GeyserPluginError, ReplicaAccountInfoVersions, ReplicaBlockInfoVersions,
+        GeyserPlugin, ReplicaAccountInfoVersions, ReplicaBlockInfoVersions,
         ReplicaEntryInfoVersions, ReplicaTransactionInfoVersions, Result as PluginResult,
-        SlotStatus,
     },
     std::{
-        concat, env,
+        concat, env, sync::RwLock
     },
 };
 
-#[derive(Debug)]
-pub struct PluginInner {
-    //todo add state here
-}
-
-impl PluginInner {
-}
-
 #[derive(Debug, Default)]
 pub struct Plugin {
-    inner: Option<PluginInner>,
+    state: RwLock<State>,
 }
 
 impl Plugin {
-    fn with_inner<F>(&self, f: F) -> PluginResult<()>
-    where
-        F: FnOnce(&PluginInner) -> PluginResult<()>,
-    {
-        let inner = self.inner.as_ref().expect("initialized");
-        f(inner)
-    }
 }
-
 impl GeyserPlugin for Plugin {
     fn name(&self) -> &'static str {
         concat!(env!("CARGO_PKG_NAME"), "-", env!("CARGO_PKG_VERSION"))
     }
 
     fn on_load(&mut self, config_file: &str, is_reload: bool) -> PluginResult<()> {
-        self.inner = Some(PluginInner {
-            //todo: init state here
-        });
-
+        self.state = RwLock::new(State::new());
         Ok(())
     }
 
@@ -49,6 +33,34 @@ impl GeyserPlugin for Plugin {
     }
 
     fn update_account(&self,account: ReplicaAccountInfoVersions, slot: u64, is_startup: bool) -> PluginResult<()> {
+        match account {
+            ReplicaAccountInfoVersions::V0_0_1(account) => {
+                let account_key = account.pubkey.to_vec();
+                let account_data = account.data.to_vec();
+
+                self.state.write().unwrap().set_account_data(slot, account_key, account_data);
+            },
+
+            ReplicaAccountInfoVersions::V0_0_2(account) => {
+                let account_key = account.pubkey.to_vec();
+                let account_data = account.data.to_vec();
+
+                self.state.write().unwrap().set_account_data(slot, account_key, account_data);
+            },
+
+            ReplicaAccountInfoVersions::V0_0_3(account) => {
+                let account_key = account.pubkey.to_vec();
+                let account_data = account.data.to_vec();
+
+                self.state.write().unwrap().set_account_data(slot, account_key, account_data);
+            },
+
+            _ => {
+                panic!("Unsupported account version");
+            },
+
+        }
+
         Ok(())
     }
 
@@ -57,6 +69,13 @@ impl GeyserPlugin for Plugin {
     }
 
     fn update_slot_status(&self,slot: u64, parent: Option<u64>, status: SlotStatus) -> PluginResult<()> {
+        if status == SlotStatus::Confirmed {
+            self.state.write().unwrap().set_last_confirmed_block(slot);
+        }
+
+        self.state.write().unwrap().stats();
+        self.state.write().unwrap().purge_confirmed_blocks(slot);
+        
         Ok(())
     }
 

@@ -3,7 +3,7 @@ use base58;
 
 type BlockAccountChanges = HashMap<u64, HashMap<String, Vec<u8>>>;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct State {
     last_confirmed_block: u64,
     last_purged_block: u64,
@@ -55,5 +55,12 @@ impl State {
             }
         }
         self.last_purged_block = block_num;
+    }
+
+    pub fn stats(&mut self) -> String {
+        format!(
+            "last_confirmed_block: {}, last_purged_block: {}, block_account_changes: {}",
+            self.last_confirmed_block, self.last_purged_block, self.block_account_changes.len()
+        )
     }
 }
