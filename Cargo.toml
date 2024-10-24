@@ -1,0 +1,11 @@
+[package]
+name = "solana-account-plugins"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+agave-geyser-plugin-interface = "~2.0.10"
+config = "0.14.1"
+tokio = "1.41.0"
+crossbeam-channel = "0.5.13"
+log = "0.4.22"

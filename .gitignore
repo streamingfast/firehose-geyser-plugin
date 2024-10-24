@@ -1,0 +1,5 @@
+/target
+/.idea/.gitignore
+/.idea/modules.xml
+/.idea/solana-account-plugins.iml
+/.idea/vcs.xml
