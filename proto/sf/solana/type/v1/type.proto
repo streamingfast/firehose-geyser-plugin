@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package sf.solana.type.v1;
+
+option go_package = "github.com/streamingfast/solaccounts/pb/sf/solana/type/v1;pbsol";
+
+message AccountBlock {
+  uint64 slot = 1;
+  bytes hash = 2;
+  uint64 parent_slot = 3;
+  uint64 parent_hash = 4;
+  repeated Account accounts = 5;
+}
+
+message Account {
+  bytes address = 1;
+  bytes data = 2;
+  uint64 source_slot = 3;
+}
