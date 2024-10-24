@@ -25,6 +25,7 @@ impl GeyserPlugin for Plugin {
     }
 
     fn on_load(&mut self, config_file: &str, is_reload: bool) -> PluginResult<()> {
+        println!("ON_LOADING WITH SOL ACCOUNTS PLUGIN");
         self.state = RwLock::new(State::new());
         Ok(())
     }
@@ -33,6 +34,8 @@ impl GeyserPlugin for Plugin {
     }
 
     fn update_account(&self,account: ReplicaAccountInfoVersions, slot: u64, is_startup: bool) -> PluginResult<()> {
+        panic!("SOL ACCOUNTS PANICING");
+        
         match account {
             ReplicaAccountInfoVersions::V0_0_1(account) => {
                 let account_key = account.pubkey.to_vec();
