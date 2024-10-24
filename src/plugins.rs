@@ -1,9 +1,4 @@
 use {
-    crate::{
-        config::Config,
-        grpc::{GrpcService, Message},
-        metrics::{self, PrometheusService, MESSAGE_QUEUE_SIZE},
-    },
     agave_geyser_plugin_interface::geyser_plugin_interface::{
         GeyserPlugin, GeyserPluginError, ReplicaAccountInfoVersions, ReplicaBlockInfoVersions,
         ReplicaEntryInfoVersions, ReplicaTransactionInfoVersions, Result as PluginResult,
@@ -11,34 +6,15 @@ use {
     },
     std::{
         concat, env,
-        sync::{
-            atomic::{AtomicBool, Ordering},
-            Arc, Mutex,
-        },
-        time::Duration,
-    },
-    tokio::{
-        runtime::{Builder, Runtime},
-        sync::{mpsc, Notify},
     },
 };
 
 #[derive(Debug)]
 pub struct PluginInner {
-    runtime: Runtime,
-    snapshot_channel: Mutex<Option<crossbeam_channel::Sender<Box<Message>>>>,
-    snapshot_channel_closed: AtomicBool,
-    grpc_channel: mpsc::UnboundedSender<Arc<Message>>,
-    grpc_shutdown: Arc<Notify>,
-    prometheus: PrometheusService,
+    //todo add state here
 }
 
 impl PluginInner {
-    fn send_message(&self, message: Message) {
-        if self.grpc_channel.send(Arc::new(message)).is_ok() {
-            MESSAGE_QUEUE_SIZE.inc();
-        }
-    }
 }
 
 #[derive(Debug, Default)]
@@ -63,32 +39,16 @@ impl GeyserPlugin for Plugin {
 
     fn on_load(&mut self, config_file: &str, is_reload: bool) -> PluginResult<()> {
         self.inner = Some(PluginInner {
-            runtime,
-            snapshot_channel: Mutex::new(snapshot_channel),
-            snapshot_channel_closed: AtomicBool::new(false),
-            grpc_channel,
-            grpc_shutdown,
-            prometheus,
+            //todo: init state here
         });
 
         Ok(())
     }
 
     fn on_unload(&mut self) {
-        if let Some(inner) = self.inner.take() {
-            inner.grpc_shutdown.notify_one();
-            drop(inner.grpc_channel);
-            inner.prometheus.shutdown();
-            inner.runtime.shutdown_timeout(Duration::from_secs(30));
-        }
     }
 
-    fn update_account(
-        &self,
-        account: ReplicaAccountInfoVersions,
-        slot: u64,
-        is_startup: bool,
-    ) -> PluginResult<()> {
+    fn update_account(&self,account: ReplicaAccountInfoVersions, slot: u64, is_startup: bool) -> PluginResult<()> {
         Ok(())
     }
 
@@ -96,20 +56,11 @@ impl GeyserPlugin for Plugin {
         Ok(())
     }
 
-    fn update_slot_status(
-        &self,
-        slot: u64,
-        parent: Option<u64>,
-        status: SlotStatus,
-    ) -> PluginResult<()> {
+    fn update_slot_status(&self,slot: u64, parent: Option<u64>, status: SlotStatus) -> PluginResult<()> {
         Ok(())
     }
 
-    fn notify_transaction(
-        &self,
-        transaction: ReplicaTransactionInfoVersions<'_>,
-        slot: u64,
-    ) -> PluginResult<()> {
+    fn notify_transaction(&self,transaction: ReplicaTransactionInfoVersions<'_>, slot: u64) -> PluginResult<()> {
         Ok(())
     }
 
