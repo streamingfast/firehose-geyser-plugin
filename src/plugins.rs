@@ -25,6 +25,7 @@ impl GeyserPlugin for Plugin {
     }
 
     fn on_load(&mut self, config_file: &str, is_reload: bool) -> PluginResult<()> {
+        panic!("WTF");
         println!("ON_LOADING WITH SOL ACCOUNTS PLUGIN");
         self.state = RwLock::new(State::new());
         Ok(())
