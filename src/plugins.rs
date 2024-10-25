@@ -108,7 +108,6 @@ impl GeyserPlugin for Plugin {
                 // println!("slot confirmed {}", slot);
 
                 lock_state.set_last_confirmed_block(slot);
-                lock_state.stats();
                 lock_state.purge_blocks_below(slot);
 
                 let block_info = lock_state.get_block_info(slot);
@@ -158,7 +157,6 @@ impl GeyserPlugin for Plugin {
                 panic!("V0_0_1 not supported");
             },
             ReplicaBlockInfoVersions::V0_0_2(blockinfo) => {
-                println!("SOLACCOUNTPLUGIN block metadata {}", blockinfo.slot);
                 let block_info = BlockInfo {
                     block_hash: blockinfo.blockhash.to_string(),
                     parent_hash: blockinfo.parent_blockhash.to_string(),
@@ -170,7 +168,6 @@ impl GeyserPlugin for Plugin {
                 self.state.write().unwrap().set_block_info(blockinfo.slot, block_info)
             },
             ReplicaBlockInfoVersions::V0_0_3(blockinfo) => {
-                println!("SOLACCOUNTPLUGIN block metadata {}", blockinfo.slot);
                 let block_info = BlockInfo {
                     block_hash: blockinfo.blockhash.to_string(),
                     parent_hash: blockinfo.parent_blockhash.to_string(),
@@ -183,7 +180,6 @@ impl GeyserPlugin for Plugin {
             },
             
             ReplicaBlockInfoVersions::V0_0_4(blockinfo) => {
-                println!("SOLACCOUNTPLUGIN block metadata {}", blockinfo.slot);
                 let block_info = BlockInfo {
                     block_hash: blockinfo.blockhash.to_string(),
                     parent_hash: blockinfo.parent_blockhash.to_string(),
