@@ -51,12 +51,12 @@ impl State {
         self.last_confirmed_block
     }
     
-    pub fn get_account_changes(&self, slot: u64) -> &HashMap<String, Vec<u8>> {
-        self.block_account_changes.get(&slot).unwrap()
+    pub fn get_account_changes(&self, slot: u64) -> Option<&HashMap<String, Vec<u8>>> {
+        self.block_account_changes.get(&slot)
     }
 
-    pub fn get_block_info(&self, slot: u64) -> &BlockInfo {
-        self.block_infos.get(&slot).unwrap()    
+    pub fn get_block_info(&self, slot: u64) -> Option<&BlockInfo> {
+        self.block_infos.get(&slot)
     }
     
     pub fn set_block_info(&mut self, slot: u64, block_info: BlockInfo) {
