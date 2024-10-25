@@ -2,6 +2,9 @@ use agave_geyser_plugin_interface::geyser_plugin_interface::SlotStatus;
 use {
     crate::{
         state::State,
+        state::BlockInfo,
+        utils::{convert_sol_timestamp, create_account_block},
+        block_printer::BlockPrinter,
     },
     agave_geyser_plugin_interface::geyser_plugin_interface::{
         GeyserPlugin, ReplicaAccountInfoVersions, ReplicaBlockInfoVersions,
@@ -12,6 +15,10 @@ use {
     },
 };
 
+use crate::pb::sf::solana::r#type::v1::{AccountBlock, Account};
+use prost_types::{Any as ProtoAny};
+use prost::{Message as ProtoMessage};
+
 #[derive(Debug, Default)]
 pub struct Plugin {
     state: RwLock<State>,
@@ -19,6 +26,8 @@ pub struct Plugin {
 
 impl Plugin {
 }
+
+
 impl GeyserPlugin for Plugin {
     fn name(&self) -> &'static str {
         concat!(env!("CARGO_PKG_NAME"), "-", env!("CARGO_PKG_VERSION"))
@@ -35,8 +44,6 @@ impl GeyserPlugin for Plugin {
     }
 
     fn update_account(&self,account: ReplicaAccountInfoVersions, slot: u64, is_startup: bool) -> PluginResult<()> {
-        panic!("SOL ACCOUNTS PANICING");
-        
         match account {
             ReplicaAccountInfoVersions::V0_0_1(account) => {
                 let account_key = account.pubkey.to_vec();
@@ -73,13 +80,33 @@ impl GeyserPlugin for Plugin {
     }
 
     fn update_slot_status(&self,slot: u64, parent: Option<u64>, status: SlotStatus) -> PluginResult<()> {
-        if status == SlotStatus::Confirmed {
-            self.state.write().unwrap().set_last_confirmed_block(slot);
+        //TODO: Optimize Read/Write Lock
+        let mut lock_state = self.state.write().unwrap();
+
+        match status {
+            SlotStatus::Processed => {
+                lock_state.set_last_finalized_block(slot);
+            }
+            SlotStatus::Confirmed => {
+                let account_changes = lock_state.get_account_changes(slot);
+                let block_info = lock_state.get_block_info(slot);
+                //TODO : lib_bum should be computed using status::Processed...
+                // let lib_num = lock_state.get_last_finalized_block();
+
+                let acc_block = create_account_block(slot, slot - 200, account_changes, block_info);
+                let block_printer = BlockPrinter::new(&acc_block);
+
+                block_printer.print();
+
+                lock_state.set_last_confirmed_block(slot);
+                lock_state.stats();
+                lock_state.purge_confirmed_blocks(slot);
+            }
+            _ => {
+                panic!("Unsupported slot status");
+            }
         }
 
-        self.state.write().unwrap().stats();
-        self.state.write().unwrap().purge_confirmed_blocks(slot);
-        
         Ok(())
     }
 
@@ -92,6 +119,50 @@ impl GeyserPlugin for Plugin {
     }
 
     fn notify_block_metadata(&self, blockinfo: ReplicaBlockInfoVersions<'_>) -> PluginResult<()> {
+        match blockinfo {
+            ReplicaBlockInfoVersions::V0_0_1(blockinfo) => {
+                panic!("V0_0_1 not supported");
+            },
+            ReplicaBlockInfoVersions::V0_0_2(blockinfo) => {
+                let block_info = BlockInfo {
+                    block_hash: blockinfo.blockhash.to_string(),
+                    parent_hash: blockinfo.parent_blockhash.to_string(),
+                    parent_slot: blockinfo.parent_slot,
+                    slot: blockinfo.slot,
+                    timestamp: convert_sol_timestamp(blockinfo.block_time.unwrap())
+                };
+                
+                self.state.write().unwrap().set_block_info(blockinfo.slot, block_info)
+            },
+            ReplicaBlockInfoVersions::V0_0_3(blockinfo) => {
+                let block_info = BlockInfo {
+                    block_hash: blockinfo.blockhash.to_string(),
+                    parent_hash: blockinfo.parent_blockhash.to_string(),
+                    parent_slot: blockinfo.parent_slot,
+                    slot: blockinfo.slot,
+                    timestamp: convert_sol_timestamp(blockinfo.block_time.unwrap())
+                };
+                
+                self.state.write().unwrap().set_block_info(blockinfo.slot, block_info)
+            },
+            
+            ReplicaBlockInfoVersions::V0_0_4(blockinfo) => {
+                let block_info = BlockInfo {
+                    block_hash: blockinfo.blockhash.to_string(),
+                    parent_hash: blockinfo.parent_blockhash.to_string(),
+                    parent_slot: blockinfo.parent_slot,
+                    slot: blockinfo.slot,
+                    timestamp: convert_sol_timestamp(blockinfo.block_time.unwrap())
+                };
+
+                self.state.write().unwrap().set_block_info(blockinfo.slot, block_info)
+            },
+
+            _ => {
+                panic!("Unsupported block version");
+            }
+
+        }
         Ok(())
     }
 

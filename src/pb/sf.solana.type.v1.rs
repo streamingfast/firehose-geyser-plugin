@@ -5,20 +5,24 @@
 pub struct AccountBlock {
     #[prost(uint64, tag="1")]
     pub slot: u64,
-    #[prost(bytes="vec", tag="2")]
-    pub hash: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, tag="2")]
+    pub hash: ::prost::alloc::string::String,
     #[prost(uint64, tag="3")]
     pub parent_slot: u64,
-    #[prost(uint64, tag="4")]
-    pub parent_hash: u64,
-    #[prost(message, repeated, tag="5")]
+    #[prost(string, tag="4")]
+    pub parent_hash: ::prost::alloc::string::String,
+    #[prost(uint64, tag="5")]
+    pub lib: u64,
+    #[prost(message, optional, tag="6")]
+    pub timestamp: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, repeated, tag="7")]
     pub accounts: ::prost::alloc::vec::Vec<Account>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Account {
-    #[prost(bytes="vec", tag="1")]
-    pub address: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, tag="1")]
+    pub address: ::prost::alloc::string::String,
     #[prost(bytes="vec", tag="2")]
     pub data: ::prost::alloc::vec::Vec<u8>,
     #[prost(uint64, tag="3")]
