@@ -92,6 +92,7 @@ impl State {
             if block < slot {
                 continue;
             }
+            println!("purging block {}", block);
             self.block_account_changes.remove(&block);
             self.block_infos.remove(&block);
         }
