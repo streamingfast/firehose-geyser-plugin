@@ -115,7 +115,8 @@ impl GeyserPlugin for Plugin {
                 let acc_block = create_account_block(slot, slot - 200, account_changes, block_info.unwrap());
                 let block_printer = BlockPrinter::new(&acc_block);
 
-                block_printer.print();
+                _ = block_printer;
+                // block_printer.print();
 
                 lock_state.set_last_confirmed_block(slot);
                 lock_state.stats();
