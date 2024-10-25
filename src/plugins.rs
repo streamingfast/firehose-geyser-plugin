@@ -84,8 +84,8 @@ impl GeyserPlugin for Plugin {
 
         match status {
 
-            SlotStatus::Confirmed => {
-                println!("slot confirmed {}", slot);
+            SlotStatus::Processed => {
+                println!("slot processed {}", slot);
                 // TODO: 
                 // 1. fix so it doesn't roll over 0
                 // 2. fix logic so it can be unset (Option u64 in the set_last_finalized_block)
@@ -93,9 +93,10 @@ impl GeyserPlugin for Plugin {
             }
             SlotStatus::Rooted => {
                 println!("slot rooted {}", slot);
+                lock_state.set_last_finalized_block(slot);
             }
             SlotStatus::Confirmed => {
-                println!("slot processed {}", slot);
+                println!("slot confirmed {}", slot);
 
                 // FIXME: how to detect that we have no account changes but the slot is valid ?
                 // distinguish this from the "first slot update sent" which also doesn't contain any account changes
