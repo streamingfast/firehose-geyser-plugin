@@ -89,12 +89,12 @@ impl GeyserPlugin for Plugin {
                 // TODO: 
                 // 1. fix so it doesn't roll over 0
                 // 2. fix logic so it can be unset (Option u64 in the set_last_finalized_block)
-                lock_state.set_last_finalized_block(slot - 31);
+            //    lock_state.set_last_finalized_block(slot - 31);
             }
             SlotStatus::Rooted => {
                 println!("slot rooted {}", slot);
             }
-            SlotStatus::Processed => {
+            SlotStatus::Confirmed => {
                 println!("slot processed {}", slot);
 
                 // FIXME: how to detect that we have no account changes but the slot is valid ?
@@ -111,10 +111,8 @@ impl GeyserPlugin for Plugin {
                 // let lib_num = lock_state.get_last_finalized_block();
                 // fix logic so it can be unset (Option u64 in the set_last_finalized_block)
 
-                let acc_block = create_account_block(slot, slot - 200, account_changes, block_info.unwrap());
-                let block_printer = BlockPrinter::new(&acc_block);
-
-                _ = block_printer;
+//                let acc_block = create_account_block(slot, slot - 200, account_changes, block_info.unwrap());
+//                let block_printer = BlockPrinter::new(&acc_block);
                 // block_printer.print();
 
                 lock_state.set_last_confirmed_block(slot);
