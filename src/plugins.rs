@@ -43,7 +43,6 @@ impl GeyserPlugin for Plugin {
     }
 
     fn update_account(&self,account: ReplicaAccountInfoVersions, slot: u64, is_startup: bool) -> PluginResult<()> {
-        println!("account updated for slot {}", slot);
         match account {
             ReplicaAccountInfoVersions::V0_0_1(account) => {
                 let account_key = account.pubkey.to_vec();
