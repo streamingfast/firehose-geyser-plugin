@@ -97,21 +97,15 @@ impl GeyserPlugin for Plugin {
         let mut lock_state = self.state.write().unwrap();
 
         match status {
-
-            // we ignore the Processed state ?
             SlotStatus::Processed => {
-                println!("slot processed {}", slot);
-                // TODO: 
-                // 1. fix so it doesn't roll over 0
-                // 2. fix logic so it can be unset (Option u64 in the set_last_finalized_block)
-            //    lock_state.set_last_finalized_block(slot - 31);
+                // println!("slot processed {}", slot);
             }
             SlotStatus::Rooted => {
-                println!("slot rooted {}", slot);
+                // println!("slot rooted {}", slot);
                 lock_state.set_last_finalized_block(slot);
             }
             SlotStatus::Confirmed => {
-                println!("slot confirmed {}", slot);
+                // println!("slot confirmed {}", slot);
 
                 lock_state.set_last_confirmed_block(slot);
                 lock_state.stats();
@@ -123,21 +117,23 @@ impl GeyserPlugin for Plugin {
                     return Ok(());
                 }
                 let block_info = block_info.unwrap();
-
-                // FIXME: how to detect that we have no account changes but the slot is valid ?
-                // distinguish this from the "first slot update sent" which also doesn't contain any account changes
-                // what if we get "slot update", then another "slot update" to say that there was a fork or something ? is it possible ??
+                
                 let account_changes = lock_state.get_account_changes(slot);
-
-                println!("Would write the block here {} ({}) parent: {} ({})", slot, block_info.block_hash, block_info.parent_slot, block_info.parent_hash);
-                //TODO : lib_bum should be computed using status::Processed...
-                // let lib_num = lock_state.get_last_finalized_block();
-                // fix logic so it can be unset (Option u64 in the set_last_finalized_block)
-
-                 let acc_block = create_account_block(slot, slot - 200, account_changes.unwrap_or(&AccountChanges::default()), block_info);
-                 let block_printer = BlockPrinter::new(&acc_block);
-                 _ = block_printer;
-                // block_printer.print();
+                
+                let lib_num = match lock_state.get_last_finalized_block() {
+                    None => {
+                        if slot < 200 {
+                            0 
+                        } else {
+                            slot - 200
+                        }
+                    }
+                    Some(last_finalized_block) => last_finalized_block,
+                };
+                
+                let acc_block = create_account_block(slot, lib_num, account_changes.unwrap_or(&AccountChanges::default()), block_info);
+                let block_printer = BlockPrinter::new(&acc_block);
+                block_printer.print();
 
             }
             _ => {

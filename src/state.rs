@@ -18,7 +18,7 @@ pub struct BlockInfo {
 #[derive(Debug, Default)]
 pub struct State {
     last_confirmed_block: u64,
-    last_finalized_block: u64,
+    last_finalized_block: Option<u64>,
     last_purged_block: u64,
     block_account_changes: BlockAccountChanges,
     block_infos: BlockInfoMap,
@@ -31,24 +31,20 @@ impl State {
             last_purged_block: 0,
             block_account_changes: HashMap::new(),
             block_infos: HashMap::new(),
-            last_finalized_block: 0,
+            last_finalized_block: None,
         }
     }
 
     pub fn set_last_confirmed_block(&mut self, slot: u64) {
-        // info!(
-        //     "setting last confirmed block - new_confirm_block: {}, last_confirm_block: {}",
-        //     block_num, self.last_confirmed_block
-        // );
         self.last_confirmed_block = slot;
     }
 
     pub fn set_last_finalized_block(&mut self, slot: u64) {
-        self.last_finalized_block = slot;
+        self.last_finalized_block = Some(slot);
     }
     
-    pub fn get_last_finalized_block(&self) -> u64 {
-        self.last_confirmed_block
+    pub fn get_last_finalized_block(&self) -> Option<u64> {
+        self.last_finalized_block
     }
     
     pub fn get_account_changes(&self, slot: u64) -> Option<&HashMap<String, Vec<u8>>> {
@@ -64,15 +60,9 @@ impl State {
     }
 
     pub fn set_account_data(&mut self, slot: u64, account: Vec<u8>, data: Vec<u8>) {
-        if slot <= self.last_confirmed_block && self.last_confirmed_block != 0 {
-            // info!(
-            //     "received account data for a skipped block - skipped_block_num: {}, last_confirmed_block: {}",
-            //     block_num, self.last_confirmed_block
-            // );
-        }
-        if !self.block_account_changes.contains_key(&slot) {
-            println!("sending updates for slot {}", slot);
-        }
+        // if !self.block_account_changes.contains_key(&slot) {
+            // println!("sending updates for slot {}", slot);
+        // }
 
         self.block_account_changes
             .entry(slot)
@@ -82,17 +72,12 @@ impl State {
     }
 
     pub fn purge_blocks_below(&mut self, slot: u64) {
-        // info!(
-        //     "purging confirmed blocks - purge_block: {}, previous_purged_block: {}",
-        //     block_num, self.last_purged_block
-        // );
-
         let blocks: Vec<u64> = self.block_account_changes.keys().cloned().collect();
         for block in blocks {
             if block >= slot {
                 continue;
             }
-            println!("purging block {}", block);
+            // println!("purging block {}", block);
             self.block_account_changes.remove(&block);
             self.block_infos.remove(&block);
         }
