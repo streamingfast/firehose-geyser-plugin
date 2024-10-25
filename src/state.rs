@@ -78,6 +78,8 @@ impl State {
             .entry(slot)
             .or_insert_with(HashMap::new)
             .insert(base58::ToBase58::to_base58(account.as_slice()), data);
+
+        println!("account data for slot {} added, length {}", slot, self.block_account_changes.get(&slot).unwrap().len());
     }
 
     pub fn purge_confirmed_blocks(&mut self, slot: u64) {
