@@ -89,7 +89,7 @@ impl State {
 
         let blocks: Vec<u64> = self.block_account_changes.keys().cloned().collect();
         for block in blocks {
-            if block < slot {
+            if block >= slot {
                 continue;
             }
             println!("purging block {}", block);
