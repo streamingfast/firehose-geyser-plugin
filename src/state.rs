@@ -70,6 +70,9 @@ impl State {
             //     block_num, self.last_confirmed_block
             // );
         }
+        if self.block_account_changes.contains_key(&slot) {
+            println!("sending updates for slot {}", slot);
+        }
 
         self.block_account_changes
             .entry(slot)
