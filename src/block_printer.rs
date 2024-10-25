@@ -24,7 +24,7 @@ impl <'a> BlockPrinter <'a>{
             parent_slot=b.parent_slot,
             parent_hash=b.parent_hash,
             lib=b.lib,
-            timestamp_nano=b.timestamp.as_ref().unwrap().nanos.to_string(),
+            timestamp_nano=b.timestamp.as_ref().unwrap().seconds * 1_000_000_000,
             payload= base64_encoded_block
         );
 

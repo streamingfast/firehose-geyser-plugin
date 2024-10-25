@@ -154,7 +154,7 @@ impl GeyserPlugin for Plugin {
 
     fn notify_block_metadata(&self, blockinfo: ReplicaBlockInfoVersions<'_>) -> PluginResult<()> {
         match blockinfo {
-            ReplicaBlockInfoVersions::V0_0_1(blockinfo) => {
+            ReplicaBlockInfoVersions::V0_0_1(_) => {
                 panic!("V0_0_1 not supported");
             },
             ReplicaBlockInfoVersions::V0_0_2(blockinfo) => {
