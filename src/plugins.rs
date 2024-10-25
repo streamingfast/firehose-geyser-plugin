@@ -3,6 +3,7 @@ use {
     crate::{
         state::State,
         state::BlockInfo,
+        state::AccountChanges,
         utils::{convert_sol_timestamp, create_account_block},
         block_printer::BlockPrinter,
     },
@@ -77,6 +78,19 @@ impl GeyserPlugin for Plugin {
     fn notify_end_of_startup(&self) -> PluginResult<()> {
         Ok(())
     }
+    /* 
+        Order of stuff received
+    
+    1. We receive a bunch of account changes (ex: 203, 204, 205, 206, 207, 208...)
+    2. We then receive a bunch of slot updates Confirmed: (ex: 205, 206, 207)
+    -- Since we don't have the blockmeta for ALL those blocks, we ignore them for now (TODO: fetch using RPC...)
+    3. We then receive a first blockmetadata for a block (ex: 208)
+    4. Followed by a Slot:Processed (208)
+    5. We may receive a few account changes between this step and the next one, ex: 209, 210, 211...
+    6. Followed by a Slot:Confirmed (208)
+    Then the steps 3-6 repeat, with some "slot:Rooted" sprinkled...
+    
+     */
 
     fn update_slot_status(&self,slot: u64, parent: Option<u64>, status: SlotStatus) -> PluginResult<()> {
         //TODO: Optimize Read/Write Lock
@@ -84,6 +98,7 @@ impl GeyserPlugin for Plugin {
 
         match status {
 
+            // we ignore the Processed state ?
             SlotStatus::Processed => {
                 println!("slot processed {}", slot);
                 // TODO: 
@@ -98,27 +113,32 @@ impl GeyserPlugin for Plugin {
             SlotStatus::Confirmed => {
                 println!("slot confirmed {}", slot);
 
+                lock_state.set_last_confirmed_block(slot);
+                lock_state.stats();
+                lock_state.purge_blocks_below(slot);
+
+                let block_info = lock_state.get_block_info(slot);
+                if block_info.is_none() {
+                    println!("No block info for slot {}, ignoring", slot);
+                    return Ok(());
+                }
+                let block_info = block_info.unwrap();
+
                 // FIXME: how to detect that we have no account changes but the slot is valid ?
                 // distinguish this from the "first slot update sent" which also doesn't contain any account changes
                 // what if we get "slot update", then another "slot update" to say that there was a fork or something ? is it possible ??
                 let account_changes = lock_state.get_account_changes(slot);
-                if account_changes.is_none() {
-                    println!("No account changes for slot {}", slot);
-                    return Ok(());
-                }
-                let account_changes = account_changes.unwrap();
-                let block_info = lock_state.get_block_info(slot);
+
+                println!("Would write the block here {} ({}) parent: {} ({})", slot, block_info.block_hash, block_info.parent_slot, block_info.parent_hash);
                 //TODO : lib_bum should be computed using status::Processed...
                 // let lib_num = lock_state.get_last_finalized_block();
                 // fix logic so it can be unset (Option u64 in the set_last_finalized_block)
 
-//                let acc_block = create_account_block(slot, slot - 200, account_changes, block_info.unwrap());
-//                let block_printer = BlockPrinter::new(&acc_block);
+                 let acc_block = create_account_block(slot, slot - 200, account_changes.unwrap_or(&AccountChanges::default()), block_info);
+                 let block_printer = BlockPrinter::new(&acc_block);
+                 _ = block_printer;
                 // block_printer.print();
 
-                lock_state.set_last_confirmed_block(slot);
-                lock_state.stats();
-                lock_state.purge_confirmed_blocks(slot);
             }
             _ => {
                 panic!("Unsupported slot status");

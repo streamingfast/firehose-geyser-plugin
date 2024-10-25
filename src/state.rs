@@ -79,23 +79,21 @@ impl State {
             .or_insert_with(HashMap::new)
             .insert(base58::ToBase58::to_base58(account.as_slice()), data);
 
-        println!("account data for slot {} added, length {}", slot, self.block_account_changes.get(&slot).unwrap().len());
     }
 
-    pub fn purge_confirmed_blocks(&mut self, slot: u64) {
+    pub fn purge_blocks_below(&mut self, slot: u64) {
         // info!(
         //     "purging confirmed blocks - purge_block: {}, previous_purged_block: {}",
         //     block_num, self.last_purged_block
         // );
 
-
         let blocks: Vec<u64> = self.block_account_changes.keys().cloned().collect();
         for block in blocks {
+            if block < slot {
+                continue;
+            }
             self.block_account_changes.remove(&block);
             self.block_infos.remove(&block);
-            if self.last_confirmed_block > 0 {
-                self.last_confirmed_block -= 1;
-            }
         }
         self.last_purged_block = slot;
     }
