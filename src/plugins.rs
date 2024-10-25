@@ -35,7 +35,7 @@ impl GeyserPlugin for Plugin {
     }
 
     fn on_load(&mut self, config_file: &str, is_reload: bool) -> PluginResult<()> {
-        println!("ON_LOADING WITH SOL ACCOUNTS PLUGIN");
+        println!("FIRE INIT 3.0 sf.solana.type.v1.AccountBlock");
         self.state = RwLock::new(State::new());
         Ok(())
     }
@@ -117,20 +117,20 @@ impl GeyserPlugin for Plugin {
                     return Ok(());
                 }
                 let block_info = block_info.unwrap();
-                
+
                 let account_changes = lock_state.get_account_changes(slot);
-                
+
                 let lib_num = match lock_state.get_last_finalized_block() {
                     None => {
                         if slot < 200 {
-                            0 
+                            0
                         } else {
                             slot - 200
                         }
                     }
                     Some(last_finalized_block) => last_finalized_block,
                 };
-                
+
                 let acc_block = create_account_block(slot, lib_num, account_changes.unwrap_or(&AccountChanges::default()), block_info);
                 let block_printer = BlockPrinter::new(&acc_block);
                 block_printer.print();
