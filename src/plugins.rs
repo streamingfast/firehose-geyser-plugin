@@ -165,6 +165,7 @@ impl GeyserPlugin for Plugin {
                     slot: blockinfo.slot,
                     timestamp: convert_sol_timestamp(blockinfo.block_time.unwrap())
                 };
+                slot = blockinfo.slot;
                 
                 self.state.write().unwrap().set_block_info(blockinfo.slot, block_info);
             },
@@ -176,6 +177,7 @@ impl GeyserPlugin for Plugin {
                     slot: blockinfo.slot,
                     timestamp: convert_sol_timestamp(blockinfo.block_time.unwrap())
                 };
+                slot = blockinfo.slot;
                 
                 self.state.write().unwrap().set_block_info(blockinfo.slot, block_info);
             },
@@ -188,6 +190,7 @@ impl GeyserPlugin for Plugin {
                     slot: blockinfo.slot,
                     timestamp: convert_sol_timestamp(blockinfo.block_time.unwrap())
                 };
+                slot = blockinfo.slot;
 
                 self.state.write().unwrap().set_block_info(blockinfo.slot, block_info);
             },
