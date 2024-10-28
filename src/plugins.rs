@@ -45,6 +45,7 @@ impl GeyserPlugin for Plugin {
     }
 
     fn update_account(&self,account: ReplicaAccountInfoVersions, slot: u64, is_startup: bool) -> PluginResult<()> {
+
         match account {
             ReplicaAccountInfoVersions::V0_0_1(account) => {
                 let account_key = account.pubkey.to_vec();
@@ -77,6 +78,14 @@ impl GeyserPlugin for Plugin {
     }
 
     fn notify_end_of_startup(&self) -> PluginResult<()> {
+        println!("end of startup");
+        println!("end of startup");
+        println!("end of startup");
+        println!("end of startup");
+        println!("end of startup");
+        println!("end of startup");
+        println!("end of startup");
+        println!("end of startup");
         Ok(())
     }
     /* 
