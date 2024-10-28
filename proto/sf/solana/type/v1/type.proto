@@ -16,7 +16,10 @@ message AccountBlock {
 }
 
 message Account {
-  string address = 1;
-  bytes data = 2;
-  uint64 source_slot = 3;
+  bytes address = 1;
+  bytes owner = 2;
+  bytes data = 3;
+  uint64 source_slot = 4;
+  uint64 rent_epoch = 5;
+  uint64 write_version = 6;
 }

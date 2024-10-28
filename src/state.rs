@@ -4,9 +4,11 @@ use solana_rpc_client::rpc_client::RpcClient;
 use solana_sdk::commitment_config::CommitmentConfig;
 use std::collections::HashMap;
 use std::{thread::sleep, time::Duration};
+use pb::sf::solana::r#type::v1::Account;
+use crate::pb;
 
-type BlockAccountChanges = HashMap<u64, HashMap<String, Vec<u8>>>;
-pub type AccountChanges = HashMap<String, Vec<u8>>;
+type BlockAccountChanges = HashMap<u64, AccountChanges>;
+pub type AccountChanges = HashMap<Vec<u8>, Account>;
 type BlockInfoMap = HashMap<u64, BlockInfo>;
 type ConfirmedSlotsMap = HashMap<u64, bool>;
 
@@ -84,7 +86,7 @@ impl State {
         }
     }
 
-    pub fn get_account_changes(&self, slot: u64) -> Option<&HashMap<String, Vec<u8>>> {
+    pub fn get_account_changes(&self, slot: u64) -> Option<&AccountChanges> {
         self.block_account_changes.get(&slot)
     }
 
@@ -105,7 +107,7 @@ impl State {
         self.confirmed_slots.insert(slot, true);
     }
 
-    pub fn set_account_data(&mut self, slot: u64, account: Vec<u8>, data: Vec<u8>) {
+    pub fn set_account(&mut self, slot: u64, pub_key: Vec<u8>, account: Account) {
         if !self.block_account_changes.contains_key(&slot) {
             println!("account data for slot {}", slot);
         }
@@ -113,7 +115,7 @@ impl State {
         self.block_account_changes
             .entry(slot)
             .or_insert_with(HashMap::new)
-            .insert(base58::ToBase58::to_base58(account.as_slice()), data);
+            .insert(pub_key, account);
     }
 
     pub fn purge_blocks_up_to(&mut self, slot: u64) {

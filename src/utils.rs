@@ -1,9 +1,7 @@
 use crate::pb::sf::solana::r#type::v1::{Account, AccountBlock};
 use crate::state::{AccountChanges, BlockInfo};
-use prost::Message;
 use prost_types::Timestamp as ProstTimestamp;
 use solana_program::clock::UnixTimestamp;
-use std::collections::HashMap;
 
 pub fn convert_sol_timestamp(sol_timestamp: UnixTimestamp) -> ProstTimestamp {
     let seconds = sol_timestamp as i64;
@@ -18,11 +16,7 @@ pub fn create_account_block(
 ) -> AccountBlock {
     let accounts = account_changes
         .into_iter()
-        .map(|(account_key, account_data)| Account {
-            source_slot: slot,
-            data: account_data.clone(),
-            address: account_key.into(),
-        })
+        .map(|(account_key, account)| account.clone())
         .collect();
 
     AccountBlock {

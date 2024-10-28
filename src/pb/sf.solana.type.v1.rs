@@ -21,11 +21,17 @@ pub struct AccountBlock {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Account {
-    #[prost(string, tag="1")]
-    pub address: ::prost::alloc::string::String,
+    #[prost(bytes="vec", tag="1")]
+    pub address: ::prost::alloc::vec::Vec<u8>,
     #[prost(bytes="vec", tag="2")]
+    pub owner: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes="vec", tag="3")]
     pub data: ::prost::alloc::vec::Vec<u8>,
-    #[prost(uint64, tag="3")]
+    #[prost(uint64, tag="4")]
     pub source_slot: u64,
+    #[prost(uint64, tag="5")]
+    pub rent_epoch: u64,
+    #[prost(uint64, tag="6")]
+    pub write_version: u64,
 }
 // @@protoc_insertion_point(module)

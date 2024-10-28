@@ -15,8 +15,10 @@ use {
     std::{concat, env, sync::RwLock},
 };
 
+use pb::sf::solana::r#type::v1::Account;
 use solana_rpc_client::rpc_client::RpcClient;
 use std::fmt;
+use crate::pb;
 
 #[derive(Default)]
 pub struct Plugin {
@@ -59,32 +61,53 @@ impl GeyserPlugin for Plugin {
         match account {
             ReplicaAccountInfoVersions::V0_0_1(account) => {
                 let account_key = account.pubkey.to_vec();
-                let account_data = account.data.to_vec();
+                let account = Account {
+                    address: account.pubkey.to_vec(),
+                    data: account.data.to_vec(),
+                    owner: account.owner.to_vec(),
+                    write_version: account.write_version,
+                    source_slot: slot, 
+                    rent_epoch: account.rent_epoch
+                };
 
                 self.state
                     .write()
                     .unwrap()
-                    .set_account_data(slot, account_key, account_data);
+                    .set_account(slot, account_key, account);
             }
 
             ReplicaAccountInfoVersions::V0_0_2(account) => {
                 let account_key = account.pubkey.to_vec();
-                let account_data = account.data.to_vec();
+                let account = Account {
+                    address: account.pubkey.to_vec(),
+                    data: account.data.to_vec(),
+                    owner: account.owner.to_vec(),
+                    write_version: account.write_version,
+                    source_slot: slot,
+                    rent_epoch: account.rent_epoch
+                };
 
                 self.state
                     .write()
                     .unwrap()
-                    .set_account_data(slot, account_key, account_data);
+                    .set_account(slot, account_key, account);
             }
 
             ReplicaAccountInfoVersions::V0_0_3(account) => {
                 let account_key = account.pubkey.to_vec();
-                let account_data = account.data.to_vec();
+                let account = Account {
+                    address: account.pubkey.to_vec(),
+                    data: account.data.to_vec(),
+                    owner: account.owner.to_vec(),
+                    write_version: account.write_version,
+                    source_slot: slot,
+                    rent_epoch: account.rent_epoch
+                };
 
                 self.state
                     .write()
                     .unwrap()
-                    .set_account_data(slot, account_key, account_data);
+                    .set_account(slot, account_key, account);
             }
 
             _ => {
