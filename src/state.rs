@@ -6,11 +6,14 @@ use std::collections::HashMap;
 use std::{thread::sleep, time::Duration};
 use pb::sf::solana::r#type::v1::Account;
 use crate::pb;
+use crate::utils::convert_sol_timestamp;
 
 type BlockAccountChanges = HashMap<u64, AccountChanges>;
 pub type AccountChanges = HashMap<Vec<u8>, Account>;
 type BlockInfoMap = HashMap<u64, BlockInfo>;
 type ConfirmedSlotsMap = HashMap<u64, bool>;
+use solana_rpc_client_api::config::RpcBlockConfig;
+use solana_transaction_status::TransactionDetails;
 
 pub struct BlockInfo {
     pub slot: u64,
@@ -50,15 +53,15 @@ impl State {
         self.first_blockmeta_received
     }
 
-    pub fn set_last_confirmed_block(&mut self, slot: u64) {
-        self.last_confirmed_block = slot;
-    }
-
     pub fn set_last_finalized_block(&mut self, slot: u64) {
         self.last_finalized_block = Some(slot);
     }
 
-    pub fn get_last_finalized_block(&self) -> u64 {
+    pub fn is_already_purged(&mut self, slot: u64) -> bool {
+        return self.last_purged_block >= slot;
+    }
+
+    pub fn get_last_finalized_block(&mut self) -> u64 {
         match self.last_finalized_block {
             None => {
                 let commitment_config = CommitmentConfig::finalized();
@@ -71,7 +74,8 @@ impl State {
                         .get_slot_with_commitment(commitment_config)
                     {
                         Ok(lib_num) => {
-                            println!("Block num received: {}", lib_num);
+                            println!("Block lib received: {}", lib_num);
+                            self.last_finalized_block = Some(lib_num);
                             break lib_num;
                         }
                         Err(e) => {
@@ -94,6 +98,26 @@ impl State {
         self.block_infos.get(&slot)
     }
 
+    pub fn get_block_from_rpc(&self, slot: u64) -> BlockInfo {
+            let config = RpcBlockConfig {
+                encoding: None,
+                transaction_details: Some(TransactionDetails::None),
+                rewards: Some(false),
+                commitment: None,
+                max_supported_transaction_version: Some(0),
+            };
+
+            let block = self.rpc_client.as_ref().unwrap().get_block_with_config(slot, config).unwrap();
+            println!("Block Info fetched for slot {}", slot);
+            BlockInfo {
+                    timestamp: convert_sol_timestamp(block.block_time.unwrap()),
+                    parent_slot: block.parent_slot.clone(),
+                    slot: slot,
+                    block_hash: block.blockhash.clone(),
+                    parent_hash: block.previous_blockhash.clone(),
+            }
+    }
+
     pub fn set_block_info(&mut self, slot: u64, block_info: BlockInfo) {
         self.first_blockmeta_received = true;
         self.block_infos.insert(slot, block_info);
@@ -103,8 +127,16 @@ impl State {
         self.confirmed_slots.contains_key(&slot)
     }
 
+    pub fn ordered_confirmed_slots_below(&self, slot: u64) -> Vec<u64> {
+        // Collect all keys from confirmed_slots that are less than the given slot
+        let mut slots: Vec<u64> = self.confirmed_slots.keys().cloned().filter(|&x| x < slot).collect();
+        slots.sort();
+        slots
+    }
+
     pub fn set_confirmed_slot(&mut self, slot: u64) {
         self.confirmed_slots.insert(slot, true);
+        self.last_confirmed_block = slot;
     }
 
     pub fn set_account(&mut self, slot: u64, pub_key: Vec<u8>, account: Account) {
