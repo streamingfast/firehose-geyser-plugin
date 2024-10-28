@@ -45,7 +45,6 @@ impl GeyserPlugin for Plugin {
     }
 
     fn update_account(&self,account: ReplicaAccountInfoVersions, slot: u64, is_startup: bool) -> PluginResult<()> {
-
         match account {
             ReplicaAccountInfoVersions::V0_0_1(account) => {
                 let account_key = account.pubkey.to_vec();
@@ -73,18 +72,19 @@ impl GeyserPlugin for Plugin {
             },
 
         }
+        let mut lock_state = self.state.write().unwrap();
+
+        // if we have no blockmeta received ever, we truncate our list to the last x blocks
+        if !lock_state.get_first_blockmeta_received() {
+            if slot > 50 {
+                lock_state.purge_blocks_up_to(slot- 50);
+            }
+        }
 
         Ok(())
     }
 
     fn notify_end_of_startup(&self) -> PluginResult<()> {
-        println!("end of startup");
-        println!("end of startup");
-        println!("end of startup");
-        println!("end of startup");
-        println!("end of startup");
-        println!("end of startup");
-        println!("end of startup");
         println!("end of startup");
         Ok(())
     }
@@ -128,9 +128,7 @@ impl GeyserPlugin for Plugin {
                     Some(block_info) => block_info
                 };
 
-
                 let account_changes = lock_state.get_account_changes(slot);
-
                 let acc_block = create_account_block(slot, lock_state.get_last_finalized_block(slot), account_changes.unwrap_or(&AccountChanges::default()), block_info);
                 BlockPrinter::new(&acc_block).print();
 
@@ -167,9 +165,8 @@ impl GeyserPlugin for Plugin {
                     slot: blockinfo.slot,
                     timestamp: convert_sol_timestamp(blockinfo.block_time.unwrap())
                 };
-                slot = blockinfo.slot;
                 
-                self.state.write().unwrap().set_block_info(blockinfo.slot, block_info)
+                self.state.write().unwrap().set_block_info(blockinfo.slot, block_info);
             },
             ReplicaBlockInfoVersions::V0_0_3(blockinfo) => {
                 let block_info = BlockInfo {
@@ -179,9 +176,8 @@ impl GeyserPlugin for Plugin {
                     slot: blockinfo.slot,
                     timestamp: convert_sol_timestamp(blockinfo.block_time.unwrap())
                 };
-                slot = blockinfo.slot;
                 
-                self.state.write().unwrap().set_block_info(blockinfo.slot, block_info)
+                self.state.write().unwrap().set_block_info(blockinfo.slot, block_info);
             },
             
             ReplicaBlockInfoVersions::V0_0_4(blockinfo) => {
@@ -192,35 +188,24 @@ impl GeyserPlugin for Plugin {
                     slot: blockinfo.slot,
                     timestamp: convert_sol_timestamp(blockinfo.block_time.unwrap())
                 };
-                slot = blockinfo.slot;
 
-                self.state.write().unwrap().set_block_info(blockinfo.slot, block_info)
+                self.state.write().unwrap().set_block_info(blockinfo.slot, block_info);
             },
 
             _ => {
                 panic!("Unsupported block version");
             }
-
         }
 
-        println!("blockmeta {}", slot);
-
-        // backprocess slots that were already confirmed up to this block
         let mut lock_state = self.state.write().unwrap();
-        for toproc in lock_state.ordered_confirmed_slots_up_to(slot) {
-            let block_info = match lock_state.get_block_info(toproc) {
-                None => {
-                    println!("No block info for slot {} after processing {}", toproc, slot);
-                    continue;
-                }
-                Some(block_info) => block_info
-            };
+        let block_info = lock_state.get_block_info(slot).unwrap();
+        println!("blockmeta {}", block_info.slot);
 
+        if lock_state.is_confirmed_slot(slot) {
             let account_changes = lock_state.get_account_changes(slot);
-
-            let acc_block = create_account_block(slot, lock_state.get_last_finalized_block(slot), account_changes.unwrap_or(&AccountChanges::default()), block_info);
+            let acc_block = create_account_block(slot, lock_state.get_last_finalized_block(slot), account_changes.unwrap_or(&AccountChanges::default()), &block_info);
             BlockPrinter::new(&acc_block).print();
-            lock_state.purge_blocks_up_to(toproc);
+            lock_state.purge_blocks_up_to(slot);
         }
         Ok(())
     }

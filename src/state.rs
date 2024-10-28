@@ -18,6 +18,7 @@ pub struct BlockInfo {
 
 #[derive(Debug, Default)]
 pub struct State {
+    first_blockmeta_received: bool,
     last_confirmed_block: u64,
     last_finalized_block: Option<u64>,
     last_purged_block: u64,
@@ -29,6 +30,7 @@ pub struct State {
 impl State {
     pub fn new() -> Self {
         State {
+            first_blockmeta_received: false,
             last_confirmed_block: 0,
             last_purged_block: 0,
             block_account_changes: HashMap::new(),
@@ -36,6 +38,10 @@ impl State {
             last_finalized_block: None,
             confirmed_slots: HashMap::new(),
         }
+    }
+
+    pub fn get_first_blockmeta_received(&self) -> bool {
+        self.first_blockmeta_received
     }
 
     pub fn set_last_confirmed_block(&mut self, slot: u64) {
@@ -69,16 +75,14 @@ impl State {
     }
     
     pub fn set_block_info(&mut self, slot: u64, block_info: BlockInfo) {
+        self.first_blockmeta_received = true;
         self.block_infos.insert(slot, block_info);
     }
 
-    pub fn ordered_confirmed_slots_up_to(&self, slot: u64) -> Vec<u64> {
-        // Collect all keys from confirmed_slots that are less than or equal to the given slot
-        let mut slots: Vec<u64> = self.confirmed_slots.keys().cloned().filter(|&x| x <= slot).collect();
-        slots.sort();
-        slots
+    pub fn is_confirmed_slot(&self, slot: u64) -> bool {
+        self.confirmed_slots.contains_key(&slot)
     }
-    
+
     pub fn set_confirmed_slot(&mut self, slot: u64) {
         self.confirmed_slots.insert(slot, true);
     }
