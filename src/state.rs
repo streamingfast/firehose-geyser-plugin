@@ -1,22 +1,24 @@
-use std::collections::HashMap;
 use base58;
 use prost_types::Timestamp;
+use solana_rpc_client::rpc_client::RpcClient;
+use solana_sdk::commitment_config::CommitmentConfig;
+use std::collections::HashMap;
+use std::{thread::sleep, time::Duration};
 
 type BlockAccountChanges = HashMap<u64, HashMap<String, Vec<u8>>>;
 pub type AccountChanges = HashMap<String, Vec<u8>>;
 type BlockInfoMap = HashMap<u64, BlockInfo>;
 type ConfirmedSlotsMap = HashMap<u64, bool>;
 
-#[derive(Debug)]
 pub struct BlockInfo {
     pub slot: u64,
     pub parent_slot: u64,
     pub block_hash: String,
     pub parent_hash: String,
-    pub timestamp: Timestamp
+    pub timestamp: Timestamp,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct State {
     first_blockmeta_received: bool,
     last_confirmed_block: u64,
@@ -25,10 +27,11 @@ pub struct State {
     block_account_changes: BlockAccountChanges,
     block_infos: BlockInfoMap,
     confirmed_slots: ConfirmedSlotsMap,
+    rpc_client: Option<RpcClient>,
 }
 
 impl State {
-    pub fn new() -> Self {
+    pub fn new(rpc_client: RpcClient) -> Self {
         State {
             first_blockmeta_received: false,
             last_confirmed_block: 0,
@@ -37,6 +40,7 @@ impl State {
             block_infos: HashMap::new(),
             last_finalized_block: None,
             confirmed_slots: HashMap::new(),
+            rpc_client: Some(rpc_client),
         }
     }
 
@@ -51,21 +55,35 @@ impl State {
     pub fn set_last_finalized_block(&mut self, slot: u64) {
         self.last_finalized_block = Some(slot);
     }
-    
-    pub fn get_last_finalized_block(&self, slot: u64) -> u64 {
-        match self.last_finalized_block{
-            // FIXME this will break sometimes with holes
+
+    pub fn get_last_finalized_block(&self) -> u64 {
+        match self.last_finalized_block {
             None => {
-                if slot < 32 {
-                    0
-                } else {
-                    slot - 32
+                let commitment_config = CommitmentConfig::finalized();
+                loop {
+                    println!("Fetch current lib using rpc client");
+                    match self
+                        .rpc_client
+                        .as_ref()
+                        .unwrap()
+                        .get_slot_with_commitment(commitment_config)
+                    {
+                        Ok(lib_num) => {
+                            println!("Block num received: {}", lib_num);
+                            break lib_num;
+                        }
+                        Err(e) => {
+                            println!("Error getting lib num: {}", e);
+                            sleep(Duration::from_millis(50));
+                            break 0;
+                        }
+                    }
                 }
             }
-                Some(last_finalized_block) => last_finalized_block,
-            }
+            Some(slot) => slot,
+        }
     }
-    
+
     pub fn get_account_changes(&self, slot: u64) -> Option<&HashMap<String, Vec<u8>>> {
         self.block_account_changes.get(&slot)
     }
@@ -73,7 +91,7 @@ impl State {
     pub fn get_block_info(&self, slot: u64) -> Option<&BlockInfo> {
         self.block_infos.get(&slot)
     }
-    
+
     pub fn set_block_info(&mut self, slot: u64, block_info: BlockInfo) {
         self.first_blockmeta_received = true;
         self.block_infos.insert(slot, block_info);
@@ -89,14 +107,13 @@ impl State {
 
     pub fn set_account_data(&mut self, slot: u64, account: Vec<u8>, data: Vec<u8>) {
         if !self.block_account_changes.contains_key(&slot) {
-          println!("account data for slot {}", slot);
+            println!("account data for slot {}", slot);
         }
 
         self.block_account_changes
             .entry(slot)
             .or_insert_with(HashMap::new)
             .insert(base58::ToBase58::to_base58(account.as_slice()), data);
-
     }
 
     pub fn purge_blocks_up_to(&mut self, slot: u64) {
@@ -120,7 +137,9 @@ impl State {
     pub fn stats(&mut self) {
         println!(
             "last_confirmed_block: {}, last_purged_block: {}, block_account_changes: {}",
-            self.last_confirmed_block, self.last_purged_block, self.block_account_changes.len()
+            self.last_confirmed_block,
+            self.last_purged_block,
+            self.block_account_changes.len()
         )
     }
 }
