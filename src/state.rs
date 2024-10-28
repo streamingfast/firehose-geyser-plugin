@@ -84,9 +84,9 @@ impl State {
     }
 
     pub fn set_account_data(&mut self, slot: u64, account: Vec<u8>, data: Vec<u8>) {
-        // if !self.block_account_changes.contains_key(&slot) {
-            // println!("sending updates for slot {}", slot);
-        // }
+        if !self.block_account_changes.contains_key(&slot) {
+          println!("account data for slot {}", slot);
+        }
 
         self.block_account_changes
             .entry(slot)

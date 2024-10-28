@@ -35,6 +35,7 @@ impl GeyserPlugin for Plugin {
     }
 
     fn on_load(&mut self, config_file: &str, is_reload: bool) -> PluginResult<()> {
+        println!("on load");
         println!("FIRE INIT 3.0 sf.solana.type.v1.AccountBlock");
         self.state = RwLock::new(State::new());
         Ok(())
@@ -98,14 +99,14 @@ impl GeyserPlugin for Plugin {
 
         match status {
             SlotStatus::Processed => {
-                // println!("slot processed {}", slot);
+                println!("slot processed {}", slot);
             }
             SlotStatus::Rooted => {
-                // println!("slot rooted {}", slot);
+                println!("slot rooted {}", slot);
                 lock_state.set_last_finalized_block(slot);
             }
             SlotStatus::Confirmed => {
-                // println!("slot confirmed {}", slot);
+                println!("slot confirmed {}", slot);
 
                 lock_state.set_last_confirmed_block(slot);
 
@@ -192,6 +193,8 @@ impl GeyserPlugin for Plugin {
             }
 
         }
+
+        println!("blockmeta {}", slot);
 
         // backprocess slots that were already confirmed up to this block
         let mut lock_state = self.state.write().unwrap();
