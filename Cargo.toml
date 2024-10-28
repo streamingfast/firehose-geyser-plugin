@@ -22,6 +22,13 @@ vergen = "9.0.0"
 prost = "0.11.9"
 solana-program = "1.17.7"
 base64 = "0.12.3"
+solana-rpc-client = "2.0.14"
+solana-rpc-client-api = "2.0.14"
+solana-transaction-status = "2.0.14"
+serde_json = "1.0.132"
+serde = { version = "1.0.213", features = ["derive"] }
+solana-sdk = "2.0.14"
+sleep = "1.0.2"
 
 [profile.release]
 lto = true
