@@ -15,8 +15,8 @@ pub struct AccountBlock {
     pub lib: u64,
     #[prost(message, optional, tag="6")]
     pub timestamp: ::core::option::Option<::prost_types::Timestamp>,
-    #[prost(message, optional, tag="7")]
-    pub accounts: ::core::option::Option<Accounts>,
+    #[prost(message, repeated, tag="7")]
+    pub accounts: ::prost::alloc::vec::Vec<Account>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -33,11 +33,5 @@ pub struct Account {
     pub rent_epoch: u64,
     #[prost(uint64, tag="6")]
     pub write_version: u64,
-}
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct Accounts {
-    #[prost(message, repeated, tag="1")]
-    pub accounts: ::prost::alloc::vec::Vec<Account>,
 }
 // @@protoc_insertion_point(module)

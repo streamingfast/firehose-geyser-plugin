@@ -1,4 +1,4 @@
-use crate::pb::sf::solana::r#type::v1::{Account, AccountBlock, Accounts};
+use crate::pb::sf::solana::r#type::v1::{Account, AccountBlock};
 use crate::state::{AccountChanges, BlockInfo};
 use prost_types::Timestamp as ProstTimestamp;
 use solana_program::clock::UnixTimestamp;
@@ -25,7 +25,7 @@ pub fn create_account_block(
         parent_hash: block_info.parent_hash.clone(),
         lib: lib_num,
         parent_slot: block_info.parent_slot,
-        accounts: Some(Accounts { accounts }),
+        accounts: accounts,
         timestamp: Some(block_info.timestamp.clone()),
     }
 }
