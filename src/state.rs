@@ -98,7 +98,7 @@ impl State {
         self.block_infos.get(&slot)
     }
 
-    pub fn get_block_from_rpc(&self, slot: u64) -> BlockInfo {
+    pub fn get_block_from_rpc(&self, slot: u64) -> Option<BlockInfo> {
             let config = RpcBlockConfig {
                 encoding: None,
                 transaction_details: Some(TransactionDetails::None),
@@ -107,14 +107,21 @@ impl State {
                 max_supported_transaction_version: Some(0),
             };
 
-            let block = self.rpc_client.as_ref().unwrap().get_block_with_config(slot, config).unwrap();
-            println!("Block Info fetched for slot {}", slot);
-            BlockInfo {
-                    timestamp: convert_sol_timestamp(block.block_time.unwrap()),
-                    parent_slot: block.parent_slot.clone(),
-                    slot: slot,
-                    block_hash: block.blockhash.clone(),
-                    parent_hash: block.previous_blockhash.clone(),
+            match self.rpc_client.as_ref().unwrap().get_block_with_config(slot, config) {
+                Ok(block) => {
+                    println!("Block Info fetched for slot {}", slot);
+                    Some(BlockInfo {
+                        timestamp: convert_sol_timestamp(block.block_time.unwrap()),
+                        parent_slot: block.parent_slot.clone(),
+                        slot: slot,
+                        block_hash: block.blockhash.clone(),
+                        parent_hash: block.previous_blockhash.clone(),
+                    })
+                }
+                Err(err) => {
+                    println!("Block Info not fetched for slot {}, err: {}", slot, err);
+                    None
+                }
             }
     }
 

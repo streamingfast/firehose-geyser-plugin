@@ -275,25 +275,29 @@ impl GeyserPlugin for Plugin {
             }
         }
 
+        println!("received blockmeta {}", slot);
         let mut lock_state = self.state.write().unwrap();
         let lib_num = lock_state.get_last_finalized_block();
 
-            // Print all the previous complete blocks
-            for toproc in lock_state.ordered_confirmed_slots_below(slot) {
-                let block_info = match lock_state.get_block_info(toproc) {
-                    Some(block_info) => block_info,
-                    None => {
-                        &lock_state.get_block_from_rpc(slot)
+        // Print all the previous complete blocks
+        for toproc in lock_state.ordered_confirmed_slots_below(slot) {
+            let block_info = match lock_state.get_block_info(toproc) {
+                Some(block_info) => block_info,
+                None => {
+                    let blk = lock_state.get_block_from_rpc(slot);
+                    if blk.is_none() {
+                        continue;
                     }
-                };               
-                let account_changes = lock_state.get_account_changes(slot);
-                let acc_block = create_account_block(slot, lib_num, account_changes.unwrap_or(&AccountChanges::default()), &block_info);
-                BlockPrinter::new(&acc_block).print();
-                   lock_state.purge_blocks_up_to(toproc);
+                    &blk.unwrap()
                 }
+            };               
+            let account_changes = lock_state.get_account_changes(slot);
+            let acc_block = create_account_block(slot, lib_num, account_changes.unwrap_or(&AccountChanges::default()), block_info);
+            BlockPrinter::new(&acc_block).print();
+            lock_state.purge_blocks_up_to(toproc);
+        }
 
         let block_info = lock_state.get_block_info(slot).unwrap();
-        println!("blockmeta {}", block_info.slot);
         if lock_state.is_confirmed_slot(slot) {
             let account_changes = lock_state.get_account_changes(slot);
 
