@@ -204,6 +204,7 @@ impl State {
                 None => {
                     let blk = self.get_block_from_rpc(toproc);
                     if blk.is_none() {
+                        print!("Backprocessing: block info not found for slot {}", toproc);
                         continue;
                     }
                     &blk.unwrap()
