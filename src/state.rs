@@ -148,13 +148,13 @@ impl State {
         }
     }
 
-    fn ordered_confirmed_slots_below(&self, slot: u64) -> Vec<u64> {
+    fn ordered_confirmed_slots_upto(&self, slot: u64) -> Vec<u64> {
         // Collect all keys from confirmed_slots that are less than the given slot
         let mut slots: Vec<u64> = self
             .confirmed_slots
             .keys()
             .cloned()
-            .filter(|&x| x < slot)
+            .filter(|&x| x <= slot)
             .collect();
         slots.sort();
         slots
@@ -175,6 +175,7 @@ impl State {
         };
         if self.cursor.is_none() && self.first_block_to_process.is_none() {
             // without cursor or first_block_to_process, we only keep a few blocks in here...
+            debug!("initializing: deleting blocks up to: {}", slot-1);
             self.purge_blocks_up_to(slot - 32);
         }
         return false;
@@ -188,6 +189,7 @@ impl State {
             if self.first_block_to_process.is_none() {
                 if slot >= cursor {
                     self.first_block_to_process = Some(slot);
+                    debug!("deleting blocks up to: {}", slot-1);
                     self.purge_blocks_up_to(slot - 1);
                 }
             }
@@ -204,6 +206,7 @@ impl State {
             self.first_received_blockmeta = Some(slot);
             if self.cursor.is_none() {
                 self.first_block_to_process = Some(slot);
+                debug!("deleting blocks up to: {}", slot-1);
                 self.purge_blocks_up_to(slot - 1);
             }
         }
@@ -266,7 +269,10 @@ impl State {
             }
         };
 
-        for toproc in self.ordered_confirmed_slots_below(slot) {
+        for toproc in self.ordered_confirmed_slots_upto(slot) {
+            if toproc < self.first_block_to_process.unwrap() {
+                continue;
+            }
             let block_info = match self.get_block_info(toproc) {
                 Some(block_info) => block_info,
                 None => {
