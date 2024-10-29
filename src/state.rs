@@ -1,21 +1,18 @@
 use crate::block_printer::BlockPrinter;
 use crate::pb;
 use crate::utils::{convert_sol_timestamp, create_account_block};
-use base58;
 use pb::sf::solana::r#type::v1::Account;
 use prost_types::Timestamp;
 use solana_rpc_client::rpc_client::RpcClient;
-use solana_sdk::commitment_config::CommitmentConfig;
 use std::collections::HashMap;
-use std::{thread::sleep, time::Duration};
 
 type BlockAccountChanges = HashMap<u64, AccountChanges>;
 pub type AccountChanges = HashMap<Vec<u8>, Account>;
 type BlockInfoMap = HashMap<u64, BlockInfo>;
 type ConfirmedSlotsMap = HashMap<u64, bool>;
+use log::debug;
 use solana_rpc_client_api::config::RpcBlockConfig;
 use solana_transaction_status::TransactionDetails;
-use log::{info, debug};
 
 pub struct BlockInfo {
     pub slot: u64,
@@ -25,72 +22,79 @@ pub struct BlockInfo {
     pub timestamp: Timestamp,
 }
 
+const DEFAULT_RPC_BLOCK_CONFIG: RpcBlockConfig = RpcBlockConfig {
+    encoding: None,
+    transaction_details: Some(TransactionDetails::None),
+    rewards: Some(false),
+    commitment: None,
+    max_supported_transaction_version: Some(0),
+};
+
 #[derive(Default)]
 pub struct State {
-    first_root_update_received: bool,
+    initialized: bool, // passed the first received blockmeta
 
-    last_confirmed_block: u64,
-    last_finalized_block: Option<u64>,
-    last_purged_block: u64,
+    first_received_blockmeta: Option<u64>,
+    first_block_to_process: Option<u64>,
+
+    cursor: Option<u64>,
+    lib: Option<u64>,
+
     block_account_changes: BlockAccountChanges,
     block_infos: BlockInfoMap,
     confirmed_slots: ConfirmedSlotsMap,
-    rpc_client: Option<RpcClient>,
+
+    local_rpc_client: Option<RpcClient>,
+    remote_rpc_client: Option<RpcClient>,
+    cursor_path: String,
 }
 
 impl State {
-    pub fn new(rpc_client: RpcClient) -> Self {
+    pub fn new(
+        local_rpc_client: RpcClient,
+        remote_rpc_client: RpcClient,
+        cursor: Option<u64>,
+        cursor_path: String,
+    ) -> Self {
         State {
-            first_root_update_received: false,
-            last_confirmed_block: 0,
-            last_purged_block: 0,
+            cursor: cursor,
+            first_block_to_process: None,
+            first_received_blockmeta: None,
+            lib: None,
+            initialized: false,
+
             block_account_changes: HashMap::new(),
             block_infos: HashMap::new(),
-            last_finalized_block: None,
             confirmed_slots: HashMap::new(),
-            rpc_client: Some(rpc_client),
+
+            local_rpc_client: Some(local_rpc_client),
+            remote_rpc_client: Some(remote_rpc_client),
+            cursor_path: cursor_path,
         }
     }
 
-    pub fn get_first_root_update_received(&self) -> bool {
-        self.first_root_update_received
+    pub fn set_lib(&mut self, slot: u64) {
+        self.lib = Some(slot);
     }
 
-    pub fn set_last_finalized_block(&mut self, slot: u64) {
-        self.first_root_update_received = true;
-        self.last_finalized_block = Some(slot);
+    fn get_lib(&self) -> Option<u64> {
+        self.lib
     }
 
-    pub fn is_already_purged(&mut self, slot: u64) -> bool {
-        return self.last_purged_block >= slot;
-    }
-
-    pub fn get_last_finalized_block(&self) -> Option<u64> {
-        self.last_finalized_block
-    }
-
-    pub fn get_account_changes(&self, slot: u64) -> Option<&AccountChanges> {
+    fn get_account_changes(&self, slot: u64) -> Option<&AccountChanges> {
         self.block_account_changes.get(&slot)
     }
 
-    pub fn get_block_info(&self, slot: u64) -> Option<&BlockInfo> {
+    fn get_block_info(&self, slot: u64) -> Option<&BlockInfo> {
         self.block_infos.get(&slot)
     }
 
-    pub fn get_block_from_rpc(&self, slot: u64) -> Option<BlockInfo> {
-        let config = RpcBlockConfig {
-            encoding: None,
-            transaction_details: Some(TransactionDetails::None),
-            rewards: Some(false),
-            commitment: None,
-            max_supported_transaction_version: Some(0),
-        };
-
+    fn get_block_from_rpc(&self, slot: u64) -> Option<BlockInfo> {
         match self
-            .rpc_client
+            .local_rpc_client
             .as_ref()
             .unwrap()
-            .get_block_with_config(slot, config)
+            .get_block_with_config(slot, DEFAULT_RPC_BLOCK_CONFIG)
         {
             Ok(block) => {
                 debug!("Block Info fetched for slot {}", slot);
@@ -102,22 +106,30 @@ impl State {
                     parent_hash: block.previous_blockhash.clone(),
                 })
             }
-            Err(err) => {
-                debug!("Block Info not fetched for slot {}, err: {}", slot, err);
-                None
+            Err(_err) => {
+                match self
+                    .remote_rpc_client
+                    .as_ref()
+                    .unwrap()
+                    .get_block_with_config(slot, DEFAULT_RPC_BLOCK_CONFIG)
+                {
+                    Ok(block) => {
+                        debug!("Block Info fetched for slot {}", slot);
+                        Some(BlockInfo {
+                            timestamp: convert_sol_timestamp(block.block_time.unwrap()),
+                            parent_slot: block.parent_slot.clone(),
+                            slot: slot,
+                            block_hash: block.blockhash.clone(),
+                            parent_hash: block.previous_blockhash.clone(),
+                        })
+                    }
+                    Err(_err) => None,
+                }
             }
         }
     }
 
-    pub fn set_block_info(&mut self, slot: u64, block_info: BlockInfo) {
-        self.block_infos.insert(slot, block_info);
-    }
-
-    pub fn is_confirmed_slot(&self, slot: u64) -> bool {
-        self.confirmed_slots.contains_key(&slot)
-    }
-
-    pub fn ordered_confirmed_slots_below(&self, slot: u64) -> Vec<u64> {
+    fn ordered_confirmed_slots_below(&self, slot: u64) -> Vec<u64> {
         // Collect all keys from confirmed_slots that are less than the given slot
         let mut slots: Vec<u64> = self
             .confirmed_slots
@@ -129,12 +141,58 @@ impl State {
         slots
     }
 
+    fn should_skip_slot(&mut self, slot: u64) -> bool {
+        if self.initialized {
+            return false;
+        }
+
+        // if we are not initialized, we skip any block below 'cursor' or 'first_block_to_process'
+        // without those numbers we accept any account_change but truncate to keep 32 blocks in memory
+        if self.first_block_to_process.is_some() && slot < self.first_block_to_process.unwrap() {
+            return true;
+        }
+        if self.cursor.is_some() && slot <= self.cursor.unwrap() {
+            return true;
+        };
+        if self.cursor.is_none() && self.first_block_to_process.is_none() {
+            // without cursor or first_block_to_process, we only keep a few blocks in here...
+            self.purge_blocks_up_to(slot - 32);
+        }
+        return false;
+    }
+
     pub fn set_confirmed_slot(&mut self, slot: u64) {
+        if self.should_skip_slot(slot) {
+            return;
+        }
+        if let Some(cursor) = self.cursor {
+            if self.first_block_to_process.is_none() {
+                if slot >= cursor {
+                    self.first_block_to_process = Some(slot);
+                    self.purge_blocks_up_to(slot - 1);
+                }
+            }
+        }
         self.confirmed_slots.insert(slot, true);
-        self.last_confirmed_block = slot;
+        self.process_upto(slot);
+    }
+
+    pub fn set_block_info(&mut self, slot: u64, block_info: BlockInfo) {
+        if self.first_received_blockmeta.is_none() {
+            self.first_received_blockmeta = Some(slot);
+            if self.cursor.is_none() {
+                self.first_block_to_process = Some(slot);
+                self.purge_blocks_up_to(slot - 1);
+            }
+        }
+        self.block_infos.insert(slot, block_info);
     }
 
     pub fn set_account(&mut self, slot: u64, pub_key: Vec<u8>, account: Account) {
+        if self.should_skip_slot(slot) {
+            return;
+        }
+
         if !self.block_account_changes.contains_key(&slot) {
             debug!("account data for slot {}", slot);
         }
@@ -145,17 +203,12 @@ impl State {
             .insert(pub_key, account);
     }
 
-    pub fn accounts_len(&self) -> usize {
-        self.block_account_changes.len()
-    }
-
-    pub fn purge_blocks_up_to(&mut self, slot: u64) {
+    fn purge_blocks_up_to(&mut self, slot: u64) {
         let blocks: Vec<u64> = self.block_account_changes.keys().cloned().collect();
         for block in blocks {
             if block > slot {
                 continue;
             }
-            // println!("purging block {}", block);
             self.block_account_changes.remove(&block);
             self.block_infos.remove(&block);
         }
@@ -164,25 +217,51 @@ impl State {
                 self.confirmed_slots.remove(&slot);
             }
         }
-        self.last_purged_block = slot;
     }
 
-    // Print all the previous complete blocks, returns true if last block was sent
-    pub fn backprocess_below(&mut self, slot: u64) {
-        let lib_num = match self.get_last_finalized_block() {
+    fn process_upto(&mut self, slot: u64) {
+        if self.first_block_to_process.is_none() {
+            debug!(
+                "No 'first_block_to_process' yet, skipping processing for slot {}",
+                slot
+            );
+            return;
+        }
+
+        if self.first_received_blockmeta.is_none() {
+            debug!(
+                "No 'first_received_blockmeta' yet, skipping processing for slot {}",
+                slot
+            );
+            return;
+        }
+
+        let lib_num = match self.get_lib() {
             Some(lib_num) => lib_num,
             None => {
+                debug!("No lib found yet, skipping processing of slot {}", slot);
                 return;
             }
         };
+
         for toproc in self.ordered_confirmed_slots_below(slot) {
             let block_info = match self.get_block_info(toproc) {
                 Some(block_info) => block_info,
                 None => {
+                    if self.initialized {
+                        debug!(
+                            "process_upto({}): block info not found for slot {} (not trying on RPC)",
+                            slot, toproc
+                        );
+                        break;
+                    }
                     let blk = self.get_block_from_rpc(toproc);
                     if blk.is_none() {
-                        println!("Backprocessing: block info not found for slot {}", toproc);
-                        continue;
+                        debug!(
+                            "process_upto({}): block info not found for slot {}",
+                            slot, toproc
+                        );
+                        break;
                     }
                     &blk.unwrap()
                 }
@@ -194,17 +273,17 @@ impl State {
                 account_changes.unwrap_or(&AccountChanges::default()),
                 block_info,
             );
+            if slot == self.first_received_blockmeta.unwrap() {
+                debug!("First block received, now initialized");
+                self.initialized = true;
+            }
             BlockPrinter::new(&acc_block).print();
             self.purge_blocks_up_to(toproc);
+            write_cursor(&self.cursor_path, toproc);
         }
     }
+}
 
-    pub fn stats(&mut self) {
-        println!(
-            "last_confirmed_block: {}, last_purged_block: {}, block_account_changes: {}",
-            self.last_confirmed_block,
-            self.last_purged_block,
-            self.block_account_changes.len()
-        )
-    }
+fn write_cursor(cursor_file: &str, cursor: u64) {
+    std::fs::write(cursor_file, cursor.to_string()).unwrap();
 }

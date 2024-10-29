@@ -1,13 +1,6 @@
 use agave_geyser_plugin_interface::geyser_plugin_interface::SlotStatus;
 use {
-    crate::{
-        block_printer::BlockPrinter,
-        config::Config as PluginConfig,
-        state::AccountChanges,
-        state::BlockInfo,
-        state::State,
-        utils::{convert_sol_timestamp, create_account_block},
-    },
+    crate::{config::Config as PluginConfig, state::BlockInfo, state::State},
     agave_geyser_plugin_interface::geyser_plugin_interface::{
         GeyserPlugin, ReplicaAccountInfoVersions, ReplicaBlockInfoVersions,
         ReplicaEntryInfoVersions, ReplicaTransactionInfoVersions, Result as PluginResult,
@@ -15,13 +8,14 @@ use {
     std::{concat, env, sync::RwLock},
 };
 
-use log::{info, debug, LevelFilter};
 use crate::pb;
+use crate::utils::convert_sol_timestamp;
+use env_logger::Target;
+use log::{debug, LevelFilter};
 use pb::sf::solana::r#type::v1::Account;
 use solana_rpc_client::rpc_client::RpcClient;
 use std::fmt;
 use std::str::FromStr;
-use env_logger::Target;
 
 #[derive(Default)]
 pub struct Plugin {
@@ -30,9 +24,17 @@ pub struct Plugin {
 
 impl fmt::Debug for Plugin {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Plugin")
-            .field("rpc_client", &"RpcClient") // Omit details of `RpcClient`
-            .finish()
+        f.debug_struct("Plugin").finish()
+    }
+}
+
+fn cursor_from_file(cursor_file: &str) -> Option<u64> {
+    match std::fs::read_to_string(cursor_file) {
+        Ok(cursor) => {
+            let cursor = cursor.trim().parse::<u64>().ok();
+            cursor
+        }
+        Err(_) => None,
     }
 }
 
@@ -44,7 +46,8 @@ impl GeyserPlugin for Plugin {
     fn on_load(&mut self, config_file: &str, _is_reload: bool) -> PluginResult<()> {
         let plugin_config = PluginConfig::load_from_file(config_file)?;
 
-        let filter_level = LevelFilter::from_str(plugin_config.log.level.as_str()).unwrap_or(LevelFilter::Info);
+        let filter_level =
+            LevelFilter::from_str(plugin_config.log.level.as_str()).unwrap_or(LevelFilter::Info);
         env_logger::Builder::new()
             .filter_level(filter_level)
             .format_timestamp_nanos()
@@ -53,8 +56,16 @@ impl GeyserPlugin for Plugin {
 
         debug!("on load");
 
-        let rpc_client = RpcClient::new(plugin_config.rpc_client.endpoint);
-        self.state = RwLock::new(State::new(rpc_client));
+        let local_rpc_client = RpcClient::new(plugin_config.local_rpc_client.endpoint);
+        let remote_rpc_client = RpcClient::new(plugin_config.remote_rpc_client.endpoint);
+        let cursor = cursor_from_file(&plugin_config.cursor_file);
+
+        self.state = RwLock::new(State::new(
+            local_rpc_client,
+            remote_rpc_client,
+            cursor,
+            plugin_config.cursor_file,
+        ));
 
         println!("FIRE INIT 3.0 sf.solana.type.v1.AccountBlock");
 
@@ -74,6 +85,8 @@ impl GeyserPlugin for Plugin {
             return Ok(());
         }
 
+        let mut lock_state = self.state.write().unwrap();
+
         match account {
             ReplicaAccountInfoVersions::V0_0_1(account) => {
                 let account_key = account.pubkey.to_vec();
@@ -86,10 +99,7 @@ impl GeyserPlugin for Plugin {
                     rent_epoch: account.rent_epoch,
                 };
 
-                self.state
-                    .write()
-                    .unwrap()
-                    .set_account(slot, account_key, account);
+                lock_state.set_account(slot, account_key, account);
             }
 
             ReplicaAccountInfoVersions::V0_0_2(account) => {
@@ -103,10 +113,7 @@ impl GeyserPlugin for Plugin {
                     rent_epoch: account.rent_epoch,
                 };
 
-                self.state
-                    .write()
-                    .unwrap()
-                    .set_account(slot, account_key, account);
+                lock_state.set_account(slot, account_key, account);
             }
 
             ReplicaAccountInfoVersions::V0_0_3(account) => {
@@ -120,25 +127,12 @@ impl GeyserPlugin for Plugin {
                     rent_epoch: account.rent_epoch,
                 };
 
-                self.state
-                    .write()
-                    .unwrap()
-                    .set_account(slot, account_key, account);
+                lock_state.set_account(slot, account_key, account);
             }
 
             _ => {
                 panic!("Unsupported account version");
             }
-        }
-        let mut lock_state = self.state.write().unwrap();
-
-        // if we have no blockmeta received yet, we truncate our list to the last x blocks to prevent filling up the RAM on catch up
-        if !lock_state.get_first_root_update_received()
-            && lock_state.accounts_len() > 300
-            && slot > 300
-        {
-            debug!("Purging blocks up to {}", slot - 300);
-            lock_state.purge_blocks_up_to(slot - 300); // this may keep less than x blocks because of forked blocks
         }
 
         Ok(())
@@ -174,42 +168,12 @@ impl GeyserPlugin for Plugin {
             }
             SlotStatus::Rooted => {
                 debug!("slot rooted {}", slot);
-                self.state.write().unwrap().set_last_finalized_block(slot);
+                self.state.write().unwrap().set_lib(slot);
             }
             SlotStatus::Confirmed => {
                 debug!("slot confirmed {}", slot);
-
                 let mut lock_state = self.state.write().unwrap();
-                if !lock_state.get_first_root_update_received() {
-                    debug!(
-                        "Delaying processing slot {} as we have not received any root_update yet",
-                        slot
-                    );
-                    if !lock_state.is_already_purged(slot) {
-                        // nothing below purged account_data
-                        lock_state.set_confirmed_slot(slot);
-                    }
-                    return Ok(());
-                }
-
-                if lock_state.get_block_info(slot).is_none() {
-                    debug!("Delaying processing slot {} as we have not received blockmeta for that block yet", slot);
-                    lock_state.set_confirmed_slot(slot);
-                    return Ok(());
-                }
-
-                lock_state.backprocess_below(slot);
-                let block_info = lock_state.get_block_info(slot).unwrap();
-
-                let account_changes = lock_state.get_account_changes(slot);
-                let acc_block = create_account_block(
-                    slot,
-                    lock_state.get_last_finalized_block().unwrap(),
-                    account_changes.unwrap_or(&AccountChanges::default()),
-                    &block_info,
-                );
-                BlockPrinter::new(&acc_block).print();
-                lock_state.purge_blocks_up_to(slot);
+                lock_state.set_confirmed_slot(slot);
             }
             _ => {
                 panic!("Unsupported slot status");
@@ -232,7 +196,6 @@ impl GeyserPlugin for Plugin {
     }
 
     fn notify_block_metadata(&self, blockinfo: ReplicaBlockInfoVersions<'_>) -> PluginResult<()> {
-        let mut slot = 0;
         match blockinfo {
             ReplicaBlockInfoVersions::V0_0_1(_) => {
                 panic!("V0_0_1 not supported");
@@ -245,12 +208,9 @@ impl GeyserPlugin for Plugin {
                     slot: blockinfo.slot,
                     timestamp: convert_sol_timestamp(blockinfo.block_time.unwrap()),
                 };
-                slot = blockinfo.slot;
 
-                self.state
-                    .write()
-                    .unwrap()
-                    .set_block_info(blockinfo.slot, block_info);
+                let mut lock_state = self.state.write().unwrap();
+                lock_state.set_block_info(blockinfo.slot, block_info);
             }
             ReplicaBlockInfoVersions::V0_0_3(blockinfo) => {
                 let block_info = BlockInfo {
@@ -260,12 +220,9 @@ impl GeyserPlugin for Plugin {
                     slot: blockinfo.slot,
                     timestamp: convert_sol_timestamp(blockinfo.block_time.unwrap()),
                 };
-                slot = blockinfo.slot;
 
-                self.state
-                    .write()
-                    .unwrap()
-                    .set_block_info(blockinfo.slot, block_info);
+                let mut lock_state = self.state.write().unwrap();
+                lock_state.set_block_info(blockinfo.slot, block_info);
             }
 
             ReplicaBlockInfoVersions::V0_0_4(blockinfo) => {
@@ -276,12 +233,9 @@ impl GeyserPlugin for Plugin {
                     slot: blockinfo.slot,
                     timestamp: convert_sol_timestamp(blockinfo.block_time.unwrap()),
                 };
-                slot = blockinfo.slot;
 
-                self.state
-                    .write()
-                    .unwrap()
-                    .set_block_info(blockinfo.slot, block_info);
+                let mut lock_state = self.state.write().unwrap();
+                lock_state.set_block_info(blockinfo.slot, block_info);
             }
 
             _ => {
@@ -289,28 +243,6 @@ impl GeyserPlugin for Plugin {
             }
         }
 
-        if !self.state.read().unwrap().get_first_root_update_received() {
-            debug!("Received blockmeta {}, but delaying processing as we have not received any root_update yet", slot);
-            return Ok(());
-        }
-
-        let mut lock_state = self.state.write().unwrap();
-        debug!("received blockmeta {}", slot);
-        lock_state.backprocess_below(slot);
-
-        let block_info = lock_state.get_block_info(slot).unwrap();
-        if lock_state.is_confirmed_slot(slot) {
-            let account_changes = lock_state.get_account_changes(slot);
-
-            let acc_block = create_account_block(
-                slot,
-                lock_state.get_last_finalized_block().unwrap(),
-                account_changes.unwrap_or(&AccountChanges::default()),
-                &block_info,
-            );
-            BlockPrinter::new(&acc_block).print();
-            lock_state.purge_blocks_up_to(slot);
-        }
         Ok(())
     }
 
