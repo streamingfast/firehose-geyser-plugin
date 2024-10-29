@@ -12,6 +12,7 @@ type BlockInfoMap = HashMap<u64, BlockInfo>;
 type ConfirmedSlotsMap = HashMap<u64, bool>;
 use log::debug;
 use solana_rpc_client_api::config::RpcBlockConfig;
+use solana_sdk::commitment_config::CommitmentConfig;
 use solana_transaction_status::TransactionDetails;
 
 pub struct BlockInfo {
@@ -70,6 +71,24 @@ impl State {
             local_rpc_client: Some(local_rpc_client),
             remote_rpc_client: Some(remote_rpc_client),
             cursor_path: cursor_path,
+        }
+    }
+
+    fn set_last_finalized_block_from_rpc(&mut self) {
+        let commitment_config = CommitmentConfig::finalized();
+        match self
+            .local_rpc_client
+            .as_ref()
+            .unwrap()
+            .get_slot_with_commitment(commitment_config)
+        {
+            Ok(lib_num) => {
+                println!("Block lib received from rpc client: {}", lib_num);
+                self.lib = Some(lib_num);
+            }
+            Err(e) => {
+                println!("Error getting lib num from rpc client: {}", e);
+            }
         }
     }
 
@@ -178,6 +197,9 @@ impl State {
     }
 
     pub fn set_block_info(&mut self, slot: u64, block_info: BlockInfo) {
+        if self.lib.is_none() {
+            self.set_last_finalized_block_from_rpc();
+        }
         if self.first_received_blockmeta.is_none() {
             self.first_received_blockmeta = Some(slot);
             if self.cursor.is_none() {
