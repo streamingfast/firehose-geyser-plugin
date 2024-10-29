@@ -44,7 +44,6 @@ impl GeyserPlugin for Plugin {
     }
 
     fn on_load(&mut self, config_file: &str, _is_reload: bool) -> PluginResult<()> {
-        println!("on_load first line");
         let plugin_config = PluginConfig::load_from_file(config_file)?;
 
         let filter_level =
