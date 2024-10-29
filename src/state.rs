@@ -26,7 +26,8 @@ pub struct BlockInfo {
 
 #[derive(Default)]
 pub struct State {
-    first_blockmeta_received: bool,
+    first_root_update_received: bool,
+
     last_confirmed_block: u64,
     last_finalized_block: Option<u64>,
     last_purged_block: u64,
@@ -39,7 +40,7 @@ pub struct State {
 impl State {
     pub fn new(rpc_client: RpcClient) -> Self {
         State {
-            first_blockmeta_received: false,
+            first_root_update_received: false,
             last_confirmed_block: 0,
             last_purged_block: 0,
             block_account_changes: HashMap::new(),
@@ -50,39 +51,17 @@ impl State {
         }
     }
 
-    pub fn get_first_blockmeta_received(&self) -> bool {
-        self.first_blockmeta_received
+    pub fn get_first_root_update_received(&self) -> bool {
+        self.first_root_update_received
     }
 
     pub fn set_last_finalized_block(&mut self, slot: u64) {
+        self.first_root_update_received = true;
         self.last_finalized_block = Some(slot);
     }
 
     pub fn is_already_purged(&mut self, slot: u64) -> bool {
         return self.last_purged_block >= slot;
-    }
-
-    pub fn set_last_finalized_block_from_rpc(&mut self) -> bool {
-        if self.last_finalized_block.is_some() {
-            return true;
-        }
-        let commitment_config = CommitmentConfig::finalized();
-        match self
-            .rpc_client
-            .as_ref()
-            .unwrap()
-            .get_slot_with_commitment(commitment_config)
-        {
-            Ok(lib_num) => {
-                println!("Block lib received from rpc client: {}", lib_num);
-                self.last_finalized_block = Some(lib_num);
-                return true;
-            }
-            Err(e) => {
-                println!("Error getting lib num from rpc client: {}", e);
-                return false;
-            }
-        }
     }
 
     pub fn get_last_finalized_block(&self) -> Option<u64> {
@@ -130,7 +109,6 @@ impl State {
     }
 
     pub fn set_block_info(&mut self, slot: u64, block_info: BlockInfo) {
-        self.first_blockmeta_received = true;
         self.block_infos.insert(slot, block_info);
     }
 
@@ -189,14 +167,13 @@ impl State {
     }
 
     // Print all the previous complete blocks, returns true if last block was sent
-    pub fn backprocess_below(&mut self, slot: u64) -> bool {
+    pub fn backprocess_below(&mut self, slot: u64) {
         let lib_num = match self.get_last_finalized_block() {
             Some(lib_num) => lib_num,
             None => {
-                return false;
+                return;
             }
         };
-        let mut last_block_sent = true;
         for toproc in self.ordered_confirmed_slots_below(slot) {
             let block_info = match self.get_block_info(toproc) {
                 Some(block_info) => block_info,
@@ -204,7 +181,6 @@ impl State {
                     let blk = self.get_block_from_rpc(toproc);
                     if blk.is_none() {
                         print!("Backprocessing: block info not found for slot {}", toproc);
-                        last_block_sent = false;
                         continue;
                     }
                     &blk.unwrap()
@@ -218,10 +194,8 @@ impl State {
                 block_info,
             );
             BlockPrinter::new(&acc_block).print();
-            last_block_sent = true;
             self.purge_blocks_up_to(toproc);
         }
-        return last_block_sent;
     }
 
     pub fn stats(&mut self) {

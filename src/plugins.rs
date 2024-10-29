@@ -63,10 +63,6 @@ impl GeyserPlugin for Plugin {
             return Ok(());
         }
 
-        self.state
-            .write()
-            .unwrap()
-            .set_last_finalized_block_from_rpc();
         match account {
             ReplicaAccountInfoVersions::V0_0_1(account) => {
                 let account_key = account.pubkey.to_vec();
@@ -126,12 +122,12 @@ impl GeyserPlugin for Plugin {
         let mut lock_state = self.state.write().unwrap();
 
         // if we have no blockmeta received yet, we truncate our list to the last x blocks to prevent filling up the RAM on catch up
-        if !lock_state.get_first_blockmeta_received()
-            && lock_state.accounts_len() > 200
-            && slot > 200
+        if !lock_state.get_first_root_update_received()
+            && lock_state.accounts_len() > 300
+            && slot > 300
         {
-            println!("Purging blocks up to {}", slot - 200);
-            lock_state.purge_blocks_up_to(slot - 200); // this may keep less than 200 blocks because of forked blocks
+            println!("Purging blocks up to {}", slot - 300);
+            lock_state.purge_blocks_up_to(slot - 300); // this may keep less than x blocks because of forked blocks
         }
 
         Ok(())
@@ -173,24 +169,15 @@ impl GeyserPlugin for Plugin {
                 println!("slot confirmed {}", slot);
 
                 let mut lock_state = self.state.write().unwrap();
-                if !lock_state.get_first_blockmeta_received() {
+                if !lock_state.get_first_root_update_received() {
                     println!(
-                        "Delaying processing slot {} as we have not received any blockmeta yet",
+                        "Delaying processing slot {} as we have not received any root_update yet",
                         slot
                     );
                     if !lock_state.is_already_purged(slot) {
-                        // align with purged account_data
+                        // nothing below purged account_data
                         lock_state.set_confirmed_slot(slot);
                     }
-                    return Ok(());
-                }
-
-                if !lock_state.set_last_finalized_block_from_rpc() {
-                    println!(
-                        "Delaying processing slot {} as we have not set a finalized block yet",
-                        slot
-                    );
-                    lock_state.set_confirmed_slot(slot);
                     return Ok(());
                 }
 
@@ -200,14 +187,7 @@ impl GeyserPlugin for Plugin {
                     return Ok(());
                 }
 
-                if !lock_state.backprocess_below(slot) {
-                    println!(
-                        "Delaying processing slot {} as we have not backprocessed everything yet",
-                        slot
-                    );
-                    lock_state.set_confirmed_slot(slot);
-                    return Ok(());
-                }
+                lock_state.backprocess_below(slot);
                 let block_info = lock_state.get_block_info(slot).unwrap();
 
                 let account_changes = lock_state.get_account_changes(slot);
@@ -298,17 +278,15 @@ impl GeyserPlugin for Plugin {
             }
         }
 
-        let mut lock_state = self.state.write().unwrap();
-        if !lock_state.set_last_finalized_block_from_rpc() {
-            println!("Received blockmeta {}, delaying processing as we have not set a finalized block yet", slot);
+        if !self.state.read().unwrap().get_first_root_update_received() {
+            println!("Received blockmeta {}, but delaying processing as we have not received any root_update yet", slot);
             return Ok(());
         }
 
+        let mut lock_state = self.state.write().unwrap();
         println!("received blockmeta {}", slot);
-        if !lock_state.backprocess_below(slot) {
-            println!("Received blockmeta {}, delaying processing as we have not backprocessed everything yet", slot);
-            return Ok(());
-        };
+        lock_state.backprocess_below(slot);
+
         let block_info = lock_state.get_block_info(slot).unwrap();
         if lock_state.is_confirmed_slot(slot) {
             let account_changes = lock_state.get_account_changes(slot);

@@ -1,4 +1,4 @@
-use crate::pb::sf::solana::r#type::v1::{AccountBlock, Accounts, Account};
+use crate::pb::sf::solana::r#type::v1::{Account, AccountBlock, Accounts};
 use crate::state::{AccountChanges, BlockInfo};
 use prost_types::Timestamp as ProstTimestamp;
 use solana_program::clock::UnixTimestamp;
@@ -16,8 +16,8 @@ pub fn create_account_block(
 ) -> AccountBlock {
     let accounts: Vec<Account> = account_changes
         .into_iter()
-        .map(|(account_key, account)| account.clone()).collect();
-    
+        .map(|(account_key, account)| account.clone())
+        .collect();
 
     AccountBlock {
         slot: block_info.slot,
