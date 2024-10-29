@@ -12,7 +12,7 @@ message AccountBlock {
   string parent_hash = 4;
   uint64 lib = 5;
   google.protobuf.Timestamp timestamp = 6;
-  Accounts accounts = 7;
+  repeated Account accounts = 7;
 }
 
 message Account {
@@ -24,6 +24,4 @@ message Account {
   uint64 write_version = 6;
 }
 
-message Accounts {
-  repeated Account accounts = 1;
-}
+
