@@ -307,6 +307,7 @@ impl State {
                 debug!("First block received, now initialized");
                 self.initialized = true;
             }
+            debug!("printing block {}", toproc);
             BlockPrinter::new(&acc_block).print();
             self.purge_blocks_up_to(toproc);
             write_cursor(&self.cursor_path, toproc);
