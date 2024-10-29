@@ -196,15 +196,15 @@ impl State {
                 return false;
             }
         };
-        let mut last_block_sent = false;
+        let mut last_block_sent = true;
         for toproc in self.ordered_confirmed_slots_below(slot) {
-            last_block_sent = false;
             let block_info = match self.get_block_info(toproc) {
                 Some(block_info) => block_info,
                 None => {
                     let blk = self.get_block_from_rpc(toproc);
                     if blk.is_none() {
                         print!("Backprocessing: block info not found for slot {}", toproc);
+                        last_block_sent = false;
                         continue;
                     }
                     &blk.unwrap()
