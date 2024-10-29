@@ -15,6 +15,7 @@ type BlockInfoMap = HashMap<u64, BlockInfo>;
 type ConfirmedSlotsMap = HashMap<u64, bool>;
 use solana_rpc_client_api::config::RpcBlockConfig;
 use solana_transaction_status::TransactionDetails;
+use log::{info, debug};
 
 pub struct BlockInfo {
     pub slot: u64,
@@ -92,7 +93,7 @@ impl State {
             .get_block_with_config(slot, config)
         {
             Ok(block) => {
-                println!("Block Info fetched for slot {}", slot);
+                debug!("Block Info fetched for slot {}", slot);
                 Some(BlockInfo {
                     timestamp: convert_sol_timestamp(block.block_time.unwrap()),
                     parent_slot: block.parent_slot.clone(),
@@ -102,7 +103,7 @@ impl State {
                 })
             }
             Err(err) => {
-                println!("Block Info not fetched for slot {}, err: {}", slot, err);
+                debug!("Block Info not fetched for slot {}, err: {}", slot, err);
                 None
             }
         }
@@ -135,7 +136,7 @@ impl State {
 
     pub fn set_account(&mut self, slot: u64, pub_key: Vec<u8>, account: Account) {
         if !self.block_account_changes.contains_key(&slot) {
-            println!("account data for slot {}", slot);
+            debug!("account data for slot {}", slot);
         }
 
         self.block_account_changes
