@@ -134,6 +134,7 @@ impl GeyserPlugin for Plugin {
 
     fn notify_end_of_startup(&self) -> PluginResult<()> {
         println!("end of startup");
+        self.state.write().unwrap().get_last_finalized_block();
         Ok(())
     }
     /*
