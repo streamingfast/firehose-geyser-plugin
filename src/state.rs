@@ -1,5 +1,6 @@
+use crate::block_printer::BlockPrinter;
 use crate::pb;
-use crate::utils::convert_sol_timestamp;
+use crate::utils::{convert_sol_timestamp, create_account_block};
 use base58;
 use pb::sf::solana::r#type::v1::Account;
 use prost_types::Timestamp;
@@ -182,6 +183,31 @@ impl State {
             }
         }
         self.last_purged_block = slot;
+    }
+
+    // Print all the previous complete blocks
+    pub fn backprocess_below(&mut self, slot: u64) {
+        for toproc in self.ordered_confirmed_slots_below(slot) {
+            let block_info = match self.get_block_info(toproc) {
+                Some(block_info) => block_info,
+                None => {
+                    let blk = self.get_block_from_rpc(toproc);
+                    if blk.is_none() {
+                        continue;
+                    }
+                    &blk.unwrap()
+                }
+            };
+            let account_changes = self.get_account_changes(slot);
+            let acc_block = create_account_block(
+                slot,
+                self.get_last_finalized_block(),
+                account_changes.unwrap_or(&AccountChanges::default()),
+                block_info,
+            );
+            BlockPrinter::new(&acc_block).print();
+            self.purge_blocks_up_to(toproc);
+        }
     }
 
     pub fn stats(&mut self) {

@@ -161,20 +161,18 @@ impl GeyserPlugin for Plugin {
         _parent: Option<u64>,
         status: SlotStatus,
     ) -> PluginResult<()> {
-        //TODO: Optimize Read/Write Lock
-        let mut lock_state = self.state.write().unwrap();
-
         match status {
             SlotStatus::Processed => {
                 println!("slot processed {}", slot);
             }
             SlotStatus::Rooted => {
                 println!("slot rooted {}", slot);
-                lock_state.set_last_finalized_block(slot);
+                self.state.write().unwrap().set_last_finalized_block(slot);
             }
             SlotStatus::Confirmed => {
                 println!("slot confirmed {}", slot);
 
+                let mut lock_state = self.state.write().unwrap();
                 if !lock_state.get_first_blockmeta_received() {
                     println!(
                         "Delaying processing slot {} as we have not received any blockmeta yet",
@@ -187,22 +185,19 @@ impl GeyserPlugin for Plugin {
                     return Ok(());
                 }
 
-                let lib_num = lock_state.get_last_finalized_block();
+                if lock_state.get_block_info(slot).is_none() {
+                    println!("Delaying processing slot {} as we have not received blockmeta for that block yet", slot);
+                    lock_state.set_confirmed_slot(slot);
+                    return Ok(());
+                }
 
-                let block_info = match lock_state.get_block_info(slot) {
-                    None => {
-                        println!("Delaying processing slot {} as we have not received blockmeta for that block yet", slot);
-                        lock_state.set_confirmed_slot(slot);
-                        return Ok(());
-                    }
-                    Some(block_info) => block_info,
-                };
+                lock_state.backprocess_below(slot);
+                let block_info = lock_state.get_block_info(slot).unwrap();
 
-                backprocess_below(self, slot);
                 let account_changes = lock_state.get_account_changes(slot);
                 let acc_block = create_account_block(
                     slot,
-                    lib_num,
+                    lock_state.get_last_finalized_block(),
                     account_changes.unwrap_or(&AccountChanges::default()),
                     &block_info,
                 );
@@ -290,8 +285,7 @@ impl GeyserPlugin for Plugin {
 
         println!("received blockmeta {}", slot);
         let mut lock_state = self.state.write().unwrap();
-
-        backprocess_below(self, slot);
+        lock_state.backprocess_below(slot);
         let block_info = lock_state.get_block_info(slot).unwrap();
         if lock_state.is_confirmed_slot(slot) {
             let account_changes = lock_state.get_account_changes(slot);
@@ -318,32 +312,6 @@ impl GeyserPlugin for Plugin {
 
     fn entry_notifications_enabled(&self) -> bool {
         true
-    }
-}
-
-// Print all the previous complete blocks
-fn backprocess_below(plugin: &Plugin, slot: u64) {
-    let mut lock_state = plugin.state.write().unwrap();
-    for toproc in lock_state.ordered_confirmed_slots_below(slot) {
-        let block_info = match lock_state.get_block_info(toproc) {
-            Some(block_info) => block_info,
-            None => {
-                let blk = lock_state.get_block_from_rpc(toproc);
-                if blk.is_none() {
-                    continue;
-                }
-                &blk.unwrap()
-            }
-        };
-        let account_changes = lock_state.get_account_changes(slot);
-        let acc_block = create_account_block(
-            slot,
-            lock_state.get_last_finalized_block(),
-            account_changes.unwrap_or(&AccountChanges::default()),
-            block_info,
-        );
-        BlockPrinter::new(&acc_block).print();
-        lock_state.purge_blocks_up_to(toproc);
     }
 }
 
