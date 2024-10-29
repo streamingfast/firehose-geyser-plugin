@@ -40,17 +40,15 @@ impl GeyserPlugin for Plugin {
     }
 
     fn on_load(&mut self, config_file: &str, _is_reload: bool) -> PluginResult<()> {
-        debug!("on load");
-        println!("FIRE INIT 3.0 sf.solana.type.v1.AccountBlock");
-
         let plugin_config = PluginConfig::load_from_file(config_file)?;
-        
+
         solana_logger::setup_with_default(&plugin_config.log.level);
-
-        let rpc_client = RpcClient::new(plugin_config.rpc_client.endpoint);
+        debug!("on load");
         
-
+        let rpc_client = RpcClient::new(plugin_config.rpc_client.endpoint);
         self.state = RwLock::new(State::new(rpc_client));
+
+        println!("FIRE INIT 3.0 sf.solana.type.v1.AccountBlock");
 
         Ok(())
     }
