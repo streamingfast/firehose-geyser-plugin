@@ -1,12 +1,12 @@
+use crate::pb;
+use crate::utils::convert_sol_timestamp;
 use base58;
+use pb::sf::solana::r#type::v1::Account;
 use prost_types::Timestamp;
 use solana_rpc_client::rpc_client::RpcClient;
 use solana_sdk::commitment_config::CommitmentConfig;
 use std::collections::HashMap;
 use std::{thread::sleep, time::Duration};
-use pb::sf::solana::r#type::v1::Account;
-use crate::pb;
-use crate::utils::convert_sol_timestamp;
 
 type BlockAccountChanges = HashMap<u64, AccountChanges>;
 pub type AccountChanges = HashMap<Vec<u8>, Account>;
@@ -99,30 +99,35 @@ impl State {
     }
 
     pub fn get_block_from_rpc(&self, slot: u64) -> Option<BlockInfo> {
-            let config = RpcBlockConfig {
-                encoding: None,
-                transaction_details: Some(TransactionDetails::None),
-                rewards: Some(false),
-                commitment: None,
-                max_supported_transaction_version: Some(0),
-            };
+        let config = RpcBlockConfig {
+            encoding: None,
+            transaction_details: Some(TransactionDetails::None),
+            rewards: Some(false),
+            commitment: None,
+            max_supported_transaction_version: Some(0),
+        };
 
-            match self.rpc_client.as_ref().unwrap().get_block_with_config(slot, config) {
-                Ok(block) => {
-                    println!("Block Info fetched for slot {}", slot);
-                    Some(BlockInfo {
-                        timestamp: convert_sol_timestamp(block.block_time.unwrap()),
-                        parent_slot: block.parent_slot.clone(),
-                        slot: slot,
-                        block_hash: block.blockhash.clone(),
-                        parent_hash: block.previous_blockhash.clone(),
-                    })
-                }
-                Err(err) => {
-                    println!("Block Info not fetched for slot {}, err: {}", slot, err);
-                    None
-                }
+        match self
+            .rpc_client
+            .as_ref()
+            .unwrap()
+            .get_block_with_config(slot, config)
+        {
+            Ok(block) => {
+                println!("Block Info fetched for slot {}", slot);
+                Some(BlockInfo {
+                    timestamp: convert_sol_timestamp(block.block_time.unwrap()),
+                    parent_slot: block.parent_slot.clone(),
+                    slot: slot,
+                    block_hash: block.blockhash.clone(),
+                    parent_hash: block.previous_blockhash.clone(),
+                })
             }
+            Err(err) => {
+                println!("Block Info not fetched for slot {}, err: {}", slot, err);
+                None
+            }
+        }
     }
 
     pub fn set_block_info(&mut self, slot: u64, block_info: BlockInfo) {
@@ -136,7 +141,12 @@ impl State {
 
     pub fn ordered_confirmed_slots_below(&self, slot: u64) -> Vec<u64> {
         // Collect all keys from confirmed_slots that are less than the given slot
-        let mut slots: Vec<u64> = self.confirmed_slots.keys().cloned().filter(|&x| x < slot).collect();
+        let mut slots: Vec<u64> = self
+            .confirmed_slots
+            .keys()
+            .cloned()
+            .filter(|&x| x < slot)
+            .collect();
         slots.sort();
         slots
     }

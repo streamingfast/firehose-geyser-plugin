@@ -15,10 +15,10 @@ use {
     std::{concat, env, sync::RwLock},
 };
 
+use crate::pb;
 use pb::sf::solana::r#type::v1::Account;
 use solana_rpc_client::rpc_client::RpcClient;
 use std::fmt;
-use crate::pb;
 
 #[derive(Default)]
 pub struct Plugin {
@@ -70,8 +70,8 @@ impl GeyserPlugin for Plugin {
                     data: account.data.to_vec(),
                     owner: account.owner.to_vec(),
                     write_version: account.write_version,
-                    source_slot: slot, 
-                    rent_epoch: account.rent_epoch
+                    source_slot: slot,
+                    rent_epoch: account.rent_epoch,
                 };
 
                 self.state
@@ -88,7 +88,7 @@ impl GeyserPlugin for Plugin {
                     owner: account.owner.to_vec(),
                     write_version: account.write_version,
                     source_slot: slot,
-                    rent_epoch: account.rent_epoch
+                    rent_epoch: account.rent_epoch,
                 };
 
                 self.state
@@ -105,7 +105,7 @@ impl GeyserPlugin for Plugin {
                     owner: account.owner.to_vec(),
                     write_version: account.write_version,
                     source_slot: slot,
-                    rent_epoch: account.rent_epoch
+                    rent_epoch: account.rent_epoch,
                 };
 
                 self.state
@@ -121,7 +121,10 @@ impl GeyserPlugin for Plugin {
         let mut lock_state = self.state.write().unwrap();
 
         // if we have no blockmeta received yet, we truncate our list to the last x blocks to prevent filling up the RAM on catch up
-        if !lock_state.get_first_blockmeta_received() && lock_state.accounts_len() > 200 && slot > 200 {
+        if !lock_state.get_first_blockmeta_received()
+            && lock_state.accounts_len() > 200
+            && slot > 200
+        {
             println!("Purging blocks up to {}", slot - 200);
             lock_state.purge_blocks_up_to(slot - 200); // this may keep less than 200 blocks because of forked blocks
         }
@@ -168,8 +171,12 @@ impl GeyserPlugin for Plugin {
                 println!("slot confirmed {}", slot);
 
                 if !lock_state.get_first_blockmeta_received() {
-                    println!("Delaying processing slot {} as we have not received any blockmeta yet", slot);
-                    if !lock_state.is_already_purged(slot) { // align with purged account_data
+                    println!(
+                        "Delaying processing slot {} as we have not received any blockmeta yet",
+                        slot
+                    );
+                    if !lock_state.is_already_purged(slot) {
+                        // align with purged account_data
                         lock_state.set_confirmed_slot(slot);
                     }
                     return Ok(());
@@ -290,9 +297,14 @@ impl GeyserPlugin for Plugin {
                     }
                     &blk.unwrap()
                 }
-            };               
+            };
             let account_changes = lock_state.get_account_changes(slot);
-            let acc_block = create_account_block(slot, lib_num, account_changes.unwrap_or(&AccountChanges::default()), block_info);
+            let acc_block = create_account_block(
+                slot,
+                lib_num,
+                account_changes.unwrap_or(&AccountChanges::default()),
+                block_info,
+            );
             BlockPrinter::new(&acc_block).print();
             lock_state.purge_blocks_up_to(toproc);
         }
