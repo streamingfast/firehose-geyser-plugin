@@ -205,11 +205,13 @@ impl State {
         if self.first_received_blockmeta.is_none() {
             self.first_received_blockmeta = Some(slot);
             if self.cursor.is_none() {
+                debug!("setting first_block_to_process to: {}", slot);
                 self.first_block_to_process = Some(slot);
                 debug!("deleting blocks up to: {}", slot-1);
                 self.purge_blocks_up_to(slot - 1);
             }
         }
+        debug!("setting block info for slot {}", slot);
         self.block_infos.insert(slot, block_info);
     }
 
@@ -281,7 +283,7 @@ impl State {
                             "process_upto({}): block info not found for slot {} (not trying on RPC)",
                             slot, toproc
                         );
-                        break;
+                        return; // don't process anything else
                     }
                     let blk = self.get_block_from_rpc(toproc);
                     if blk.is_none() {
@@ -289,7 +291,7 @@ impl State {
                             "process_upto({}): block info not found for slot {}",
                             slot, toproc
                         );
-                        break;
+                        return; // don't process anything else
                     }
                     &blk.unwrap()
                 }
