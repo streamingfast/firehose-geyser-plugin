@@ -185,6 +185,15 @@ impl GeyserPlugin for Plugin {
                     return Ok(());
                 }
 
+                if !lock_state.set_last_finalized_block_from_rpc() {
+                    println!(
+                        "Delaying processing slot {} as we have not set a finalized block yet",
+                        slot
+                    );
+                    lock_state.set_confirmed_slot(slot);
+                    return Ok(());
+                }
+
                 if lock_state.get_block_info(slot).is_none() {
                     println!("Delaying processing slot {} as we have not received blockmeta for that block yet", slot);
                     lock_state.set_confirmed_slot(slot);
@@ -197,12 +206,11 @@ impl GeyserPlugin for Plugin {
                 let account_changes = lock_state.get_account_changes(slot);
                 let acc_block = create_account_block(
                     slot,
-                    lock_state.get_last_finalized_block(),
+                    lock_state.get_last_finalized_block().unwrap(),
                     account_changes.unwrap_or(&AccountChanges::default()),
                     &block_info,
                 );
                 BlockPrinter::new(&acc_block).print();
-
                 lock_state.purge_blocks_up_to(slot);
             }
             _ => {
@@ -215,13 +223,13 @@ impl GeyserPlugin for Plugin {
 
     fn notify_transaction(
         &self,
-        transaction: ReplicaTransactionInfoVersions<'_>,
-        slot: u64,
+        _transaction: ReplicaTransactionInfoVersions<'_>,
+        _slot: u64,
     ) -> PluginResult<()> {
         Ok(())
     }
 
-    fn notify_entry(&self, entry: ReplicaEntryInfoVersions) -> PluginResult<()> {
+    fn notify_entry(&self, _entry: ReplicaEntryInfoVersions) -> PluginResult<()> {
         Ok(())
     }
 
@@ -283,8 +291,13 @@ impl GeyserPlugin for Plugin {
             }
         }
 
-        println!("received blockmeta {}", slot);
         let mut lock_state = self.state.write().unwrap();
+        if !lock_state.set_last_finalized_block_from_rpc() {
+            println!("Received blockmeta {}, delaying processing as we have not set a finalized block yet", slot);
+            return Ok(());
+        }
+
+        println!("received blockmeta {}", slot);
         lock_state.backprocess_below(slot);
         let block_info = lock_state.get_block_info(slot).unwrap();
         if lock_state.is_confirmed_slot(slot) {
@@ -292,7 +305,7 @@ impl GeyserPlugin for Plugin {
 
             let acc_block = create_account_block(
                 slot,
-                lock_state.get_last_finalized_block(),
+                lock_state.get_last_finalized_block().unwrap(),
                 account_changes.unwrap_or(&AccountChanges::default()),
                 &block_info,
             );

@@ -62,28 +62,31 @@ impl State {
         return self.last_purged_block >= slot;
     }
 
-    pub fn set_last_finalized_block_from_rpc(&mut self) {
-        if !self.last_finalized_block.is_none() {
-            let commitment_config = CommitmentConfig::finalized();
-            match self
-                .rpc_client
-                .as_ref()
-                .unwrap()
-                .get_slot_with_commitment(commitment_config)
-            {
-                Ok(lib_num) => {
-                    println!("Block lib received from rpc client: {}", lib_num);
-                    self.last_finalized_block = Some(lib_num);
-                }
-                Err(e) => {
-                    println!("Error getting lib num from rpc client: {}", e);
-                }
+    pub fn set_last_finalized_block_from_rpc(&mut self) -> bool {
+        if self.last_finalized_block.is_some() {
+            return true
+        }
+        let commitment_config = CommitmentConfig::finalized();
+        match self
+            .rpc_client
+            .as_ref()
+            .unwrap()
+            .get_slot_with_commitment(commitment_config)
+        {
+            Ok(lib_num) => {
+                println!("Block lib received from rpc client: {}", lib_num);
+                self.last_finalized_block = Some(lib_num);
+                return true;
+            }
+            Err(e) => {
+                println!("Error getting lib num from rpc client: {}", e);
+                return false;
             }
         }
     }
 
-    pub fn get_last_finalized_block(&self) -> u64 {
-        self.last_finalized_block.unwrap()
+    pub fn get_last_finalized_block(&self) -> Option<u64> {
+        self.last_finalized_block
     }
 
     pub fn get_account_changes(&self, slot: u64) -> Option<&AccountChanges> {
@@ -187,6 +190,12 @@ impl State {
 
     // Print all the previous complete blocks
     pub fn backprocess_below(&mut self, slot: u64) {
+        let lib_num = match self.get_last_finalized_block() {
+            Some(lib_num) => lib_num,
+            None => {
+                return;
+            }
+        };
         for toproc in self.ordered_confirmed_slots_below(slot) {
             let block_info = match self.get_block_info(toproc) {
                 Some(block_info) => block_info,
@@ -201,7 +210,7 @@ impl State {
             let account_changes = self.get_account_changes(slot);
             let acc_block = create_account_block(
                 slot,
-                self.get_last_finalized_block(),
+                lib_num,
                 account_changes.unwrap_or(&AccountChanges::default()),
                 block_info,
             );
