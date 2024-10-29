@@ -62,6 +62,8 @@ impl GeyserPlugin for Plugin {
             // we never process those, we don't even want them.
             return Ok(());
         }
+
+        self.state.write().unwrap().get_last_finalized_block();
         match account {
             ReplicaAccountInfoVersions::V0_0_1(account) => {
                 let account_key = account.pubkey.to_vec();
