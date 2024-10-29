@@ -200,7 +200,14 @@ impl GeyserPlugin for Plugin {
                     return Ok(());
                 }
 
-                lock_state.backprocess_below(slot);
+                if !lock_state.backprocess_below(slot) {
+                    println!(
+                        "Delaying processing slot {} as we have not backprocessed everything yet",
+                        slot
+                    );
+                    lock_state.set_confirmed_slot(slot);
+                    return Ok(());
+                }
                 let block_info = lock_state.get_block_info(slot).unwrap();
 
                 let account_changes = lock_state.get_account_changes(slot);
@@ -298,7 +305,10 @@ impl GeyserPlugin for Plugin {
         }
 
         println!("received blockmeta {}", slot);
-        lock_state.backprocess_below(slot);
+        if !lock_state.backprocess_below(slot) {
+            println!("Received blockmeta {}, delaying processing as we have not backprocessed everything yet", slot);
+            return Ok(());
+        };
         let block_info = lock_state.get_block_info(slot).unwrap();
         if lock_state.is_confirmed_slot(slot) {
             let account_changes = lock_state.get_account_changes(slot);

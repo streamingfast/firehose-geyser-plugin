@@ -64,7 +64,7 @@ impl State {
 
     pub fn set_last_finalized_block_from_rpc(&mut self) -> bool {
         if self.last_finalized_block.is_some() {
-            return true
+            return true;
         }
         let commitment_config = CommitmentConfig::finalized();
         match self
@@ -188,15 +188,17 @@ impl State {
         self.last_purged_block = slot;
     }
 
-    // Print all the previous complete blocks
-    pub fn backprocess_below(&mut self, slot: u64) {
+    // Print all the previous complete blocks, returns true if last block was sent
+    pub fn backprocess_below(&mut self, slot: u64) -> bool {
         let lib_num = match self.get_last_finalized_block() {
             Some(lib_num) => lib_num,
             None => {
-                return;
+                return false;
             }
         };
+        let mut last_block_sent = false;
         for toproc in self.ordered_confirmed_slots_below(slot) {
+            last_block_sent = false;
             let block_info = match self.get_block_info(toproc) {
                 Some(block_info) => block_info,
                 None => {
@@ -215,8 +217,10 @@ impl State {
                 block_info,
             );
             BlockPrinter::new(&acc_block).print();
+            last_block_sent = true;
             self.purge_blocks_up_to(toproc);
         }
+        return last_block_sent;
     }
 
     pub fn stats(&mut self) {
