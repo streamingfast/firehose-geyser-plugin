@@ -61,33 +61,28 @@ impl State {
         return self.last_purged_block >= slot;
     }
 
-    pub fn get_last_finalized_block(&mut self) -> u64 {
-        match self.last_finalized_block {
-            None => {
-                let commitment_config = CommitmentConfig::finalized();
-                loop {
-                    println!("Fetch current lib using rpc client");
-                    match self
-                        .rpc_client
-                        .as_ref()
-                        .unwrap()
-                        .get_slot_with_commitment(commitment_config)
-                    {
-                        Ok(lib_num) => {
-                            println!("Block lib received: {}", lib_num);
-                            self.last_finalized_block = Some(lib_num);
-                            break lib_num;
-                        }
-                        Err(e) => {
-                            println!("Error getting lib num: {}", e);
-                            sleep(Duration::from_millis(50));
-                            break 0;
-                        }
-                    }
+    pub fn set_last_finalized_block_from_rpc(&mut self) {
+        if !self.last_finalized_block.is_none() {
+            let commitment_config = CommitmentConfig::finalized();
+            match self
+                .rpc_client
+                .as_ref()
+                .unwrap()
+                .get_slot_with_commitment(commitment_config)
+            {
+                Ok(lib_num) => {
+                    println!("Block lib received from rpc client: {}", lib_num);
+                    self.last_finalized_block = Some(lib_num);
+                }
+                Err(e) => {
+                    println!("Error getting lib num from rpc client: {}", e);
                 }
             }
-            Some(slot) => slot,
         }
+    }
+
+    pub fn get_last_finalized_block(&self) -> u64 {
+        self.last_finalized_block.unwrap()
     }
 
     pub fn get_account_changes(&self, slot: u64) -> Option<&AccountChanges> {
