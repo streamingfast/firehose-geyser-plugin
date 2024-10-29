@@ -21,6 +21,7 @@ use pb::sf::solana::r#type::v1::Account;
 use solana_rpc_client::rpc_client::RpcClient;
 use std::fmt;
 use std::str::FromStr;
+use env_logger::Target;
 
 #[derive(Default)]
 pub struct Plugin {
@@ -43,12 +44,13 @@ impl GeyserPlugin for Plugin {
     fn on_load(&mut self, config_file: &str, _is_reload: bool) -> PluginResult<()> {
         let plugin_config = PluginConfig::load_from_file(config_file)?;
 
-        let filter_level = LevelFilter::from_str(plugin_config.log.level.as_str()).unwrap_or(log::LevelFilter::Info);
+        let filter_level = LevelFilter::from_str(plugin_config.log.level.as_str()).unwrap_or(LevelFilter::Info);
         env_logger::Builder::new()
             .filter_level(filter_level)
             .format_timestamp_nanos()
+            .target(Target::Stdout)
             .init();
-        
+
         debug!("on load");
 
         let rpc_client = RpcClient::new(plugin_config.rpc_client.endpoint);
