@@ -291,7 +291,7 @@ impl GeyserPlugin for Plugin {
             let block_info = match lock_state.get_block_info(toproc) {
                 Some(block_info) => block_info,
                 None => {
-                    let blk = lock_state.get_block_from_rpc(slot);
+                    let blk = lock_state.get_block_from_rpc(toproc);
                     if blk.is_none() {
                         continue;
                     }
