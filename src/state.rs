@@ -150,6 +150,10 @@ impl State {
             .insert(pub_key, account);
     }
 
+    pub fn accounts_len(&self) -> usize {
+        self.block_account_changes.len()
+    }
+
     pub fn purge_blocks_up_to(&mut self, slot: u64) {
         let blocks: Vec<u64> = self.block_account_changes.keys().cloned().collect();
         for block in blocks {

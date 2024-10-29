@@ -120,12 +120,10 @@ impl GeyserPlugin for Plugin {
         }
         let mut lock_state = self.state.write().unwrap();
 
-        // if we have no blockmeta received ever, we truncate our list to the last x blocks to prevent filling up the RAM on catch up
-        if !lock_state.get_first_blockmeta_received() {
-            if slot > 200 {
-                println!("Purging blocks up to {} because we got no blockmeta yet", slot - 200);
-                lock_state.purge_blocks_up_to(slot - 200);
-            }
+        // if we have no blockmeta received yet, we truncate our list to the last x blocks to prevent filling up the RAM on catch up
+        if !lock_state.get_first_blockmeta_received() && lock_state.accounts_len() > 200 && slot > 200 {
+            println!("Purging blocks up to {}", slot - 200);
+            lock_state.purge_blocks_up_to(slot - 200); // this may keep less than 200 blocks because of forked blocks
         }
 
         Ok(())
