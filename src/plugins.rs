@@ -120,10 +120,11 @@ impl GeyserPlugin for Plugin {
         }
         let mut lock_state = self.state.write().unwrap();
 
-        // if we have no blockmeta received ever, we truncate our list to the last x blocks
+        // if we have no blockmeta received ever, we truncate our list to the last x blocks to prevent filling up the RAM on catch up
         if !lock_state.get_first_blockmeta_received() {
-            if slot > 100 {
-                lock_state.purge_blocks_up_to(slot - 100);
+            if slot > 200 {
+                println!("Purging blocks up to {} because we got no blockmeta yet", slot - 200);
+                lock_state.purge_blocks_up_to(slot - 200);
             }
         }
 
@@ -138,8 +139,8 @@ impl GeyserPlugin for Plugin {
         Order of stuff received
 
     1. We receive a bunch of account changes (ex: 203, 204, 205, 206, 207, 208...)
-    2. We then receive a bunch of slot updates Confirmed: (ex: 205, 206, 207)
-    -- Since we don't have the blockmeta for ALL those blocks, we ignore them for now (TODO: fetch using RPC...)
+    2. We then receive a bunch of slot updates Confirmed: (ex: 205, 206, 207) -- we only keep a max number of those to prevent filling up the RAM
+    -- Since we don't have the blockmeta for ALL those blocks, we only add them to the list of confirmed slots
     3. We then receive a first blockmetadata for a block (ex: 208)
     4. Followed by a Slot:Processed (208)
     5. We may receive a few account changes between this step and the next one, ex: 209, 210, 211...
@@ -219,8 +220,6 @@ impl GeyserPlugin for Plugin {
     }
 
     fn notify_block_metadata(&self, blockinfo: ReplicaBlockInfoVersions<'_>) -> PluginResult<()> {
-        let is_first_blockmeta_notif_ever = !self.state.read().unwrap().get_first_blockmeta_received();
-
         let mut slot = 0;
         match blockinfo {
             ReplicaBlockInfoVersions::V0_0_1(_) => {
@@ -281,7 +280,6 @@ impl GeyserPlugin for Plugin {
         let mut lock_state = self.state.write().unwrap();
         let lib_num = lock_state.get_last_finalized_block();
 
-        if is_first_blockmeta_notif_ever {
             // Print all the previous complete blocks
             for toproc in lock_state.ordered_confirmed_slots_below(slot) {
                 let block_info = match lock_state.get_block_info(toproc) {
@@ -295,7 +293,6 @@ impl GeyserPlugin for Plugin {
                 BlockPrinter::new(&acc_block).print();
                    lock_state.purge_blocks_up_to(toproc);
                 }
-        }
 
         let block_info = lock_state.get_block_info(slot).unwrap();
         println!("blockmeta {}", block_info.slot);
