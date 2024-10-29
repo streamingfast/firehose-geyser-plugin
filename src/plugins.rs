@@ -42,9 +42,12 @@ impl GeyserPlugin for Plugin {
     fn on_load(&mut self, config_file: &str, _is_reload: bool) -> PluginResult<()> {
         let plugin_config = PluginConfig::load_from_file(config_file)?;
 
-        solana_logger::setup_with_default(&plugin_config.log.level);
+        env_logger::Builder::from_env(env_logger::Env::new().default_filter_or(&plugin_config.log.level))
+            .format_timestamp_nanos()
+            .init();
+
         debug!("on load");
-        
+
         let rpc_client = RpcClient::new(plugin_config.rpc_client.endpoint);
         self.state = RwLock::new(State::new(rpc_client));
 

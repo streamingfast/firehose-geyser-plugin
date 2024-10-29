@@ -2998,6 +2998,7 @@ dependencies = [
  "cargo-lock",
  "config",
  "crossbeam-channel",
+ "env_logger",
  "git-version",
  "log",
  "prost",
@@ -3005,7 +3006,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sleep",
- "solana-logger",
  "solana-program 1.18.26",
  "solana-rpc-client",
  "solana-rpc-client-api",
@@ -3099,17 +3099,6 @@ dependencies = [
  "bytemuck",
  "rustc_version",
  "solana-sdk",
-]
-
-[[package]]
-name = "solana-logger"
-version = "2.0.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7369915bd82d09dcb14a5ebba3431c4e54f19f2de0521ac56627d38016d45408"
-dependencies = [
- "env_logger",
- "lazy_static",
- "log",
 ]
 
 [[package]]
