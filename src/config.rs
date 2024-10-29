@@ -10,6 +10,30 @@ use std::{fs::read_to_string, path::Path};
 pub struct Config {
     pub libpath: String,
     pub rpc_client: RpcClientConfig,
+    #[serde(default)]
+    pub log: ConfigLog, 
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigLog {
+    /// Log level.
+    #[serde(default = "ConfigLog::default_level")]
+    pub level: String,
+}
+
+impl Default for ConfigLog {
+    fn default() -> Self {
+        Self {
+            level: Self::default_level(),
+        }
+    }
+}
+
+impl ConfigLog {
+    fn default_level() -> String {
+        "info".to_owned()
+    }
 }
 
 #[derive(Deserialize, Default, Debug)]

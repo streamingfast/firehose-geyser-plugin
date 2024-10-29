@@ -15,6 +15,7 @@ use {
     std::{concat, env, sync::RwLock},
 };
 
+use log::{info, debug};
 use crate::pb;
 use pb::sf::solana::r#type::v1::Account;
 use solana_rpc_client::rpc_client::RpcClient;
@@ -39,11 +40,15 @@ impl GeyserPlugin for Plugin {
     }
 
     fn on_load(&mut self, config_file: &str, _is_reload: bool) -> PluginResult<()> {
-        println!("on load");
+        debug!("on load");
         println!("FIRE INIT 3.0 sf.solana.type.v1.AccountBlock");
 
         let plugin_config = PluginConfig::load_from_file(config_file)?;
+        
+        solana_logger::setup_with_default(&plugin_config.log.level);
+
         let rpc_client = RpcClient::new(plugin_config.rpc_client.endpoint);
+        
 
         self.state = RwLock::new(State::new(rpc_client));
 
@@ -126,7 +131,7 @@ impl GeyserPlugin for Plugin {
             && lock_state.accounts_len() > 300
             && slot > 300
         {
-            println!("Purging blocks up to {}", slot - 300);
+            debug!("Purging blocks up to {}", slot - 300);
             lock_state.purge_blocks_up_to(slot - 300); // this may keep less than x blocks because of forked blocks
         }
 
@@ -134,7 +139,7 @@ impl GeyserPlugin for Plugin {
     }
 
     fn notify_end_of_startup(&self) -> PluginResult<()> {
-        println!("end of startup");
+        debug!("end of startup");
         Ok(())
     }
     /*
@@ -159,18 +164,18 @@ impl GeyserPlugin for Plugin {
     ) -> PluginResult<()> {
         match status {
             SlotStatus::Processed => {
-                println!("slot processed {}", slot);
+                debug!("slot processed {}", slot);
             }
             SlotStatus::Rooted => {
-                println!("slot rooted {}", slot);
+                debug!("slot rooted {}", slot);
                 self.state.write().unwrap().set_last_finalized_block(slot);
             }
             SlotStatus::Confirmed => {
-                println!("slot confirmed {}", slot);
+                debug!("slot confirmed {}", slot);
 
                 let mut lock_state = self.state.write().unwrap();
                 if !lock_state.get_first_root_update_received() {
-                    println!(
+                    debug!(
                         "Delaying processing slot {} as we have not received any root_update yet",
                         slot
                     );
@@ -182,7 +187,7 @@ impl GeyserPlugin for Plugin {
                 }
 
                 if lock_state.get_block_info(slot).is_none() {
-                    println!("Delaying processing slot {} as we have not received blockmeta for that block yet", slot);
+                    debug!("Delaying processing slot {} as we have not received blockmeta for that block yet", slot);
                     lock_state.set_confirmed_slot(slot);
                     return Ok(());
                 }
@@ -279,12 +284,12 @@ impl GeyserPlugin for Plugin {
         }
 
         if !self.state.read().unwrap().get_first_root_update_received() {
-            println!("Received blockmeta {}, but delaying processing as we have not received any root_update yet", slot);
+            debug!("Received blockmeta {}, but delaying processing as we have not received any root_update yet", slot);
             return Ok(());
         }
 
         let mut lock_state = self.state.write().unwrap();
-        println!("received blockmeta {}", slot);
+        debug!("received blockmeta {}", slot);
         lock_state.backprocess_below(slot);
 
         let block_info = lock_state.get_block_info(slot).unwrap();
