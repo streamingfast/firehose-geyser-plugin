@@ -1,4 +1,5 @@
 use agave_geyser_plugin_interface::geyser_plugin_interface::SlotStatus;
+use base58::ToBase58;
 use {
     crate::{config::Config as PluginConfig, state::BlockInfo, state::State},
     agave_geyser_plugin_interface::geyser_plugin_interface::{
@@ -16,6 +17,8 @@ use pb::sf::solana::r#type::v1::Account;
 use solana_rpc_client::rpc_client::RpcClient;
 use std::fmt;
 use std::str::FromStr;
+
+const VOTE_ACCOUNT: &str = "Vote111111111111111111111111111111111111111";
 
 #[derive(Default)]
 pub struct Plugin {
@@ -89,6 +92,9 @@ impl GeyserPlugin for Plugin {
 
         match account {
             ReplicaAccountInfoVersions::V0_0_1(account) => {
+                if account.owner.to_base58() == VOTE_ACCOUNT {
+                    return Ok(());
+                }
                 let account_key = account.pubkey.to_vec();
                 let account = Account {
                     address: account.pubkey.to_vec(),
@@ -103,6 +109,9 @@ impl GeyserPlugin for Plugin {
             }
 
             ReplicaAccountInfoVersions::V0_0_2(account) => {
+                if account.owner.to_base58() == VOTE_ACCOUNT {
+                    return Ok(());
+                }
                 let account_key = account.pubkey.to_vec();
                 let account = Account {
                     address: account.pubkey.to_vec(),
@@ -117,6 +126,9 @@ impl GeyserPlugin for Plugin {
             }
 
             ReplicaAccountInfoVersions::V0_0_3(account) => {
+                if account.owner.to_base58() == VOTE_ACCOUNT {
+                    return Ok(());
+                }
                 let account_key = account.pubkey.to_vec();
                 let account = Account {
                     address: account.pubkey.to_vec(),
