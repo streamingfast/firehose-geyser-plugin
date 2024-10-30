@@ -324,7 +324,7 @@ impl State {
             let block_info = match self.get_block_info(toproc) {
                 Some(block_info) => block_info,
                 None => {
-                    if self.initialized {
+                    if self.initialized && self.confirmed_slots.len() < 30 {
                         debug!(
                             "process_upto({}): block info not found for slot {} (not trying on RPC)",
                             slot, toproc
