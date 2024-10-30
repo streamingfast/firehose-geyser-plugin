@@ -175,7 +175,7 @@ impl State {
         };
         if self.cursor.is_none() && self.first_block_to_process.is_none() {
             // without cursor or first_block_to_process, we only keep a few blocks in here...
-            debug!("initializing: deleting blocks up to: {}", slot-1);
+            debug!("initializing: deleting blocks up to: {}", slot - 1);
             self.purge_blocks_up_to(slot - 32);
         }
         return false;
@@ -189,7 +189,7 @@ impl State {
             if self.first_block_to_process.is_none() {
                 if slot >= cursor {
                     self.first_block_to_process = Some(slot);
-                    debug!("deleting blocks up to: {}", slot-1);
+                    debug!("deleting blocks up to: {}", slot - 1);
                     self.purge_blocks_up_to(slot - 1);
                 }
             }
@@ -207,7 +207,7 @@ impl State {
             if self.cursor.is_none() {
                 debug!("setting first_block_to_process to: {}", slot);
                 self.first_block_to_process = Some(slot);
-                debug!("deleting blocks up to: {}", slot-1);
+                debug!("deleting blocks up to: {}", slot - 1);
                 self.purge_blocks_up_to(slot - 1);
             }
         }
@@ -230,17 +230,24 @@ impl State {
             .insert(pub_key, account);
     }
 
-    fn purge_blocks_up_to(&mut self, slot: u64) {
-        let blocks: Vec<u64> = self.block_account_changes.keys().cloned().collect();
+    fn purge_blocks_up_to(&mut self, upto: u64) {
+        let blocks = self
+            .block_account_changes
+            .keys()
+            .cloned()
+            .collect::<Vec<u64>>();
         for block in blocks {
-            if block > slot {
+            if block > upto {
                 continue;
             }
             self.block_account_changes.remove(&block);
             self.block_infos.remove(&block);
         }
-        for slot in self.confirmed_slots.keys().cloned().collect::<Vec<u64>>() {
-            if slot <= slot {
+
+        let slots = self.confirmed_slots.keys().cloned().collect::<Vec<u64>>();
+        for slot in slots {
+            if slot <= upto {
+                debug!("purging confirmed slot {}", slot);
                 self.confirmed_slots.remove(&slot);
             }
         }
