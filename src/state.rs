@@ -87,7 +87,10 @@ impl State {
                 self.lib = Some(lib_num);
                 if let Some(cursor) = self.cursor {
                     if lib_num > cursor {
-                        info!("ignoring cursor {} because LIB {} is greater", cursor, lib_num);
+                        info!(
+                            "ignoring cursor {} because LIB {} is greater",
+                            cursor, lib_num
+                        );
                         self.cursor = None;
                         self.first_block_to_process = None; // it would have been set by the cursor, we get rid of it too
                     }
@@ -231,10 +234,18 @@ impl State {
             debug!("account data for slot {}", slot);
         }
 
-        self.block_account_changes
+        let slot_entries = self
+            .block_account_changes
             .entry(slot)
-            .or_insert_with(HashMap::new)
-            .insert(pub_key, account);
+            .or_insert_with(HashMap::new);
+
+        if let Some(prev) = slot_entries.get(key) {
+            if prev.write_version > account.write_version {
+                return; // skipping older write_versions
+            }
+        }
+
+        slot_entries.insert(pub_key, account);
     }
 
     fn purge_blocks_up_to(&mut self, upto: u64) {
