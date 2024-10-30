@@ -10,7 +10,7 @@ type BlockAccountChanges = HashMap<u64, AccountChanges>;
 pub type AccountChanges = HashMap<Vec<u8>, Account>;
 type BlockInfoMap = HashMap<u64, BlockInfo>;
 type ConfirmedSlotsMap = HashMap<u64, bool>;
-use log::debug;
+use log::{debug, info};
 use solana_rpc_client_api::config::RpcBlockConfig;
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_transaction_status::TransactionDetails;
@@ -85,6 +85,13 @@ impl State {
             Ok(lib_num) => {
                 println!("Block lib received from rpc client: {}", lib_num);
                 self.lib = Some(lib_num);
+                if let Some(cursor) = self.cursor {
+                    if lib_num > cursor {
+                        info!("ignoring cursor {} because LIB {} is greater", cursor, lib_num);
+                        self.cursor = None;
+                        self.first_block_to_process = None; // it would have been set by the cursor, we get rid of it too
+                    }
+                }
             }
             Err(e) => {
                 println!("Error getting lib num from rpc client: {}", e);
