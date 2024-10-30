@@ -6,8 +6,11 @@ use prost_types::Timestamp;
 use solana_rpc_client::rpc_client::RpcClient;
 use std::collections::HashMap;
 
+use sha2::{Sha256, Digest};
+
 type BlockAccountChanges = HashMap<u64, AccountChanges>;
 pub type AccountChanges = HashMap<Vec<u8>, Account>;
+pub type AccountDataHash = HashMap<Vec<u8>, Vec<u8>>;
 type BlockInfoMap = HashMap<u64, BlockInfo>;
 type ConfirmedSlotsMap = HashMap<u64, bool>;
 use log::{debug, info};
@@ -42,6 +45,8 @@ pub struct State {
     lib: Option<u64>,
 
     block_account_changes: BlockAccountChanges,
+    account_data_hash: AccountDataHash,
+
     block_infos: BlockInfoMap,
     confirmed_slots: ConfirmedSlotsMap,
 
@@ -65,6 +70,7 @@ impl State {
             initialized: false,
 
             block_account_changes: HashMap::new(),
+            account_data_hash: HashMap::new(),
             block_infos: HashMap::new(),
             confirmed_slots: HashMap::new(),
 
@@ -225,27 +231,42 @@ impl State {
         self.block_infos.insert(slot, block_info);
     }
 
-    pub fn set_account(&mut self, slot: u64, pub_key: Vec<u8>, account: Account) {
-        if self.should_skip_slot(slot) {
-            return;
-        }
+    pub fn set_account(&mut self, slot: u64, pub_key: Vec<u8>, account: Account, is_startup: bool) {
+        let mut hasher = Sha256::new();
+        hasher.update(&account.data);
 
-        if !self.block_account_changes.contains_key(&slot) {
-            debug!("account data for slot {}", slot);
-        }
+        let data_hash = hasher.finalize().to_vec();
+        let address = account.address.clone();
 
-        let slot_entries = self
-            .block_account_changes
-            .entry(slot)
-            .or_insert_with(HashMap::new);
-
-        if let Some(prev) = slot_entries.get(&pub_key) {
-            if prev.write_version > account.write_version {
-                return; // skipping older write_versions
+        if is_startup {
+            self.account_data_hash.insert(address, data_hash);
+        } else {
+            if self.should_skip_slot(slot) {
+                return;
             }
-        }
 
-        slot_entries.insert(pub_key, account);
+            if !self.block_account_changes.contains_key(&slot) {
+                debug!("account data for slot {}", slot);
+            }
+
+            let slot_entries = self
+                .block_account_changes
+                .entry(slot)
+                .or_insert_with(HashMap::new);
+
+            if let Some(prev) = slot_entries.get(&pub_key) {
+                if prev.write_version > account.write_version {
+                    return; // skipping older write_versions
+                }
+                if let Some(h) =  self.account_data_hash.get(&address) {
+                    if h == &data_hash {
+                        return; // skipping same data
+                    }
+                }
+            }
+
+            slot_entries.insert(pub_key, account);
+        }
     }
 
     fn purge_blocks_up_to(&mut self, upto: u64) {
@@ -338,6 +359,11 @@ impl State {
             write_cursor(&self.cursor_path, toproc);
         }
     }
+
+    pub fn get_hash_count(&self) -> usize {
+        self.account_data_hash.len()
+    }
+
 }
 
 fn write_cursor(cursor_file: &str, cursor: u64) {

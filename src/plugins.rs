@@ -12,7 +12,7 @@ use {
 use crate::pb;
 use crate::utils::convert_sol_timestamp;
 use env_logger::Target;
-use log::{debug, LevelFilter};
+use log::{debug, info, LevelFilter};
 use pb::sf::solana::r#type::v1::Account;
 use solana_rpc_client::rpc_client::RpcClient;
 use std::fmt;
@@ -84,7 +84,6 @@ impl GeyserPlugin for Plugin {
         is_startup: bool,
     ) -> PluginResult<()> {
         if is_startup {
-            // we never process those, we don't even want them.
             return Ok(());
         }
 
@@ -105,7 +104,7 @@ impl GeyserPlugin for Plugin {
                     rent_epoch: account.rent_epoch,
                 };
 
-                lock_state.set_account(slot, account_key, account);
+                lock_state.set_account(slot, account_key, account, is_startup);
             }
 
             ReplicaAccountInfoVersions::V0_0_2(account) => {
@@ -122,7 +121,7 @@ impl GeyserPlugin for Plugin {
                     rent_epoch: account.rent_epoch,
                 };
 
-                lock_state.set_account(slot, account_key, account);
+                lock_state.set_account(slot, account_key, account, is_startup);
             }
 
             ReplicaAccountInfoVersions::V0_0_3(account) => {
@@ -139,7 +138,7 @@ impl GeyserPlugin for Plugin {
                     rent_epoch: account.rent_epoch,
                 };
 
-                lock_state.set_account(slot, account_key, account);
+                lock_state.set_account(slot, account_key, account, is_startup);
             }
 
             _ => {
@@ -151,7 +150,8 @@ impl GeyserPlugin for Plugin {
     }
 
     fn notify_end_of_startup(&self) -> PluginResult<()> {
-        debug!("end of startup");
+        info!("preloaded account data hash count: {}", self.state.read().unwrap().get_hash_count());
+        info!("end of startup");
         Ok(())
     }
     /*
@@ -269,6 +269,7 @@ impl GeyserPlugin for Plugin {
     fn entry_notifications_enabled(&self) -> bool {
         true
     }
+    
 }
 
 #[no_mangle]
