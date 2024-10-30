@@ -239,7 +239,7 @@ impl State {
             .entry(slot)
             .or_insert_with(HashMap::new);
 
-        if let Some(prev) = slot_entries.get(key) {
+        if let Some(prev) = slot_entries.get(&pub_key) {
             if prev.write_version > account.write_version {
                 return; // skipping older write_versions
             }
