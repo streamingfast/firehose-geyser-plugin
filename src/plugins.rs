@@ -83,10 +83,6 @@ impl GeyserPlugin for Plugin {
         slot: u64,
         is_startup: bool,
     ) -> PluginResult<()> {
-        if is_startup {
-            return Ok(());
-        }
-
         let mut lock_state = self.state.write().unwrap();
 
         match account {
