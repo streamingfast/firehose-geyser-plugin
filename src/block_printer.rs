@@ -11,7 +11,7 @@ impl<'a> BlockPrinter<'a> {
         BlockPrinter { block }
     }
 
-    pub fn print(&self) {
+    pub fn print(&self, lib: u64) {
         let b = self.block;
         let encoded_block = b.encode_to_vec();
         let base64_encoded_block = base64::encode(encoded_block);
@@ -22,7 +22,7 @@ impl<'a> BlockPrinter<'a> {
             block_hash=b.hash,
             parent_slot=b.parent_slot,
             parent_hash=b.parent_hash,
-            lib=b.lib,
+            lib=lib,
             timestamp_nano=b.timestamp.as_ref().unwrap().seconds * 1_000_000_000,
             payload= base64_encoded_block
         );

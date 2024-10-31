@@ -344,7 +344,7 @@ impl State {
                 self.initialized = true;
             }
             debug!("printing block {}", toproc);
-            BlockPrinter::new(&acc_block).print();
+            BlockPrinter::new(&acc_block).print(self.lib.unwrap());
             self.purge_blocks_up_to(toproc);
             write_cursor(&self.cursor_path, toproc);
         }
