@@ -250,11 +250,12 @@ impl State {
 
         if let Some(prev) = slot_entries.get(&pub_key) {
             if prev.write_version > account.write_version {
+                debug!("skipping account data for slot {} because disordered version", slot);
                 return; // skipping older write_versions
             }
-
-            slot_entries.insert(pub_key, account);
         }
+
+        slot_entries.insert(pub_key, account);
     }
 
     fn purge_blocks_up_to(&mut self, upto: u64) {
