@@ -6,7 +6,7 @@ use prost_types::Timestamp;
 use solana_rpc_client::rpc_client::RpcClient;
 use std::collections::HashMap;
 
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 
 type BlockAccountChanges = HashMap<u64, AccountChanges>;
 pub type AccountChanges = HashMap<Vec<u8>, AccountWithWriteVersion>;
@@ -250,7 +250,10 @@ impl State {
 
         if let Some(prev) = slot_entries.get(&pub_key) {
             if prev.write_version > account.write_version {
-                debug!("skipping account data for slot {} because disordered version", slot);
+                debug!(
+                    "skipping account data for slot {} because disordered version",
+                    slot
+                );
                 return; // skipping older write_versions
             }
         }
@@ -313,7 +316,7 @@ impl State {
 
             let mut rpc_block = None;
             let block_info = match self.get_block_info(toproc) {
-                Some(bi) => { bi},
+                Some(bi) => bi,
                 None => {
                     if self.initialized && self.confirmed_slots.len() < 30 {
                         debug!(
@@ -322,19 +325,22 @@ impl State {
                         );
                         return; // don't process anything else
                     }
-                     match self.get_block_from_rpc(toproc) {
-                        Some(bi) => { rpc_block = Some(bi); rpc_block.as_ref().unwrap()},
+                    match self.get_block_from_rpc(toproc) {
+                        Some(bi) => {
+                            rpc_block = Some(bi);
+                            rpc_block.as_ref().unwrap()
+                        }
                         None => {
                             debug!(
-                            "process_upto({}): block info not found for slot {}",
-                            slot, toproc
-                        );
+                                "process_upto({}): block info not found for slot {}",
+                                slot, toproc
+                            );
                             return;
                         }
                     }
                 }
             };
-            
+
             let account_changes = self.get_account_changes(slot);
             let acc_block = create_account_block(
                 account_changes.unwrap_or(&AccountChanges::default()),

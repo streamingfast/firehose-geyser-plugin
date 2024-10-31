@@ -12,10 +12,12 @@ pub fn create_account_block(
     account_changes: &AccountChanges,
     block_info: &BlockInfo,
 ) -> AccountBlock {
-    let accounts: Vec<Account> = account_changes
+    let mut accounts: Vec<Account> = account_changes
         .into_iter()
-        .map(|(account_key, account)| account.account.clone())
+        .map(|(_account_key, account)| account.account.clone())
         .collect();
+
+    accounts.sort_by(|a, b| a.address.cmp(&b.address));
 
     AccountBlock {
         slot: block_info.slot,

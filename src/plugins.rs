@@ -10,6 +10,7 @@ use {
 };
 
 use crate::pb;
+use crate::state::AccountWithWriteVersion;
 use crate::utils::convert_sol_timestamp;
 use env_logger::Target;
 use log::{debug, info, LevelFilter};
@@ -17,7 +18,6 @@ use pb::sf::solana::r#type::v1::Account;
 use solana_rpc_client::rpc_client::RpcClient;
 use std::fmt;
 use std::str::FromStr;
-use crate::state::AccountWithWriteVersion;
 
 const VOTE_ACCOUNT: &str = "Vote111111111111111111111111111111111111111";
 
@@ -84,7 +84,6 @@ impl GeyserPlugin for Plugin {
         slot: u64,
         is_startup: bool,
     ) -> PluginResult<()> {
-
         if is_startup {
             return Ok(());
         }
@@ -101,12 +100,12 @@ impl GeyserPlugin for Plugin {
                     address: account.pubkey.to_vec(),
                     data: account.data.to_vec(),
                     owner: account.owner.to_vec(),
-                    deleted: account.lamports == 0
+                    deleted: account.lamports == 0,
                 };
 
                 let awv = AccountWithWriteVersion {
                     account: pb_account,
-                    write_version: account.write_version
+                    write_version: account.write_version,
                 };
 
                 lock_state.set_account(slot, account_key, awv);
@@ -121,11 +120,11 @@ impl GeyserPlugin for Plugin {
                     address: account.pubkey.to_vec(),
                     data: account.data.to_vec(),
                     owner: account.owner.to_vec(),
-                    deleted: account.lamports == 0
+                    deleted: account.lamports == 0,
                 };
                 let awv = AccountWithWriteVersion {
                     account: pb_account,
-                    write_version: account.write_version
+                    write_version: account.write_version,
                 };
 
                 lock_state.set_account(slot, account_key, awv);
@@ -140,12 +139,12 @@ impl GeyserPlugin for Plugin {
                     address: account.pubkey.to_vec(),
                     data: account.data.to_vec(),
                     owner: account.owner.to_vec(),
-                    deleted: account.lamports == 0
+                    deleted: account.lamports == 0,
                 };
 
                 let awv = AccountWithWriteVersion {
                     account: pb_account,
-                    write_version: account.write_version
+                    write_version: account.write_version,
                 };
 
                 lock_state.set_account(slot, account_key, awv);
@@ -254,7 +253,6 @@ impl GeyserPlugin for Plugin {
     fn entry_notifications_enabled(&self) -> bool {
         true
     }
-    
 }
 
 #[no_mangle]
