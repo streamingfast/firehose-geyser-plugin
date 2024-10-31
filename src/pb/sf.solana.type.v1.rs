@@ -11,8 +11,6 @@ pub struct AccountBlock {
     pub parent_slot: u64,
     #[prost(string, tag="4")]
     pub parent_hash: ::prost::alloc::string::String,
-    #[prost(uint64, tag="5")]
-    pub lib: u64,
     #[prost(message, optional, tag="6")]
     pub timestamp: ::core::option::Option<::prost_types::Timestamp>,
     #[prost(message, repeated, tag="7")]
@@ -27,11 +25,7 @@ pub struct Account {
     pub owner: ::prost::alloc::vec::Vec<u8>,
     #[prost(bytes="vec", tag="3")]
     pub data: ::prost::alloc::vec::Vec<u8>,
-    #[prost(uint64, tag="4")]
-    pub source_slot: u64,
-    #[prost(uint64, tag="5")]
-    pub rent_epoch: u64,
-    #[prost(uint64, tag="6")]
-    pub write_version: u64,
+    #[prost(bool, tag="7")]
+    pub deleted: bool,
 }
 // @@protoc_insertion_point(module)

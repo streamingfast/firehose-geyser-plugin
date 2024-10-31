@@ -17,6 +17,7 @@ use pb::sf::solana::r#type::v1::Account;
 use solana_rpc_client::rpc_client::RpcClient;
 use std::fmt;
 use std::str::FromStr;
+use crate::state::AccountWithWriteVersion;
 
 const VOTE_ACCOUNT: &str = "Vote111111111111111111111111111111111111111";
 
@@ -83,6 +84,11 @@ impl GeyserPlugin for Plugin {
         slot: u64,
         is_startup: bool,
     ) -> PluginResult<()> {
+
+        if is_startup {
+            return Ok(());
+        }
+
         let mut lock_state = self.state.write().unwrap();
 
         match account {
@@ -91,16 +97,19 @@ impl GeyserPlugin for Plugin {
                     return Ok(());
                 }
                 let account_key = account.pubkey.to_vec();
-                let account = Account {
+                let pb_account = Account {
                     address: account.pubkey.to_vec(),
                     data: account.data.to_vec(),
                     owner: account.owner.to_vec(),
-                    write_version: account.write_version,
-                    source_slot: slot,
-                    rent_epoch: account.rent_epoch,
+                    deleted: account.lamports == 0
                 };
 
-                lock_state.set_account(slot, account_key, account, is_startup);
+                let awv = AccountWithWriteVersion {
+                    account: pb_account,
+                    write_version: account.write_version
+                };
+
+                lock_state.set_account(slot, account_key, awv);
             }
 
             ReplicaAccountInfoVersions::V0_0_2(account) => {
@@ -108,16 +117,18 @@ impl GeyserPlugin for Plugin {
                     return Ok(());
                 }
                 let account_key = account.pubkey.to_vec();
-                let account = Account {
+                let pb_account = Account {
                     address: account.pubkey.to_vec(),
                     data: account.data.to_vec(),
                     owner: account.owner.to_vec(),
-                    write_version: account.write_version,
-                    source_slot: slot,
-                    rent_epoch: account.rent_epoch,
+                    deleted: account.lamports == 0
+                };
+                let awv = AccountWithWriteVersion {
+                    account: pb_account,
+                    write_version: account.write_version
                 };
 
-                lock_state.set_account(slot, account_key, account, is_startup);
+                lock_state.set_account(slot, account_key, awv);
             }
 
             ReplicaAccountInfoVersions::V0_0_3(account) => {
@@ -125,20 +136,19 @@ impl GeyserPlugin for Plugin {
                     return Ok(());
                 }
                 let account_key = account.pubkey.to_vec();
-                let account = Account {
+                let pb_account = Account {
                     address: account.pubkey.to_vec(),
                     data: account.data.to_vec(),
                     owner: account.owner.to_vec(),
-                    write_version: account.write_version,
-                    source_slot: slot,
-                    rent_epoch: account.rent_epoch,
+                    deleted: account.lamports == 0
                 };
 
-                lock_state.set_account(slot, account_key, account, is_startup);
-            }
+                let awv = AccountWithWriteVersion {
+                    account: pb_account,
+                    write_version: account.write_version
+                };
 
-            _ => {
-                panic!("Unsupported account version");
+                lock_state.set_account(slot, account_key, awv);
             }
         }
 
@@ -146,23 +156,9 @@ impl GeyserPlugin for Plugin {
     }
 
     fn notify_end_of_startup(&self) -> PluginResult<()> {
-        info!("preloaded account data hash count: {}", self.state.read().unwrap().get_hash_count());
         info!("end of startup");
         Ok(())
     }
-    /*
-        Order of stuff received
-
-    1. We receive a bunch of account changes (ex: 203, 204, 205, 206, 207, 208...)
-    2. We then receive a bunch of slot updates Confirmed: (ex: 205, 206, 207) -- we only keep a max number of those to prevent filling up the RAM
-    -- Since we don't have the blockmeta for ALL those blocks, we only add them to the list of confirmed slots
-    3. We then receive a first blockmetadata for a block (ex: 208)
-    4. Followed by a Slot:Processed (208)
-    5. We may receive a few account changes between this step and the next one, ex: 209, 210, 211...
-    6. Followed by a Slot:Confirmed (208)
-    Then the steps 3-6 repeat, with some "slot:Rooted" sprinkled...
-
-     */
 
     fn update_slot_status(
         &self,
@@ -182,9 +178,6 @@ impl GeyserPlugin for Plugin {
                 debug!("slot confirmed {}", slot);
                 let mut lock_state = self.state.write().unwrap();
                 lock_state.set_confirmed_slot(slot);
-            }
-            _ => {
-                panic!("Unsupported slot status");
             }
         }
 
@@ -244,10 +237,6 @@ impl GeyserPlugin for Plugin {
 
                 let mut lock_state = self.state.write().unwrap();
                 lock_state.set_block_info(blockinfo.slot, block_info);
-            }
-
-            _ => {
-                panic!("Unsupported block version");
             }
         }
 

@@ -9,8 +9,7 @@ use std::collections::HashMap;
 use sha2::{Sha256, Digest};
 
 type BlockAccountChanges = HashMap<u64, AccountChanges>;
-pub type AccountChanges = HashMap<Vec<u8>, Account>;
-pub type AccountDataHash = HashMap<Vec<u8>, Vec<u8>>;
+pub type AccountChanges = HashMap<Vec<u8>, AccountWithWriteVersion>;
 type BlockInfoMap = HashMap<u64, BlockInfo>;
 type ConfirmedSlotsMap = HashMap<u64, bool>;
 use log::{debug, info};
@@ -18,6 +17,12 @@ use solana_rpc_client_api::config::RpcBlockConfig;
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_transaction_status::TransactionDetails;
 
+pub struct AccountWithWriteVersion {
+    pub account: Account,
+    pub write_version: u64,
+}
+
+#[derive(Default)]
 pub struct BlockInfo {
     pub slot: u64,
     pub parent_slot: u64,
@@ -45,7 +50,6 @@ pub struct State {
     lib: Option<u64>,
 
     block_account_changes: BlockAccountChanges,
-    account_data_hash: AccountDataHash,
 
     block_infos: BlockInfoMap,
     confirmed_slots: ConfirmedSlotsMap,
@@ -70,7 +74,6 @@ impl State {
             initialized: false,
 
             block_account_changes: HashMap::new(),
-            account_data_hash: HashMap::new(),
             block_infos: HashMap::new(),
             confirmed_slots: HashMap::new(),
 
@@ -231,38 +234,23 @@ impl State {
         self.block_infos.insert(slot, block_info);
     }
 
-    pub fn set_account(&mut self, slot: u64, pub_key: Vec<u8>, account: Account, is_startup: bool) {
-        let mut hasher = Sha256::new();
-        hasher.update(&account.data);
+    pub fn set_account(&mut self, slot: u64, pub_key: Vec<u8>, account: AccountWithWriteVersion) {
+        if self.should_skip_slot(slot) {
+            return;
+        }
 
-        let data_hash = hasher.finalize().to_vec();
-        let address = account.address.clone();
+        if !self.block_account_changes.contains_key(&slot) {
+            debug!("account data for slot {}", slot);
+        }
 
-        if is_startup {
-            self.account_data_hash.insert(address, data_hash);
-        } else {
-            if self.should_skip_slot(slot) {
-                return;
-            }
+        let slot_entries = self
+            .block_account_changes
+            .entry(slot)
+            .or_insert_with(HashMap::new);
 
-            if !self.block_account_changes.contains_key(&slot) {
-                debug!("account data for slot {}", slot);
-            }
-
-            let slot_entries = self
-                .block_account_changes
-                .entry(slot)
-                .or_insert_with(HashMap::new);
-
-            if let Some(prev) = slot_entries.get(&pub_key) {
-                if prev.write_version > account.write_version {
-                    return; // skipping older write_versions
-                }
-                if let Some(h) =  self.account_data_hash.get(&address) {
-                    if h == &data_hash {
-                        return; // skipping same data
-                    }
-                }
+        if let Some(prev) = slot_entries.get(&pub_key) {
+            if prev.write_version > account.write_version {
+                return; // skipping older write_versions
             }
 
             slot_entries.insert(pub_key, account);
@@ -321,8 +309,10 @@ impl State {
             if toproc < self.first_block_to_process.unwrap() {
                 continue;
             }
+
+            let mut rpc_block = None;
             let block_info = match self.get_block_info(toproc) {
-                Some(block_info) => block_info,
+                Some(bi) => { bi},
                 None => {
                     if self.initialized && self.confirmed_slots.len() < 30 {
                         debug!(
@@ -331,21 +321,21 @@ impl State {
                         );
                         return; // don't process anything else
                     }
-                    let blk = self.get_block_from_rpc(toproc);
-                    if blk.is_none() {
-                        debug!(
+                     match self.get_block_from_rpc(toproc) {
+                        Some(bi) => { rpc_block = Some(bi); rpc_block.as_ref().unwrap()},
+                        None => {
+                            debug!(
                             "process_upto({}): block info not found for slot {}",
                             slot, toproc
                         );
-                        return; // don't process anything else
+                            return;
+                        }
                     }
-                    &blk.unwrap()
                 }
             };
+            
             let account_changes = self.get_account_changes(slot);
             let acc_block = create_account_block(
-                slot,
-                lib_num,
                 account_changes.unwrap_or(&AccountChanges::default()),
                 block_info,
             );
@@ -359,11 +349,6 @@ impl State {
             write_cursor(&self.cursor_path, toproc);
         }
     }
-
-    pub fn get_hash_count(&self) -> usize {
-        self.account_data_hash.len()
-    }
-
 }
 
 fn write_cursor(cursor_file: &str, cursor: u64) {

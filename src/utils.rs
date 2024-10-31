@@ -9,21 +9,18 @@ pub fn convert_sol_timestamp(sol_timestamp: UnixTimestamp) -> ProstTimestamp {
 }
 
 pub fn create_account_block(
-    slot: u64,
-    lib_num: u64,
     account_changes: &AccountChanges,
     block_info: &BlockInfo,
 ) -> AccountBlock {
     let accounts: Vec<Account> = account_changes
         .into_iter()
-        .map(|(account_key, account)| account.clone())
+        .map(|(account_key, account)| account.account.clone())
         .collect();
 
     AccountBlock {
         slot: block_info.slot,
         hash: block_info.block_hash.clone(),
         parent_hash: block_info.parent_hash.clone(),
-        lib: lib_num,
         parent_slot: block_info.parent_slot,
         accounts: accounts,
         timestamp: Some(block_info.timestamp.clone()),

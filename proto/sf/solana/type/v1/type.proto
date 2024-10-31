@@ -10,7 +10,6 @@ message AccountBlock {
   string hash = 2;
   uint64 parent_slot = 3;
   string parent_hash = 4;
-  uint64 lib = 5;
   google.protobuf.Timestamp timestamp = 6;
   repeated Account accounts = 7;
 }
@@ -19,9 +18,5 @@ message Account {
   bytes address = 1;
   bytes owner = 2;
   bytes data = 3;
-  uint64 source_slot = 4;
-  uint64 rent_epoch = 5;
-  uint64 write_version = 6;
+  bool deleted = 7;
 }
-
-
