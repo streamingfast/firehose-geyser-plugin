@@ -1,5 +1,6 @@
 use agave_geyser_plugin_interface::geyser_plugin_interface::SlotStatus;
 use base58::ToBase58;
+use solana_sdk::signer::Signer;
 use {
     crate::{config::Config as PluginConfig, state::BlockInfo, state::State},
     agave_geyser_plugin_interface::geyser_plugin_interface::{
@@ -20,6 +21,9 @@ use std::fmt;
 use std::str::FromStr;
 
 const VOTE_ACCOUNT: &str = "Vote111111111111111111111111111111111111111";
+const MY_ACCOUNT: &str = "4K7V3sSDGN2MaAD9runRWekXRDffADQsE6CiER6w69dN";
+const DERIVED_ACCOUNT: &str = "9QiiQiqg2riRns9CAuVvgFsAQ1RM6CH38EFysZ6R8Nac";
+
 
 #[derive(Default)]
 pub struct Plugin {
@@ -92,6 +96,17 @@ impl GeyserPlugin for Plugin {
 
         match account {
             ReplicaAccountInfoVersions::V0_0_1(account) => {
+
+                if account.pubkey.to_base58() == MY_ACCOUNT || 
+                    account.owner.to_base58() == MY_ACCOUNT ||
+                    account.pubkey.to_base58() == DERIVED_ACCOUNT ||
+                    account.owner.to_base58() == DERIVED_ACCOUNT {
+
+                    debug!("received my account: {} (owner: {}) on slot {}", 
+                        account.owner.to_base58(),
+                        account.pubkey.to_base58(),
+                        slot);
+                }
                 if account.owner.to_base58() == VOTE_ACCOUNT {
                     return Ok(());
                 }
