@@ -1,7 +1,11 @@
 use crate::pb::sf::solana::r#type::v1::{Account, AccountBlock};
+use base58::ToBase58;
 use crate::state::{AccountChanges, BlockInfo};
 use prost_types::Timestamp as ProstTimestamp;
 use solana_program::clock::UnixTimestamp;
+use log::debug;
+
+const DERIVED_ACCOUNT: &str = "9QiiQiqg2riRns9CAuVvgFsAQ1RM6CH38EFysZ6R8Nac";
 
 pub fn convert_sol_timestamp(sol_timestamp: UnixTimestamp) -> ProstTimestamp {
     let seconds = sol_timestamp as i64;
@@ -18,6 +22,16 @@ pub fn create_account_block(
         .collect();
 
     accounts.sort_by(|a, b| a.address.cmp(&b.address));
+    for account in accounts.iter() {
+        if account.address.to_base58() == DERIVED_ACCOUNT {
+            debug!(
+                "creating block data: received my account: {} (owner: {}) on slot {}",
+                account.owner.to_base58(),
+                account.address.to_base58(),
+                block_info.slot
+            );
+        }
+    }
 
     AccountBlock {
         slot: block_info.slot,

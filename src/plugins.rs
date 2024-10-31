@@ -21,7 +21,6 @@ use std::fmt;
 use std::str::FromStr;
 
 const VOTE_ACCOUNT: &str = "Vote111111111111111111111111111111111111111";
-const MY_ACCOUNT: &str = "4K7V3sSDGN2MaAD9runRWekXRDffADQsE6CiER6w69dN";
 const DERIVED_ACCOUNT: &str = "9QiiQiqg2riRns9CAuVvgFsAQ1RM6CH38EFysZ6R8Nac";
 
 
@@ -96,12 +95,7 @@ impl GeyserPlugin for Plugin {
 
         match account {
             ReplicaAccountInfoVersions::V0_0_1(account) => {
-
-                if account.pubkey.to_base58() == MY_ACCOUNT || 
-                    account.owner.to_base58() == MY_ACCOUNT ||
-                    account.pubkey.to_base58() == DERIVED_ACCOUNT ||
-                    account.owner.to_base58() == DERIVED_ACCOUNT {
-
+                if account.pubkey.to_base58() == DERIVED_ACCOUNT {
                     debug!("received my account: {} (owner: {}) on slot {}", 
                         account.owner.to_base58(),
                         account.pubkey.to_base58(),
@@ -127,6 +121,13 @@ impl GeyserPlugin for Plugin {
             }
 
             ReplicaAccountInfoVersions::V0_0_2(account) => {
+                if account.pubkey.to_base58() == DERIVED_ACCOUNT {
+                    debug!("received my account: {} (owner: {}) on slot {}", 
+                        account.owner.to_base58(),
+                        account.pubkey.to_base58(),
+                        slot);
+                }
+
                 if account.owner.to_base58() == VOTE_ACCOUNT {
                     return Ok(());
                 }
@@ -146,6 +147,12 @@ impl GeyserPlugin for Plugin {
             }
 
             ReplicaAccountInfoVersions::V0_0_3(account) => {
+                if account.pubkey.to_base58() == DERIVED_ACCOUNT {
+                    debug!("received my account: {} (owner: {}) on slot {}", 
+                        account.owner.to_base58(),
+                        account.pubkey.to_base58(),
+                        slot);
+                };
                 if account.owner.to_base58() == VOTE_ACCOUNT {
                     return Ok(());
                 }
