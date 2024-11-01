@@ -341,13 +341,13 @@ impl State {
                 }
             };
 
-            let account_changes = self.get_account_changes(slot);
+            let account_changes = self.get_account_changes(toproc);
             let acc_block = create_account_block(
                 account_changes.unwrap_or(&AccountChanges::default()),
                 block_info,
             );
-            if slot == self.first_received_blockmeta.unwrap() {
-                debug!("First block received, now initialized");
+            if toproc == self.first_received_blockmeta.unwrap() {
+                debug!("First block was sent, now initialized");
                 self.initialized = true;
             }
             debug!("printing block {}", toproc);
