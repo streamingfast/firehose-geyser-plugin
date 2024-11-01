@@ -4,8 +4,8 @@ use crate::utils::{convert_sol_timestamp, create_account_block};
 use pb::sf::solana::r#type::v1::Account;
 use prost_types::Timestamp;
 use solana_rpc_client::rpc_client::RpcClient;
-use twox_hash::XxHash64;
 use std::collections::HashMap;
+use twox_hash::XxHash64;
 
 type BlockAccountChanges = HashMap<u64, AccountChanges>;
 pub type AccountChanges = HashMap<Vec<u8>, AccountWithWriteVersion>;
@@ -17,7 +17,7 @@ use solana_rpc_client_api::config::RpcBlockConfig;
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_transaction_status::TransactionDetails;
 
-const SEED:u64 = 1234;
+const SEED: u64 = 1234;
 
 pub struct AccountWithWriteVersion {
     pub account: Account,
@@ -236,21 +236,30 @@ impl State {
         }
         debug!("setting block info for slot {}", slot);
         self.block_infos.insert(slot, block_info);
-        
+
         if self.confirmed_slots.get(&slot).is_some() {
             self.process_upto(slot);
         }
-        
     }
 
-    pub fn set_account(&mut self, slot: u64, pub_key: Vec<u8>, account: AccountWithWriteVersion, is_startup: bool) {
-        let data_hash = XxHash64::oneshot(SEED, &account.account.data);
+    pub fn set_account(
+        &mut self,
+        slot: u64,
+        pub_key: Vec<u8>,
+        account: AccountWithWriteVersion,
+        is_startup: bool,
+    ) {
+        let data_hash = if account.account.data.len() == 0 {
+            0
+        } else {
+            XxHash64::oneshot(SEED, &account.account.data)
+        };
         let address = account.account.address.clone();
 
         if is_startup {
             self.account_data_hash.insert(address, data_hash);
             return;
-        } 
+        }
         if self.should_skip_slot(slot) {
             return;
         }
@@ -268,9 +277,12 @@ impl State {
             if prev.write_version > account.write_version {
                 return; // skipping older write_versions
             }
-            if let Some(h) =  self.account_data_hash.get(&address) {
-                if *h == data_hash {
-                    return; // skipping same data
+            // skip if the data is the same and the account is not deleted
+            if !account.account.deleted {
+                if let Some(h) = self.account_data_hash.get(&address) {
+                    if *h == data_hash {
+                        return; // skipping same data
+                    }
                 }
             }
         }
@@ -374,7 +386,6 @@ impl State {
     pub fn get_hash_count(&self) -> usize {
         self.account_data_hash.len()
     }
-
 }
 
 fn write_cursor(cursor_file: &str, cursor: u64) {

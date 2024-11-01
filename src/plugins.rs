@@ -1,5 +1,4 @@
 use agave_geyser_plugin_interface::geyser_plugin_interface::SlotStatus;
-use base58::ToBase58;
 use {
     crate::{config::Config as PluginConfig, state::BlockInfo, state::State},
     agave_geyser_plugin_interface::geyser_plugin_interface::{
@@ -20,8 +19,6 @@ use std::fmt;
 use std::str::FromStr;
 
 // const VOTE_ACCOUNT: &str = "Vote111111111111111111111111111111111111111";
-const DERIVED_ACCOUNT: &str = "9QiiQiqg2riRns9CAuVvgFsAQ1RM6CH38EFysZ6R8Nac";
-
 
 #[derive(Default)]
 pub struct Plugin {
@@ -90,12 +87,6 @@ impl GeyserPlugin for Plugin {
 
         match account {
             ReplicaAccountInfoVersions::V0_0_1(account) => {
-                if !is_startup && account.pubkey.to_base58() == DERIVED_ACCOUNT {
-                    debug!("received my account: {} (owner: {}) on slot {}", 
-                        account.owner.to_base58(),
-                        account.pubkey.to_base58(),
-                        slot);
-                }
                 let account_key = account.pubkey.to_vec();
                 let pb_account = Account {
                     address: account.pubkey.to_vec(),
@@ -113,12 +104,6 @@ impl GeyserPlugin for Plugin {
             }
 
             ReplicaAccountInfoVersions::V0_0_2(account) => {
-                if !is_startup && account.pubkey.to_base58() == DERIVED_ACCOUNT {
-                    debug!("received my account: {} (owner: {}) on slot {}", 
-                        account.owner.to_base58(),
-                        account.pubkey.to_base58(),
-                        slot);
-                }
                 let account_key = account.pubkey.to_vec();
                 let pb_account = Account {
                     address: account.pubkey.to_vec(),
@@ -135,12 +120,6 @@ impl GeyserPlugin for Plugin {
             }
 
             ReplicaAccountInfoVersions::V0_0_3(account) => {
-                if !is_startup && account.pubkey.to_base58() == DERIVED_ACCOUNT {
-                    debug!("received my account: {} (owner: {}) on slot {}", 
-                        account.owner.to_base58(),
-                        account.pubkey.to_base58(),
-                        slot);
-                };
                 let account_key = account.pubkey.to_vec();
                 let pb_account = Account {
                     address: account.pubkey.to_vec(),
@@ -161,7 +140,10 @@ impl GeyserPlugin for Plugin {
     }
 
     fn notify_end_of_startup(&self) -> PluginResult<()> {
-        info!("preloaded account data hash count: {}", self.state.read().unwrap().get_hash_count());
+        info!(
+            "preloaded account data hash count: {}",
+            self.state.read().unwrap().get_hash_count()
+        );
         info!("end of startup");
         Ok(())
     }
