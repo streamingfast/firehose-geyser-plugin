@@ -12,13 +12,15 @@ use crate::pb;
 use crate::state::AccountWithWriteVersion;
 use crate::utils::convert_sol_timestamp;
 use env_logger::Target;
+use flate2;
 use log::{debug, info, LevelFilter};
 use pb::sf::solana::r#type::v1::Account;
 use solana_rpc_client::rpc_client::RpcClient;
-use std::fmt;
 use std::str::FromStr;
+use std::{fmt, io::Write};
 
 // const VOTE_ACCOUNT: &str = "Vote111111111111111111111111111111111111111";
+// 0761481d357474bb7c4d7624ebd3bdb3d8355e73d11043fc0da3538000000000
 
 #[derive(Default)]
 pub struct Plugin {
@@ -87,10 +89,14 @@ impl GeyserPlugin for Plugin {
 
         match account {
             ReplicaAccountInfoVersions::V0_0_1(account) => {
+                let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+                gz.write_all(&account.data).unwrap();
+                let compressed_data = gz.finish().unwrap();
+
                 let account_key = account.pubkey.to_vec();
                 let pb_account = Account {
                     address: account.pubkey.to_vec(),
-                    data: account.data.to_vec(),
+                    data: compressed_data,
                     owner: account.owner.to_vec(),
                     deleted: account.lamports == 0,
                 };
@@ -104,10 +110,14 @@ impl GeyserPlugin for Plugin {
             }
 
             ReplicaAccountInfoVersions::V0_0_2(account) => {
+                let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+                gz.write_all(&account.data).unwrap();
+                let compressed_data = gz.finish().unwrap();
+
                 let account_key = account.pubkey.to_vec();
                 let pb_account = Account {
                     address: account.pubkey.to_vec(),
-                    data: account.data.to_vec(),
+                    data: compressed_data,
                     owner: account.owner.to_vec(),
                     deleted: account.lamports == 0,
                 };
@@ -120,10 +130,14 @@ impl GeyserPlugin for Plugin {
             }
 
             ReplicaAccountInfoVersions::V0_0_3(account) => {
+                let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+                gz.write_all(&account.data).unwrap();
+                let compressed_data = gz.finish().unwrap();
+
                 let account_key = account.pubkey.to_vec();
                 let pb_account = Account {
                     address: account.pubkey.to_vec(),
-                    data: account.data.to_vec(),
+                    data: compressed_data,
                     owner: account.owner.to_vec(),
                     deleted: account.lamports == 0,
                 };

@@ -32,6 +32,7 @@ solana-sdk = "2.0.14"
 sleep = "1.0.2"
 env_logger = "0.9.3"
 twox-hash = "2.0.0"
+flate2 = "1.0.34"
 
 [profile.release]
 lto = true

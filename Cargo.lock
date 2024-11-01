@@ -2999,6 +2999,7 @@ dependencies = [
  "config",
  "crossbeam-channel",
  "env_logger",
+ "flate2",
  "git-version",
  "log",
  "prost",
