@@ -89,64 +89,15 @@ impl GeyserPlugin for Plugin {
 
         match account {
             ReplicaAccountInfoVersions::V0_0_1(account) => {
-                let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-                gz.write_all(&account.data).unwrap();
-                let compressed_data = gz.finish().unwrap();
-
-                let account_key = account.pubkey.to_vec();
-                let pb_account = Account {
-                    address: account.pubkey.to_vec(),
-                    data: compressed_data,
-                    owner: account.owner.to_vec(),
-                    deleted: account.lamports == 0,
-                };
-
-                let awv = AccountWithWriteVersion {
-                    account: pb_account,
-                    write_version: account.write_version,
-                };
-
-                lock_state.set_account(slot, account_key, awv, is_startup);
+                lock_state.set_account(slot, account.pubkey, account.data, account.owner, account.write_version, account.lamports == 0, is_startup);
             }
 
             ReplicaAccountInfoVersions::V0_0_2(account) => {
-                let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-                gz.write_all(&account.data).unwrap();
-                let compressed_data = gz.finish().unwrap();
-
-                let account_key = account.pubkey.to_vec();
-                let pb_account = Account {
-                    address: account.pubkey.to_vec(),
-                    data: compressed_data,
-                    owner: account.owner.to_vec(),
-                    deleted: account.lamports == 0,
-                };
-                let awv = AccountWithWriteVersion {
-                    account: pb_account,
-                    write_version: account.write_version,
-                };
-
-                lock_state.set_account(slot, account_key, awv, is_startup);
+                lock_state.set_account(slot, account.pubkey, account.data, account.owner, account.write_version, account.lamports == 0, is_startup);
             }
 
             ReplicaAccountInfoVersions::V0_0_3(account) => {
-                let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-                gz.write_all(&account.data).unwrap();
-                let compressed_data = gz.finish().unwrap();
-
-                let account_key = account.pubkey.to_vec();
-                let pb_account = Account {
-                    address: account.pubkey.to_vec(),
-                    data: compressed_data,
-                    owner: account.owner.to_vec(),
-                    deleted: account.lamports == 0,
-                };
-
-                let awv = AccountWithWriteVersion {
-                    account: pb_account,
-                    write_version: account.write_version,
-                };
-                lock_state.set_account(slot, account_key, awv, is_startup);
+                lock_state.set_account(slot, account.pubkey, account.data, account.owner, account.write_version, account.lamports == 0, is_startup);
             }
         }
 

@@ -5,6 +5,7 @@ use pb::sf::solana::r#type::v1::Account;
 use prost_types::Timestamp;
 use solana_rpc_client::rpc_client::RpcClient;
 use std::collections::HashMap;
+use std::io::Write;
 use twox_hash::XxHash64;
 
 type BlockAccountChanges = HashMap<u64, AccountChanges>;
@@ -245,21 +246,26 @@ impl State {
     pub fn set_account(
         &mut self,
         slot: u64,
-        pub_key: Vec<u8>,
-        account: AccountWithWriteVersion,
+        pub_key: &[u8],
+        data: &[u8],
+        owner: &[u8],
+        write_version: u64,
+        deleted: bool,
         is_startup: bool,
     ) {
-        let data_hash = if account.account.data.len() == 0 {
+
+        let data_hash = if data.len() == 0 {
             0
         } else {
-            XxHash64::oneshot(SEED, &account.account.data)
+            XxHash64::oneshot(SEED, data)
         };
-        let address = account.account.address.clone();
+        let address = pub_key.to_vec();
 
         if is_startup {
             self.account_data_hash.insert(address, data_hash);
             return;
         }
+
         if self.should_skip_slot(slot) {
             return;
         }
@@ -268,17 +274,38 @@ impl State {
             debug!("account data for slot {}", slot);
         }
 
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gz.write_all(data).unwrap();
+        let mut compressed_data = gz.finish().unwrap();
+        if compressed_data.len() > data.len() {
+            debug!("compressed data is bigger than original data, skipping compression");
+            compressed_data = data.to_vec();
+            return;
+        }
+
+        let pb_account = Account {
+            address: pub_key.to_vec(),
+            data: compressed_data,
+            owner: owner.to_vec(),
+            deleted: deleted,
+        };
+
+        let awv = AccountWithWriteVersion {
+            account: pb_account,
+            write_version: write_version,
+        };
+
         let slot_entries = self
             .block_account_changes
             .entry(slot)
             .or_insert_with(HashMap::new);
 
-        if let Some(prev) = slot_entries.get(&pub_key) {
-            if prev.write_version > account.write_version {
+        if let Some(prev) = slot_entries.get(&address) {
+            if prev.write_version > write_version {
                 return; // skipping older write_versions
             }
             // skip if the data is the same and the account is not deleted
-            if !account.account.deleted {
+            if !deleted {
                 if let Some(h) = self.account_data_hash.get(&address) {
                     if *h == data_hash {
                         return; // skipping same data
@@ -287,7 +314,7 @@ impl State {
             }
         }
 
-        slot_entries.insert(pub_key, account);
+        slot_entries.insert(address, awv);
     }
 
     fn purge_blocks_up_to(&mut self, upto: u64) {
