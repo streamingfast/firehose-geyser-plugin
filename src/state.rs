@@ -4,18 +4,20 @@ use crate::utils::{convert_sol_timestamp, create_account_block};
 use pb::sf::solana::r#type::v1::Account;
 use prost_types::Timestamp;
 use solana_rpc_client::rpc_client::RpcClient;
+use twox_hash::XxHash64;
 use std::collections::HashMap;
-
-use sha2::{Digest, Sha256};
 
 type BlockAccountChanges = HashMap<u64, AccountChanges>;
 pub type AccountChanges = HashMap<Vec<u8>, AccountWithWriteVersion>;
+pub type AccountDataHash = HashMap<Vec<u8>, u64>;
 type BlockInfoMap = HashMap<u64, BlockInfo>;
 type ConfirmedSlotsMap = HashMap<u64, bool>;
 use log::{debug, info};
 use solana_rpc_client_api::config::RpcBlockConfig;
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_transaction_status::TransactionDetails;
+
+const SEED:u64 = 1234;
 
 pub struct AccountWithWriteVersion {
     pub account: Account,
@@ -50,6 +52,7 @@ pub struct State {
     lib: Option<u64>,
 
     block_account_changes: BlockAccountChanges,
+    account_data_hash: AccountDataHash,
 
     block_infos: BlockInfoMap,
     confirmed_slots: ConfirmedSlotsMap,
@@ -74,6 +77,7 @@ impl State {
             initialized: false,
 
             block_account_changes: HashMap::new(),
+            account_data_hash: HashMap::new(),
             block_infos: HashMap::new(),
             confirmed_slots: HashMap::new(),
 
@@ -239,7 +243,14 @@ impl State {
         
     }
 
-    pub fn set_account(&mut self, slot: u64, pub_key: Vec<u8>, account: AccountWithWriteVersion) {
+    pub fn set_account(&mut self, slot: u64, pub_key: Vec<u8>, account: AccountWithWriteVersion, is_startup: bool) {
+        let data_hash = XxHash64::oneshot(SEED, &account.account.data);
+        let address = account.account.address.clone();
+
+        if is_startup {
+            self.account_data_hash.insert(address, data_hash);
+            return;
+        } 
         if self.should_skip_slot(slot) {
             return;
         }
@@ -255,11 +266,12 @@ impl State {
 
         if let Some(prev) = slot_entries.get(&pub_key) {
             if prev.write_version > account.write_version {
-                debug!(
-                    "skipping account data for slot {} because disordered version",
-                    slot
-                );
                 return; // skipping older write_versions
+            }
+            if let Some(h) =  self.account_data_hash.get(&address) {
+                if *h == data_hash {
+                    return; // skipping same data
+                }
             }
         }
 
@@ -306,12 +318,9 @@ impl State {
             return;
         }
 
-        let lib_num = match self.get_lib() {
-            Some(lib_num) => lib_num,
-            None => {
-                debug!("No lib found yet, skipping processing of slot {}", slot);
-                return;
-            }
+        if self.get_lib().is_none() {
+            debug!("No lib found yet, skipping processing of slot {}", slot);
+            return;
         };
 
         for toproc in self.ordered_confirmed_slots_upto(slot) {
@@ -319,7 +328,7 @@ impl State {
                 continue;
             }
 
-            let mut rpc_block = None;
+            let mut _rpc_block = None; // lifetime hack for block_info
             let block_info = match self.get_block_info(toproc) {
                 Some(bi) => bi,
                 None => {
@@ -332,8 +341,8 @@ impl State {
                     }
                     match self.get_block_from_rpc(toproc) {
                         Some(bi) => {
-                            rpc_block = Some(bi);
-                            rpc_block.as_ref().unwrap()
+                            _rpc_block = Some(bi);
+                            _rpc_block.as_ref().unwrap()
                         }
                         None => {
                             debug!(
@@ -361,6 +370,11 @@ impl State {
             write_cursor(&self.cursor_path, toproc);
         }
     }
+
+    pub fn get_hash_count(&self) -> usize {
+        self.account_data_hash.len()
+    }
+
 }
 
 fn write_cursor(cursor_file: &str, cursor: u64) {

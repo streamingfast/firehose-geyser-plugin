@@ -1,6 +1,5 @@
 use agave_geyser_plugin_interface::geyser_plugin_interface::SlotStatus;
 use base58::ToBase58;
-use solana_sdk::signer::Signer;
 use {
     crate::{config::Config as PluginConfig, state::BlockInfo, state::State},
     agave_geyser_plugin_interface::geyser_plugin_interface::{
@@ -87,10 +86,6 @@ impl GeyserPlugin for Plugin {
         slot: u64,
         is_startup: bool,
     ) -> PluginResult<()> {
-        if is_startup {
-            return Ok(());
-        }
-
         let mut lock_state = self.state.write().unwrap();
 
         match account {
@@ -117,7 +112,7 @@ impl GeyserPlugin for Plugin {
                     write_version: account.write_version,
                 };
 
-                lock_state.set_account(slot, account_key, awv);
+                lock_state.set_account(slot, account_key, awv, is_startup);
             }
 
             ReplicaAccountInfoVersions::V0_0_2(account) => {
@@ -143,7 +138,7 @@ impl GeyserPlugin for Plugin {
                     write_version: account.write_version,
                 };
 
-                lock_state.set_account(slot, account_key, awv);
+                lock_state.set_account(slot, account_key, awv, is_startup);
             }
 
             ReplicaAccountInfoVersions::V0_0_3(account) => {
@@ -168,8 +163,7 @@ impl GeyserPlugin for Plugin {
                     account: pb_account,
                     write_version: account.write_version,
                 };
-
-                lock_state.set_account(slot, account_key, awv);
+                lock_state.set_account(slot, account_key, awv, is_startup);
             }
         }
 
@@ -177,6 +171,7 @@ impl GeyserPlugin for Plugin {
     }
 
     fn notify_end_of_startup(&self) -> PluginResult<()> {
+        info!("preloaded account data hash count: {}", self.state.read().unwrap().get_hash_count());
         info!("end of startup");
         Ok(())
     }
