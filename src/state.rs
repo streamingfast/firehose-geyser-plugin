@@ -5,7 +5,6 @@ use pb::sf::solana::r#type::v1::Account;
 use prost_types::Timestamp;
 use solana_rpc_client::rpc_client::RpcClient;
 use std::collections::HashMap;
-use std::io::Write;
 use twox_hash::XxHash64;
 
 type BlockAccountChanges = HashMap<u64, AccountChanges>;
@@ -253,16 +252,14 @@ impl State {
         deleted: bool,
         is_startup: bool,
     ) {
-
         let data_hash = if data.len() == 0 {
             0
         } else {
             XxHash64::oneshot(SEED, data)
         };
-        let address = pub_key.to_vec();
 
         if is_startup {
-            self.account_data_hash.insert(address, data_hash);
+            self.account_data_hash.insert(pub_key.to_vec(), data_hash);
             return;
         }
 
@@ -274,18 +271,9 @@ impl State {
             debug!("account data for slot {}", slot);
         }
 
-        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-        gz.write_all(data).unwrap();
-        let mut compressed_data = gz.finish().unwrap();
-        if compressed_data.len() > data.len() {
-            debug!("compressed data is bigger than original data, skipping compression");
-            compressed_data = data.to_vec();
-            return;
-        }
-
         let pb_account = Account {
             address: pub_key.to_vec(),
-            data: compressed_data,
+            data: data.to_vec(),
             owner: owner.to_vec(),
             deleted: deleted,
         };
@@ -300,6 +288,7 @@ impl State {
             .entry(slot)
             .or_insert_with(HashMap::new);
 
+        let address = pub_key.to_vec();
         if let Some(prev) = slot_entries.get(&address) {
             if prev.write_version > write_version {
                 return; // skipping older write_versions

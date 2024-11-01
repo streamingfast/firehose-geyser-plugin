@@ -8,19 +8,12 @@ use {
     std::{concat, env, sync::RwLock},
 };
 
-use crate::pb;
-use crate::state::AccountWithWriteVersion;
 use crate::utils::convert_sol_timestamp;
 use env_logger::Target;
-use flate2;
 use log::{debug, info, LevelFilter};
-use pb::sf::solana::r#type::v1::Account;
 use solana_rpc_client::rpc_client::RpcClient;
+use std::fmt;
 use std::str::FromStr;
-use std::{fmt, io::Write};
-
-// const VOTE_ACCOUNT: &str = "Vote111111111111111111111111111111111111111";
-// 0761481d357474bb7c4d7624ebd3bdb3d8355e73d11043fc0da3538000000000
 
 #[derive(Default)]
 pub struct Plugin {
@@ -89,15 +82,39 @@ impl GeyserPlugin for Plugin {
 
         match account {
             ReplicaAccountInfoVersions::V0_0_1(account) => {
-                lock_state.set_account(slot, account.pubkey, account.data, account.owner, account.write_version, account.lamports == 0, is_startup);
+                lock_state.set_account(
+                    slot,
+                    account.pubkey,
+                    account.data,
+                    account.owner,
+                    account.write_version,
+                    account.lamports == 0,
+                    is_startup,
+                );
             }
 
             ReplicaAccountInfoVersions::V0_0_2(account) => {
-                lock_state.set_account(slot, account.pubkey, account.data, account.owner, account.write_version, account.lamports == 0, is_startup);
+                lock_state.set_account(
+                    slot,
+                    account.pubkey,
+                    account.data,
+                    account.owner,
+                    account.write_version,
+                    account.lamports == 0,
+                    is_startup,
+                );
             }
 
             ReplicaAccountInfoVersions::V0_0_3(account) => {
-                lock_state.set_account(slot, account.pubkey, account.data, account.owner, account.write_version, account.lamports == 0, is_startup);
+                lock_state.set_account(
+                    slot,
+                    account.pubkey,
+                    account.data,
+                    account.owner,
+                    account.write_version,
+                    account.lamports == 0,
+                    is_startup,
+                );
             }
         }
 
