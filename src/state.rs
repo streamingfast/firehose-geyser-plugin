@@ -232,6 +232,11 @@ impl State {
         }
         debug!("setting block info for slot {}", slot);
         self.block_infos.insert(slot, block_info);
+        
+        if self.confirmed_slots.get(&slot).is_some() {
+            self.process_upto(slot);
+        }
+        
     }
 
     pub fn set_account(&mut self, slot: u64, pub_key: Vec<u8>, account: AccountWithWriteVersion) {
