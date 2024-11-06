@@ -147,7 +147,7 @@ impl GeyserPlugin for Plugin {
                 self.state.write().unwrap().set_lib(slot);
             }
             SlotStatus::Confirmed => {
-                debug!("slot confirmed (noop)", slot);
+                debug!("slot confirmed {} (noop)", slot);
             }
         }
 
