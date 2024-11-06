@@ -139,6 +139,14 @@ impl GeyserPlugin for Plugin {
         match status {
             SlotStatus::Processed => {
                 debug!("slot processed {}", slot);
+                match self.state.read().unwrap().get_block_from_rpc(slot, false) {
+                    Some(bi) => {
+                        debug!("HEY WE GOT BLOCKINFO FROM RPC ON PROCESSED, SLOT {}", slot);
+                    }
+                    None => {
+                        debug!("nope, no blockinfo for slot {}", slot);
+                    }
+                }
             }
             SlotStatus::Rooted => {
                 debug!("slot rooted {}", slot);

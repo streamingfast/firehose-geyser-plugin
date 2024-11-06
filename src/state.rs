@@ -37,7 +37,7 @@ const DEFAULT_RPC_BLOCK_CONFIG: RpcBlockConfig = RpcBlockConfig {
     encoding: None,
     transaction_details: Some(TransactionDetails::None),
     rewards: Some(false),
-    commitment: None,
+    commitment: Some(CommitmentConfig::confirmed()),
     max_supported_transaction_version: Some(0),
 };
 
@@ -131,7 +131,7 @@ impl State {
         self.block_infos.get(&slot)
     }
 
-    fn get_block_from_rpc(&self, slot: u64) -> Option<BlockInfo> {
+    pub fn get_block_from_rpc(&self, slot: u64, try_remote: bool) -> Option<BlockInfo> {
         match self
             .local_rpc_client
             .as_ref()
@@ -139,7 +139,7 @@ impl State {
             .get_block_with_config(slot, DEFAULT_RPC_BLOCK_CONFIG)
         {
             Ok(block) => {
-                debug!("Block Info fetched for slot {}", slot);
+                debug!("Block Info fetched locally for slot {}", slot);
                 Some(BlockInfo {
                     timestamp: convert_sol_timestamp(block.block_time.unwrap()),
                     parent_slot: block.parent_slot.clone(),
@@ -149,6 +149,9 @@ impl State {
                 })
             }
             Err(_err) => {
+                if !try_remote {
+                    return None;
+                }
                 match self
                     .remote_rpc_client
                     .as_ref()
@@ -156,7 +159,7 @@ impl State {
                     .get_block_with_config(slot, DEFAULT_RPC_BLOCK_CONFIG)
                 {
                     Ok(block) => {
-                        debug!("Block Info fetched for slot {}", slot);
+                        debug!("Block Info fetched remotely for slot {}", slot);
                         Some(BlockInfo {
                             timestamp: convert_sol_timestamp(block.block_time.unwrap()),
                             parent_slot: block.parent_slot.clone(),
@@ -360,14 +363,11 @@ impl State {
             let block_info = match self.get_block_info(toproc) {
                 Some(bi) => bi,
                 None => {
-                    if self.initialized && self.confirmed_slots.len() < 30 {
-                        debug!(
-                            "process_upto({}): block info not found for slot {} (not trying on RPC)",
-                            slot, toproc
-                        );
-                        return; // don't process anything else
-                    }
-                    match self.get_block_from_rpc(toproc) {
+                    // we don't want to use remote RPC unless we have to:
+                    // - sometimes early blocks metadata after a restart will never become available
+                    // - if blocks start piling up
+                    let try_remote = !self.initialized || self.confirmed_slots.len() >= 10 ;
+                    match self.get_block_from_rpc(toproc, try_remote) {
                         Some(bi) => {
                             _rpc_block = Some(bi);
                             _rpc_block.as_ref().unwrap()
