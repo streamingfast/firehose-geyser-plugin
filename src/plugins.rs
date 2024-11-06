@@ -138,24 +138,16 @@ impl GeyserPlugin for Plugin {
     ) -> PluginResult<()> {
         match status {
             SlotStatus::Processed => {
-                debug!("slot processed {}", slot);
-                match self.state.read().unwrap().get_block_from_rpc(slot, false) {
-                    Some(bi) => {
-                        debug!("HEY WE GOT BLOCKINFO FROM RPC ON PROCESSED, SLOT {}", slot);
-                    }
-                    None => {
-                        debug!("nope, no blockinfo for slot {}", slot);
-                    }
-                }
+                debug!("slot processed, acting as confirmed {}", slot);
+                let mut lock_state = self.state.write().unwrap();
+                lock_state.set_confirmed_slot(slot);
             }
             SlotStatus::Rooted => {
                 debug!("slot rooted {}", slot);
                 self.state.write().unwrap().set_lib(slot);
             }
             SlotStatus::Confirmed => {
-                debug!("slot confirmed {}", slot);
-                let mut lock_state = self.state.write().unwrap();
-                lock_state.set_confirmed_slot(slot);
+                debug!("slot confirmed (noop)", slot);
             }
         }
 
