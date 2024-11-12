@@ -199,12 +199,7 @@ impl State {
         if self.cursor.is_some() && slot <= self.cursor.unwrap() {
             return true;
         };
-        if self.cursor.is_none() && self.first_block_to_process.is_none() {
-            // without cursor or first_block_to_process, we only keep a few blocks in here...
-            debug!("initializing: deleting blocks up to: {}", slot - 1);
-            self.purge_blocks_up_to(slot - 32);
-        }
-        return false;
+       return false;
     }
 
     pub fn set_confirmed_slot(&mut self, slot: u64) {
@@ -272,6 +267,11 @@ impl State {
 
         if !self.block_account_changes.contains_key(&slot) {
             debug!("account data for slot {}", slot);
+            if self.cursor.is_none() && self.first_block_to_process.is_none() {
+                // without cursor or first_block_to_process, we only keep a few blocks in here... this happens right after is_startup but before we get a confirmed slot
+                debug!("initializing: deleting blocks up to: {}", slot - 1);
+                self.purge_blocks_up_to(slot - 32);
+            }
         }
 
         let pb_account = Account {
