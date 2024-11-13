@@ -396,7 +396,7 @@ impl State {
                 self.initialized = true;
             }
             if self.noop {
-                debug!("printing block {} (noop mode)", toproc);
+                debug!("printing block {} - {} entries (noop mode)", toproc, acc_block.accounts.len());
             } else {
                 debug!("printing block {}", toproc);
                 BlockPrinter::new(&acc_block).print(self.lib.unwrap());
