@@ -11,8 +11,13 @@ pub struct Config {
     pub libpath: String,
     pub local_rpc_client: RpcClientConfig,
     pub remote_rpc_client: RpcClientConfig,
-    pub send_processed: bool,
     pub cursor_file: String,
+
+    #[serde(default)]
+    pub noop: bool,
+
+    #[serde(default)]
+    pub send_processed: bool,
     #[serde(default)]
     pub log: ConfigLog,
 }

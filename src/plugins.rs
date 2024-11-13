@@ -65,6 +65,7 @@ impl GeyserPlugin for Plugin {
             remote_rpc_client,
             cursor,
             plugin_config.cursor_file,
+            plugin_config.noop,
         ));
 
         println!("FIRE INIT 3.0 sf.solana.type.v1.AccountBlock");

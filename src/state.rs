@@ -60,6 +60,7 @@ pub struct State {
     local_rpc_client: Option<RpcClient>,
     remote_rpc_client: Option<RpcClient>,
     cursor_path: String,
+    noop: bool,
 }
 
 impl State {
@@ -68,6 +69,7 @@ impl State {
         remote_rpc_client: RpcClient,
         cursor: Option<u64>,
         cursor_path: String,
+        noop: bool,
     ) -> Self {
         State {
             cursor: cursor,
@@ -84,6 +86,7 @@ impl State {
             local_rpc_client: Some(local_rpc_client),
             remote_rpc_client: Some(remote_rpc_client),
             cursor_path: cursor_path,
+            noop: noop,
         }
     }
 
@@ -392,8 +395,12 @@ impl State {
                 debug!("First block was sent, now initialized");
                 self.initialized = true;
             }
-            debug!("printing block {}", toproc);
-            BlockPrinter::new(&acc_block).print(self.lib.unwrap());
+            if self.noop {
+                debug!("printing block {} (noop mode)", toproc);
+            } else {
+                debug!("printing block {}", toproc);
+                BlockPrinter::new(&acc_block).print(self.lib.unwrap());
+            }
             self.purge_blocks_up_to(toproc);
             write_cursor(&self.cursor_path, toproc);
         }
