@@ -265,7 +265,6 @@ impl State {
         }
 
         if self.should_skip_slot(slot) {
-            debug!("skipping account data for slot {}", slot);
             return;
         }
 
