@@ -18,6 +18,7 @@ use std::str::FromStr;
 #[derive(Default)]
 pub struct Plugin {
     state: RwLock<State>,
+    send_processed: bool,
 }
 
 impl fmt::Debug for Plugin {
@@ -57,6 +58,7 @@ impl GeyserPlugin for Plugin {
         let local_rpc_client = RpcClient::new(plugin_config.local_rpc_client.endpoint);
         let remote_rpc_client = RpcClient::new(plugin_config.remote_rpc_client.endpoint);
         let cursor = cursor_from_file(&plugin_config.cursor_file);
+        self.send_processed = plugin_config.send_processed;
 
         self.state = RwLock::new(State::new(
             local_rpc_client,
@@ -138,16 +140,33 @@ impl GeyserPlugin for Plugin {
     ) -> PluginResult<()> {
         match status {
             SlotStatus::Processed => {
-                debug!("slot processed, acting as confirmed {}", slot);
-                let mut lock_state = self.state.write().unwrap();
-                lock_state.set_confirmed_slot(slot);
+                match self.send_processed {
+                    true => {
+                        debug!("slot processed, acting as confirmed {}", slot);
+                        let mut lock_state = self.state.write().unwrap();
+                        lock_state.set_confirmed_slot(slot);
+                    }
+                    false => {
+                        debug!("slot processed {} (noop)", slot);
+                    }
+                }
             }
             SlotStatus::Rooted => {
                 debug!("slot rooted {}", slot);
                 self.state.write().unwrap().set_lib(slot);
             }
             SlotStatus::Confirmed => {
-                debug!("slot confirmed {} (noop)", slot);
+                match self.send_processed {
+                    true => {
+                        debug!("slot confirmed {} (noop)", slot);
+                    }
+                    false => {
+                        debug!("slot confirmed {}", slot);
+                        let mut lock_state = self.state.write().unwrap();
+                        lock_state.set_confirmed_slot(slot);
+                    }
+                }
+
             }
         }
 
