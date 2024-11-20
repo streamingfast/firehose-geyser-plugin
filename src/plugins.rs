@@ -6,7 +6,7 @@ use {
         ReplicaEntryInfoVersions, ReplicaTransactionInfoVersions, Result as PluginResult,
     },
     std::{concat, env, sync::RwLock},
-    twox_hash::XxHash64,
+    gxhash::gxhash64,
 };
 
 use crate::utils::convert_sol_timestamp;
@@ -16,7 +16,7 @@ use solana_rpc_client::rpc_client::RpcClient;
 use std::fmt;
 use std::str::FromStr;
 
-const SEED: u64 = 1234;
+const SEED: i64 = 76;
 
 #[derive(Default)]
 pub struct Plugin {
@@ -56,7 +56,7 @@ impl Plugin {
         let data_hash = if data.len() == 0 {
             0
         } else {
-            XxHash64::oneshot(SEED, data)
+            gxhash64(data, SEED)
         };
 
         lock_state.set_account(

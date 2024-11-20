@@ -1438,6 +1438,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gxhash"
+version = "3.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a197c9b654827513cf53842c5c6d3da2b4b35a785f8e0eff78bdf8e445aba1bb"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "h2"
 version = "0.3.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3000,6 +3009,7 @@ dependencies = [
  "crossbeam-channel",
  "env_logger",
  "git-version",
+ "gxhash",
  "log",
  "prost",
  "prost-types",
@@ -3013,7 +3023,6 @@ dependencies = [
  "solana-transaction-status",
  "tokio",
  "tracing",
- "twox-hash",
  "vergen",
 ]
 
@@ -4055,15 +4064,6 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
-
-[[package]]
-name = "twox-hash"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d09466de2fbca05ea830e16e62943f26607ab2148fb72b642505541711d99ad2"
-dependencies = [
- "rand 0.8.5",
-]
 
 [[package]]
 name = "typenum"

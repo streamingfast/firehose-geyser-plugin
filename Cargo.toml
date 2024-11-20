@@ -30,7 +30,7 @@ serde = { version = "1.0.213", features = ["derive"] }
 solana-sdk = "2.0.14"
 sleep = "1.0.2"
 env_logger = "0.9.3"
-twox-hash = "2.0.0"
+gxhash = "3.4.1"
 
 [profile.release]
 lto = true
