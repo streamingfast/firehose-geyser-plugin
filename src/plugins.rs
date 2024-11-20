@@ -6,6 +6,7 @@ use {
         ReplicaEntryInfoVersions, ReplicaTransactionInfoVersions, Result as PluginResult,
     },
     std::{concat, env, sync::RwLock},
+    twox_hash::XxHash64,
 };
 
 use crate::utils::convert_sol_timestamp;
@@ -14,6 +15,8 @@ use log::{debug, info, LevelFilter};
 use solana_rpc_client::rpc_client::RpcClient;
 use std::fmt;
 use std::str::FromStr;
+
+const SEED: u64 = 1234;
 
 #[derive(Default)]
 pub struct Plugin {
@@ -34,6 +37,38 @@ fn cursor_from_file(cursor_file: &str) -> Option<u64> {
             cursor
         }
         Err(_) => None,
+    }
+}
+
+impl Plugin {
+    fn set_account(
+        &self,
+        slot: u64,
+        pub_key: &[u8],
+        data: &[u8],
+        owner: &[u8],
+        write_version: u64,
+        deleted: bool,
+        is_startup: bool,
+    ) {
+        let mut lock_state = self.state.write().unwrap();
+
+        let data_hash = if data.len() == 0 {
+            0
+        } else {
+            XxHash64::oneshot(SEED, data)
+        };
+
+        lock_state.set_account(
+                slot,
+                pub_key,
+                data,
+                owner,
+                write_version,
+                deleted,
+                is_startup,
+                data_hash,
+        );
     }
 }
 
@@ -81,11 +116,10 @@ impl GeyserPlugin for Plugin {
         slot: u64,
         is_startup: bool,
     ) -> PluginResult<()> {
-        let mut lock_state = self.state.write().unwrap();
 
         match account {
             ReplicaAccountInfoVersions::V0_0_1(account) => {
-                lock_state.set_account(
+                self.set_account(
                     slot,
                     account.pubkey,
                     account.data,
@@ -97,7 +131,7 @@ impl GeyserPlugin for Plugin {
             }
 
             ReplicaAccountInfoVersions::V0_0_2(account) => {
-                lock_state.set_account(
+                self.set_account(
                     slot,
                     account.pubkey,
                     account.data,
@@ -109,7 +143,7 @@ impl GeyserPlugin for Plugin {
             }
 
             ReplicaAccountInfoVersions::V0_0_3(account) => {
-                lock_state.set_account(
+                self.set_account(
                     slot,
                     account.pubkey,
                     account.data,

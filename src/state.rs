@@ -5,7 +5,6 @@ use pb::sf::solana::r#type::v1::Account;
 use prost_types::Timestamp;
 use solana_rpc_client::rpc_client::RpcClient;
 use std::collections::HashMap;
-use twox_hash::XxHash64;
 
 type BlockAccountChanges = HashMap<u64, AccountChanges>;
 pub type AccountChanges = HashMap<Vec<u8>, AccountWithWriteVersion>;
@@ -17,7 +16,6 @@ use solana_rpc_client_api::config::RpcBlockConfig;
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_transaction_status::TransactionDetails;
 
-const SEED: u64 = 1234;
 
 pub struct AccountWithWriteVersion {
     pub account: Account,
@@ -252,13 +250,8 @@ impl State {
         write_version: u64,
         deleted: bool,
         is_startup: bool,
+        data_hash: u64,
     ) {
-        let data_hash = if data.len() == 0 {
-            0
-        } else {
-            XxHash64::oneshot(SEED, data)
-        };
-
         if is_startup {
             self.account_data_hash.insert(pub_key.to_vec(), data_hash);
             return;
