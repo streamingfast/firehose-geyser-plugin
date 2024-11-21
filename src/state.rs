@@ -187,7 +187,7 @@ impl State {
         slots
     }
 
-    fn should_skip_slot(&mut self, slot: u64) -> bool {
+    pub fn should_skip_slot(&self, slot: u64) -> bool {
         if self.initialized {
             return false;
         }
@@ -257,10 +257,6 @@ impl State {
             return;
         }
 
-        if self.should_skip_slot(slot) {
-            return;
-        }
-
         if !self.block_account_changes.contains_key(&slot) {
             debug!("account data for slot {}", slot);
             if self.cursor.is_none() && self.first_block_to_process.is_none() {
@@ -269,18 +265,6 @@ impl State {
                 self.purge_blocks_up_to(slot - 32);
             }
         }
-
-        let pb_account = Account {
-            address: pub_key.to_vec(),
-            data: data.to_vec(),
-            owner: owner.to_vec(),
-            deleted: deleted,
-        };
-
-        let awv = AccountWithWriteVersion {
-            account: pb_account,
-            write_version: write_version,
-        };
 
         let slot_entries = self
             .block_account_changes
@@ -301,6 +285,18 @@ impl State {
                 }
             }
         }
+
+        let pb_account = Account {
+            address: pub_key.to_vec(),
+            data: data.to_vec(),
+            owner: owner.to_vec(),
+            deleted: deleted,
+        };
+
+        let awv = AccountWithWriteVersion {
+            account: pb_account,
+            write_version: write_version,
+        };
 
         slot_entries.insert(address, awv);
     }

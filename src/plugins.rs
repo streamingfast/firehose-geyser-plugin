@@ -117,6 +117,10 @@ impl GeyserPlugin for Plugin {
         is_startup: bool,
     ) -> PluginResult<()> {
 
+        if !is_startup && self.state.read().unwrap().should_skip_slot(slot) {
+            return Ok(());
+        }
+
         match account {
             ReplicaAccountInfoVersions::V0_0_1(account) => {
                 self.set_account(
