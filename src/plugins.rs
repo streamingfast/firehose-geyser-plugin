@@ -22,6 +22,7 @@ const SEED: i64 = 76;
 pub struct Plugin {
     state: RwLock<State>,
     send_processed: bool,
+    trace: bool,
 }
 
 impl fmt::Debug for Plugin {
@@ -59,6 +60,13 @@ impl Plugin {
             gxhash64(data, SEED)
         };
 
+        if self.trace {
+            debug!(
+                "slot: {}, pub_key: {:?}, owner: {:?}, write_version: {}, deleted: {}, data_hash: {}",
+                slot, pub_key, owner, write_version, deleted, data_hash
+            );
+        }
+
         lock_state.set_account(
                 slot,
                 pub_key,
@@ -82,6 +90,11 @@ impl GeyserPlugin for Plugin {
 
         let filter_level =
             LevelFilter::from_str(plugin_config.log.level.as_str()).unwrap_or(LevelFilter::Info);
+
+        if filter_level == LevelFilter::Trace {
+            self.trace = true;
+        }
+
         env_logger::Builder::new()
             .filter_level(filter_level)
             .format_timestamp_nanos()
@@ -181,12 +194,12 @@ impl GeyserPlugin for Plugin {
             SlotStatus::Processed => {
                 match self.send_processed {
                     true => {
-                        debug!("slot processed, acting as confirmed {}", slot);
+                        debug!("slot processed {} (parent: {}) acting as confirmed", slot, _parent.unwrap_or_default());
                         let mut lock_state = self.state.write().unwrap();
                         lock_state.set_confirmed_slot(slot);
                     }
                     false => {
-                        debug!("slot processed {} (noop)", slot);
+                        debug!("slot processed {} (parent: {}) (noop)", slot, _parent.unwrap_or_default());
                     }
                 }
             }
@@ -197,10 +210,10 @@ impl GeyserPlugin for Plugin {
             SlotStatus::Confirmed => {
                 match self.send_processed {
                     true => {
-                        debug!("slot confirmed {} (noop)", slot);
+                        debug!("slot confirmed {} (parent: {}) (noop)", slot, _parent.unwrap_or_default());
                     }
                     false => {
-                        debug!("slot confirmed {}", slot);
+                        debug!("slot confirmed {} (parent: {})", slot, _parent.unwrap_or_default());
                         let mut lock_state = self.state.write().unwrap();
                         lock_state.set_confirmed_slot(slot);
                     }
@@ -276,11 +289,11 @@ impl GeyserPlugin for Plugin {
     }
 
     fn transaction_notifications_enabled(&self) -> bool {
-        true
+        false
     }
 
     fn entry_notifications_enabled(&self) -> bool {
-        true
+        false
     }
 }
 

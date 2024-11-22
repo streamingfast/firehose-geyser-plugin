@@ -233,7 +233,7 @@ impl State {
                 self.purge_blocks_up_to(slot - 1);
             }
         }
-        debug!("setting block info for slot {}", slot);
+        debug!("setting block info for slot {}, hash {}", slot, block_info.block_hash);
         self.block_infos.insert(slot, block_info);
 
         if self.confirmed_slots.get(&slot).is_some() {
