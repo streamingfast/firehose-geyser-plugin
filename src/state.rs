@@ -251,6 +251,7 @@ impl State {
         deleted: bool,
         is_startup: bool,
         data_hash: u64,
+        trace: bool,
     ) {
         if is_startup {
             self.account_data_hash.insert(pub_key.to_vec(), data_hash);
@@ -274,6 +275,12 @@ impl State {
         let address = pub_key.to_vec();
         if let Some(prev) = slot_entries.get(&address) {
             if prev.write_version > write_version {
+                if trace {
+                    debug!(
+                        "skipping slot because older version: {}, pub_key: {:?}, owner: {:?}, write_version: {}, prev_write_version: {}, deleted: {}, data_hash: {}",
+                        slot, hex::encode(pub_key), hex::encode(owner), write_version, prev.write_version, deleted, data_hash
+                    );
+                }
                 return; // skipping older write_versions
             }
             // skip if the data is the same and the account is not deleted
@@ -298,6 +305,14 @@ impl State {
             write_version: write_version,
         };
 
+        if trace {
+            debug!(
+                "inserting slot: {}, pub_key: {:?}, owner: {:?}, write_version: {}, deleted: {}, data_hash: {}",
+                slot, hex::encode(pub_key), hex::encode(owner), write_version, deleted, data_hash
+            );
+        }
+
+        self.account_data_hash.insert(pub_key.to_vec(), data_hash);
         slot_entries.insert(address, awv);
     }
 
