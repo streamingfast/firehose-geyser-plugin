@@ -54,6 +54,10 @@ impl Plugin {
     ) {
         let mut lock_state = self.state.write().unwrap();
 
+        if !is_startup && lock_state.should_skip_slot(slot) {
+            return;
+        }
+
         let data_hash = if data.len() == 0 {
             0
         } else {
@@ -131,10 +135,6 @@ impl GeyserPlugin for Plugin {
         slot: u64,
         is_startup: bool,
     ) -> PluginResult<()> {
-
-        if !is_startup && self.state.read().unwrap().should_skip_slot(slot) {
-            return Ok(());
-        }
 
         match account {
             ReplicaAccountInfoVersions::V0_0_1(account) => {
