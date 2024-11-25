@@ -118,6 +118,7 @@ impl GeyserPlugin for Plugin {
         ));
 
         println!("FIRE INIT 3.0 sf.solana.type.v1.AccountBlock");
+        info!("cursor: {:?}", cursor);
 
         Ok(())
     }
