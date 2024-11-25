@@ -62,8 +62,8 @@ impl Plugin {
 
         if self.trace {
             debug!(
-                "slot: {}, pub_key: {:?}, owner: {:?}, write_version: {}, deleted: {}, data_hash: {}",
-                slot, hex::encode(pub_key), hex::encode(owner), write_version, deleted, data_hash
+                "slot: {}, pub_key: {:?}, owner: {:?}, write_version: {}, deleted: {}, data_hash: {}, is_startup: {}",
+                slot, hex::encode(pub_key), hex::encode(owner), write_version, deleted, data_hash, is_startup
             );
         }
 
