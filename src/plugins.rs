@@ -249,7 +249,7 @@ impl GeyserPlugin for Plugin {
                 panic!("V0_0_1 not supported");
             }
             ReplicaTransactionInfoVersions::V0_0_2(tx) => {
-                println!("GRRRRR: TRX ({}) - {}", slot, tx.signature);
+                println!("GRRRRR: TRX ({}) - {} {}", slot, tx.index, tx.signature);
             }
         }
 
