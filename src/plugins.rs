@@ -5,8 +5,8 @@ use {
         GeyserPlugin, ReplicaAccountInfoVersions, ReplicaBlockInfoVersions,
         ReplicaEntryInfoVersions, ReplicaTransactionInfoVersions, Result as PluginResult,
     },
-    std::{concat, env, sync::RwLock},
     gxhash::gxhash64,
+    std::{concat, env, sync::RwLock},
 };
 
 use crate::utils::convert_sol_timestamp;
@@ -72,15 +72,15 @@ impl Plugin {
         }
 
         lock_state.set_account(
-                slot,
-                pub_key,
-                data,
-                owner,
-                write_version,
-                deleted,
-                is_startup,
-                data_hash,
-                self.trace,
+            slot,
+            pub_key,
+            data,
+            owner,
+            write_version,
+            deleted,
+            is_startup,
+            data_hash,
+            self.trace,
         );
     }
 }
@@ -135,7 +135,6 @@ impl GeyserPlugin for Plugin {
         slot: u64,
         is_startup: bool,
     ) -> PluginResult<()> {
-
         match account {
             ReplicaAccountInfoVersions::V0_0_1(account) => {
                 self.set_account(
@@ -192,36 +191,49 @@ impl GeyserPlugin for Plugin {
         _parent: Option<u64>,
         status: SlotStatus,
     ) -> PluginResult<()> {
+        println!("GRRRRR: BLOCK STATUS ({}) {}", slot, status.as_str());
+
         match status {
-            SlotStatus::Processed => {
-                match self.send_processed {
-                    true => {
-                        debug!("slot processed {} (parent: {}) acting as confirmed", slot, _parent.unwrap_or_default());
-                        let mut lock_state = self.state.write().unwrap();
-                        lock_state.set_confirmed_slot(slot);
-                    }
-                    false => {
-                        debug!("slot processed {} (parent: {}) (noop)", slot, _parent.unwrap_or_default());
-                    }
+            SlotStatus::Processed => match self.send_processed {
+                true => {
+                    debug!(
+                        "slot processed {} (parent: {}) acting as confirmed",
+                        slot,
+                        _parent.unwrap_or_default()
+                    );
+                    let mut lock_state = self.state.write().unwrap();
+                    lock_state.set_confirmed_slot(slot);
                 }
-            }
+                false => {
+                    debug!(
+                        "slot processed {} (parent: {}) (noop)",
+                        slot,
+                        _parent.unwrap_or_default()
+                    );
+                }
+            },
             SlotStatus::Rooted => {
                 debug!("slot rooted {}", slot);
                 self.state.write().unwrap().set_lib(slot);
             }
-            SlotStatus::Confirmed => {
-                match self.send_processed {
-                    true => {
-                        debug!("slot confirmed {} (parent: {}) (noop)", slot, _parent.unwrap_or_default());
-                    }
-                    false => {
-                        debug!("slot confirmed {} (parent: {})", slot, _parent.unwrap_or_default());
-                        let mut lock_state = self.state.write().unwrap();
-                        lock_state.set_confirmed_slot(slot);
-                    }
+            SlotStatus::Confirmed => match self.send_processed {
+                true => {
+                    debug!(
+                        "slot confirmed {} (parent: {}) (noop)",
+                        slot,
+                        _parent.unwrap_or_default()
+                    );
                 }
-
-            }
+                false => {
+                    debug!(
+                        "slot confirmed {} (parent: {})",
+                        slot,
+                        _parent.unwrap_or_default()
+                    );
+                    let mut lock_state = self.state.write().unwrap();
+                    lock_state.set_confirmed_slot(slot);
+                }
+            },
         }
 
         Ok(())
@@ -229,9 +241,18 @@ impl GeyserPlugin for Plugin {
 
     fn notify_transaction(
         &self,
-        _transaction: ReplicaTransactionInfoVersions<'_>,
-        _slot: u64,
+        transaction: ReplicaTransactionInfoVersions<'_>,
+        slot: u64,
     ) -> PluginResult<()> {
+        match transaction {
+            ReplicaTransactionInfoVersions::V0_0_1(tx) => {
+                panic!("V0_0_1 not supported");
+            }
+            ReplicaTransactionInfoVersions::V0_0_2(tx) => {
+                println!("GRRRRR: TRX ({}) - {}", slot, tx.signature);
+            }
+        }
+
         Ok(())
     }
 
@@ -255,6 +276,7 @@ impl GeyserPlugin for Plugin {
 
                 let mut lock_state = self.state.write().unwrap();
                 lock_state.set_block_info(blockinfo.slot, block_info);
+                println!("GRRRRR: BLOCK ({}) ", blockinfo.slot);
             }
             ReplicaBlockInfoVersions::V0_0_3(blockinfo) => {
                 let block_info = BlockInfo {
@@ -267,6 +289,7 @@ impl GeyserPlugin for Plugin {
 
                 let mut lock_state = self.state.write().unwrap();
                 lock_state.set_block_info(blockinfo.slot, block_info);
+                println!("GRRRRR: BLOCK ({}) ", blockinfo.slot);
             }
 
             ReplicaBlockInfoVersions::V0_0_4(blockinfo) => {
@@ -280,6 +303,7 @@ impl GeyserPlugin for Plugin {
 
                 let mut lock_state = self.state.write().unwrap();
                 lock_state.set_block_info(blockinfo.slot, block_info);
+                println!("GRRRRR: BLOCK META ({}) ", blockinfo.slot);
             }
         }
 
@@ -291,7 +315,7 @@ impl GeyserPlugin for Plugin {
     }
 
     fn transaction_notifications_enabled(&self) -> bool {
-        false
+        true
     }
 
     fn entry_notifications_enabled(&self) -> bool {
