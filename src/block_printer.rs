@@ -27,6 +27,6 @@ impl<'a> BlockPrinter<'a> {
             payload= base64_encoded_block
         );
 
-        println!("{}", format);
+        // println!("{}", format);
     }
 }
