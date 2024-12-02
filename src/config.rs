@@ -20,6 +20,9 @@ pub struct Config {
     pub send_processed: bool,
     #[serde(default)]
     pub log: ConfigLog,
+
+    #[serde(default)]
+    pub transactions_fifo: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
