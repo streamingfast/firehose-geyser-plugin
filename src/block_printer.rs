@@ -1,32 +1,45 @@
 use crate::pb::sf::solana::r#type::v1::AccountBlock;
 use base64;
+use log::debug;
 use prost::Message;
 
-pub struct BlockPrinter<'a> {
-    block: &'a AccountBlock,
+#[derive(Default)]
+pub struct BlockPrinter {
+    noop: bool,
 }
 
-impl<'a> BlockPrinter<'a> {
-    pub fn new(block: &'a AccountBlock) -> Self {
-        BlockPrinter { block }
+impl BlockPrinter {
+    pub fn new(noop: bool) -> Self {
+        BlockPrinter { noop }
     }
 
-    pub fn print(&self, lib: u64) {
-        let b = self.block;
-        let encoded_block = b.encode_to_vec();
+    pub fn print(
+        &self,
+        slot: u64,
+        hash: &String,
+        lib: u64,
+        parent_slot: u64,
+        parent_hash: &String,
+        timestamp: &prost_types::Timestamp,
+        block: &impl Message,
+    ) {
+        let encoded_block = block.encode_to_vec();
         let base64_encoded_block = base64::encode(encoded_block);
 
         let format = format!(
             "FIRE BLOCK {slot} {block_hash} {parent_slot} {parent_hash} {lib} {timestamp_nano} {payload}",
-            slot=b.slot,
-            block_hash=b.hash,
-            parent_slot=b.parent_slot,
-            parent_hash=b.parent_hash,
+            slot=slot,
+            block_hash=hash,
+            parent_slot=parent_slot,
+            parent_hash=parent_hash,
             lib=lib,
-            timestamp_nano=b.timestamp.as_ref().unwrap().seconds * 1_000_000_000,
+            timestamp_nano=timestamp.seconds * 1_000_000_000,
             payload= base64_encoded_block
         );
-
-        // println!("{}", format);
+        if self.noop {
+            debug!("printing block {} (noop mode)", slot);
+        } else {
+            println!("{}", format);
+        }
     }
 }

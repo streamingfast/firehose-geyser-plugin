@@ -1,4 +1,9 @@
 // @generated
+// @@protoc_insertion_point(attribute:account_plugins)
+pub mod account_plugins {
+    include!("account_plugins.rs");
+    // @@protoc_insertion_point(account_plugins)
+}
 pub mod sf {
     pub mod solana {
         pub mod r#type {

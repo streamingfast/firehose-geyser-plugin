@@ -1,6 +1,9 @@
 use crate::block_printer::BlockPrinter;
 use crate::pb;
 use crate::utils::{convert_sol_timestamp, create_account_block};
+use agave_geyser_plugin_interface::geyser_plugin_interface::{
+    ReplicaTransactionInfoV2, ReplicaTransactionInfoVersions,
+};
 use pb::sf::solana::r#type::v1::Account;
 use prost_types::Timestamp;
 use solana_rpc_client::rpc_client::RpcClient;
@@ -9,13 +12,19 @@ use std::collections::HashMap;
 type BlockAccountChanges = HashMap<u64, AccountChanges>;
 pub type AccountChanges = HashMap<Vec<u8>, AccountWithWriteVersion>;
 pub type AccountDataHash = HashMap<Vec<u8>, u64>;
+
+pub type Transactions = HashMap<u64, Vec<ConfirmTransactionWithIndex>>;
+
 type BlockInfoMap = HashMap<u64, BlockInfo>;
 type ConfirmedSlotsMap = HashMap<u64, bool>;
+use crate::pb::sf::solana::r#type::v1::{
+    Block, BlockHeight, ConfirmedTransaction, Transaction, UnixTimestamp,
+};
+use crate::plugins::ConfirmTransactionWithIndex;
 use log::{debug, info};
 use solana_rpc_client_api::config::RpcBlockConfig;
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_transaction_status::TransactionDetails;
-
 
 pub struct AccountWithWriteVersion {
     pub account: Account,
@@ -29,6 +38,7 @@ pub struct BlockInfo {
     pub block_hash: String,
     pub parent_hash: String,
     pub timestamp: Timestamp,
+    pub height: Option<u64>,
 }
 
 const DEFAULT_RPC_BLOCK_CONFIG: RpcBlockConfig = RpcBlockConfig {
@@ -55,10 +65,12 @@ pub struct State {
     block_infos: BlockInfoMap,
     confirmed_slots: ConfirmedSlotsMap,
 
+    transactions: Transactions,
+
     local_rpc_client: Option<RpcClient>,
     remote_rpc_client: Option<RpcClient>,
     cursor_path: String,
-    noop: bool,
+    block_printer: BlockPrinter,
 }
 
 impl State {
@@ -81,10 +93,12 @@ impl State {
             block_infos: HashMap::new(),
             confirmed_slots: HashMap::new(),
 
+            transactions: HashMap::new(),
+
             local_rpc_client: Some(local_rpc_client),
             remote_rpc_client: Some(remote_rpc_client),
             cursor_path: cursor_path,
-            noop: noop,
+            block_printer: BlockPrinter::new(noop),
         }
     }
 
@@ -147,6 +161,7 @@ impl State {
                     slot: slot,
                     block_hash: block.blockhash.clone(),
                     parent_hash: block.previous_blockhash.clone(),
+                    height: block.block_height,
                 })
             }
             Err(_err) => {
@@ -167,6 +182,7 @@ impl State {
                             slot: slot,
                             block_hash: block.blockhash.clone(),
                             parent_hash: block.previous_blockhash.clone(),
+                            height: block.block_height,
                         })
                     }
                     Err(_err) => None,
@@ -200,7 +216,7 @@ impl State {
         if self.cursor.is_some() && slot <= self.cursor.unwrap() {
             return true;
         };
-       return false;
+        return false;
     }
 
     pub fn set_confirmed_slot(&mut self, slot: u64) {
@@ -217,7 +233,10 @@ impl State {
             }
         }
         self.confirmed_slots.insert(slot, true);
-        self.process_upto(slot);
+    }
+
+    pub fn is_slot_confirm(&self, slot: u64) -> bool {
+        self.confirmed_slots.get(&slot).is_some()
     }
 
     pub fn set_block_info(&mut self, slot: u64, block_info: BlockInfo) {
@@ -233,12 +252,11 @@ impl State {
                 self.purge_blocks_up_to(slot - 1);
             }
         }
-        debug!("setting block info for slot {}, hash {}", slot, block_info.block_hash);
+        debug!(
+            "setting block info for slot {}, hash {}",
+            slot, block_info.block_hash
+        );
         self.block_infos.insert(slot, block_info);
-
-        if self.confirmed_slots.get(&slot).is_some() {
-            self.process_upto(slot);
-        }
     }
 
     pub fn set_account(
@@ -316,6 +334,16 @@ impl State {
         slot_entries.insert(address, awv);
     }
 
+    pub fn set_transaction(&mut self, slot: u64, transaction: ConfirmTransactionWithIndex) {
+        if let Some(txs) = self.transactions.get_mut(&slot) {
+            txs.push(transaction);
+        } else {
+            let mut txs = Vec::new();
+            txs.push(transaction);
+            self.transactions.insert(slot, txs);
+        }
+    }
+
     fn purge_blocks_up_to(&mut self, upto: u64) {
         let blocks = self
             .block_account_changes
@@ -339,7 +367,7 @@ impl State {
         }
     }
 
-    fn process_upto(&mut self, slot: u64) {
+    pub fn process_upto(&mut self, slot: u64) {
         if self.first_block_to_process.is_none() {
             debug!(
                 "No 'first_block_to_process' yet, skipping processing for slot {}",
@@ -361,20 +389,20 @@ impl State {
             return;
         };
 
-        for toproc in self.ordered_confirmed_slots_upto(slot) {
-            if toproc < self.first_block_to_process.unwrap() {
+        for slot in self.ordered_confirmed_slots_upto(slot) {
+            if slot < self.first_block_to_process.unwrap() {
                 continue;
             }
 
             let mut _rpc_block = None; // lifetime hack for block_info
-            let block_info = match self.get_block_info(toproc) {
+            let block_info = match self.get_block_info(slot) {
                 Some(bi) => bi,
                 None => {
                     // we don't want to use remote RPC unless we have to:
                     // - sometimes early blocks metadata after a restart will never become available
                     // - if blocks start piling up
-                    let try_remote = !self.initialized || self.confirmed_slots.len() >= 10 ;
-                    match self.get_block_from_rpc(toproc, try_remote) {
+                    let try_remote = !self.initialized || self.confirmed_slots.len() >= 10;
+                    match self.get_block_from_rpc(slot, try_remote) {
                         Some(bi) => {
                             _rpc_block = Some(bi);
                             _rpc_block.as_ref().unwrap()
@@ -382,7 +410,7 @@ impl State {
                         None => {
                             debug!(
                                 "process_upto({}): block info not found for slot {}",
-                                slot, toproc
+                                slot, slot
                             );
                             return;
                         }
@@ -390,23 +418,70 @@ impl State {
                 }
             };
 
-            let account_changes = self.get_account_changes(toproc);
+            let account_changes = self.get_account_changes(slot);
             let acc_block = create_account_block(
                 account_changes.unwrap_or(&AccountChanges::default()),
                 block_info,
             );
-            if toproc == self.first_received_blockmeta.unwrap() {
+            if slot == self.first_received_blockmeta.unwrap() {
                 debug!("First block was sent, now initialized");
                 self.initialized = true;
             }
-            if self.noop {
-                debug!("printing block {} - {} entries (noop mode)", toproc, acc_block.accounts.len());
-            } else {
-                debug!("printing block {}", toproc);
-                BlockPrinter::new(&acc_block).print(self.lib.unwrap());
+
+            self.block_printer.print(
+                acc_block.slot,
+                &acc_block.hash,
+                self.lib.unwrap(),
+                acc_block.parent_slot,
+                &acc_block.parent_hash,
+                acc_block.timestamp.as_ref().unwrap(),
+                &acc_block,
+            );
+
+            let block = self.compose_and_purge_block(slot);
+            self.block_printer.print(
+                acc_block.slot,
+                &acc_block.hash,
+                self.lib.unwrap(),
+                acc_block.parent_slot,
+                &acc_block.parent_hash,
+                acc_block.timestamp.as_ref().unwrap(),
+                &block,
+            );
+
+            self.purge_blocks_up_to(slot);
+            write_cursor(&self.cursor_path, slot);
+        }
+    }
+
+    fn compose_and_purge_block(&mut self, slot: u64) -> Block {
+        let mut transactions_with_index = self.transactions.remove(&slot).unwrap_or_else(|| vec![]);
+
+        let block_info = match self.block_infos.get(&slot) {
+            Some(bi) => bi,
+            None => {
+                panic!("Block info not found for slot {}", slot);
             }
-            self.purge_blocks_up_to(toproc);
-            write_cursor(&self.cursor_path, toproc);
+        };
+
+        transactions_with_index.sort_by_key(|ti| ti.index);
+
+        Block {
+            previous_blockhash: block_info.parent_hash.clone(),
+            blockhash: block_info.parent_hash.clone(),
+            slot,
+            transactions: transactions_with_index
+                .into_iter()
+                .map(|ti| ti.transaction)
+                .collect(),
+            rewards: vec![], //todo
+            block_time: Some(UnixTimestamp {
+                timestamp: block_info.timestamp.seconds,
+            }),
+            parent_slot: block_info.parent_slot,
+            block_height: Some(BlockHeight {
+                block_height: block_info.height.unwrap(),
+            }),
         }
     }
 

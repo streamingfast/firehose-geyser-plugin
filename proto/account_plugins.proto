@@ -1,0 +1,6 @@
+syntax = "proto3";
+
+import "sf/solana/type/v1/type.proto";
+import "sf/solana/type/v1/account.proto";
+
+package account_plugins;
