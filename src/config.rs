@@ -20,6 +20,8 @@ pub struct Config {
     pub send_processed: bool,
     #[serde(default)]
     pub log: ConfigLog,
+    pub account_block_destination_file: String,
+    pub block_destination_file: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

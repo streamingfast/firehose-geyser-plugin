@@ -23,8 +23,10 @@ use solana_rpc_client::rpc_client::RpcClient;
 
 use solana_sdk::hash::Hash;
 use std::fmt;
+use std::fs::OpenOptions;
 use std::str::FromStr;
 
+use crate::block_printer::BlockPrinter;
 use solana_sdk::message::AccountKeys;
 use solana_sdk::transaction_context::TransactionReturnData;
 
@@ -35,9 +37,8 @@ pub struct ConfirmTransactionWithIndex {
     pub transaction: ConfirmedTransaction,
 }
 
-#[derive(Default)]
 pub struct Plugin {
-    state: RwLock<State>,
+    state: Option<RwLock<State>>,
     send_processed: bool,
     trace: bool,
 }
@@ -59,6 +60,14 @@ fn cursor_from_file(cursor_file: &str) -> Option<u64> {
 }
 
 impl Plugin {
+    pub fn new(send_processed: bool, trace: bool) -> Self {
+        Plugin {
+            state: None,
+            send_processed,
+            trace,
+        }
+    }
+
     fn set_account(
         &self,
         slot: u64,
@@ -69,7 +78,7 @@ impl Plugin {
         deleted: bool,
         is_startup: bool,
     ) {
-        let mut lock_state = self.state.write().unwrap();
+        let mut lock_state = self.state.as_ref().unwrap().write().unwrap();
 
         if !is_startup && lock_state.should_skip_slot(slot) {
             return;
@@ -130,13 +139,29 @@ impl GeyserPlugin for Plugin {
         let cursor = cursor_from_file(&plugin_config.cursor_file);
         self.send_processed = plugin_config.send_processed;
 
-        self.state = RwLock::new(State::new(
+        let account_block_printer = BlockPrinter::new(
+            OpenOptions::new()
+                .write(true)
+                .open(plugin_config.account_block_destination_file)
+                .expect("Failed to open FIFO"),
+            plugin_config.noop,
+        );
+        let block_printer = BlockPrinter::new(
+            OpenOptions::new()
+                .write(true)
+                .open(plugin_config.block_destination_file)
+                .expect("Failed to open FIFO"),
+            plugin_config.noop,
+        );
+
+        self.state = Some(RwLock::new(State::new(
             local_rpc_client,
             remote_rpc_client,
             cursor,
             plugin_config.cursor_file,
-            plugin_config.noop,
-        ));
+            account_block_printer,
+            block_printer,
+        )));
 
         println!("FIRE INIT 3.0 sf.solana.type.v1.AccountBlock");
         info!("cursor: {:?}", cursor);
@@ -196,7 +221,12 @@ impl GeyserPlugin for Plugin {
     fn notify_end_of_startup(&self) -> PluginResult<()> {
         info!(
             "preloaded account data hash count: {}",
-            self.state.read().unwrap().get_hash_count()
+            self.state
+                .as_ref()
+                .unwrap()
+                .read()
+                .unwrap()
+                .get_hash_count()
         );
         info!("end of startup");
         Ok(())
@@ -218,7 +248,7 @@ impl GeyserPlugin for Plugin {
                         slot,
                         _parent.unwrap_or_default()
                     );
-                    let mut lock_state = self.state.write().unwrap();
+                    let mut lock_state = self.state.as_ref().unwrap().write().unwrap();
                     lock_state.set_confirmed_slot(slot);
                 }
                 false => {
@@ -231,7 +261,7 @@ impl GeyserPlugin for Plugin {
             },
             SlotStatus::Rooted => {
                 debug!("slot rooted {}", slot);
-                self.state.write().unwrap().set_lib(slot);
+                self.state.as_ref().unwrap().write().unwrap().set_lib(slot);
             }
             SlotStatus::Confirmed => match self.send_processed {
                 true => {
@@ -247,7 +277,7 @@ impl GeyserPlugin for Plugin {
                         slot,
                         _parent.unwrap_or_default()
                     );
-                    let mut lock_state = self.state.write().unwrap();
+                    let mut lock_state = self.state.as_ref().unwrap().write().unwrap();
                     lock_state.set_confirmed_slot(slot);
                     lock_state.process_upto(slot);
                 }
@@ -275,7 +305,7 @@ impl GeyserPlugin for Plugin {
             transaction: compiled_transaction,
         };
 
-        let mut lock_state = self.state.write().unwrap();
+        let mut lock_state = self.state.as_ref().unwrap().write().unwrap();
         lock_state.set_transaction(slot, tx);
 
         Ok(())
@@ -300,7 +330,7 @@ impl GeyserPlugin for Plugin {
                     timestamp: convert_sol_timestamp(blockinfo.block_time.unwrap()),
                 };
 
-                let mut lock_state = self.state.write().unwrap();
+                let mut lock_state = self.state.as_ref().unwrap().write().unwrap();
                 lock_state.set_block_info(blockinfo.slot, block_info);
                 if lock_state.is_slot_confirm(blockinfo.slot) {
                     lock_state.process_upto(blockinfo.slot);
@@ -317,7 +347,7 @@ impl GeyserPlugin for Plugin {
                     timestamp: convert_sol_timestamp(blockinfo.block_time.unwrap()),
                 };
 
-                let mut lock_state = self.state.write().unwrap();
+                let mut lock_state = self.state.as_ref().unwrap().write().unwrap();
                 lock_state.set_block_info(blockinfo.slot, block_info);
                 if lock_state.is_slot_confirm(blockinfo.slot) {
                     lock_state.process_upto(blockinfo.slot);
@@ -334,7 +364,7 @@ impl GeyserPlugin for Plugin {
                     timestamp: convert_sol_timestamp(blockinfo.block_time.unwrap()),
                 };
 
-                let mut lock_state = self.state.write().unwrap();
+                let mut lock_state = self.state.as_ref().unwrap().write().unwrap();
                 lock_state.set_block_info(blockinfo.slot, block_info);
                 if lock_state.is_slot_confirm(blockinfo.slot) {
                     lock_state.process_upto(blockinfo.slot);
@@ -364,7 +394,7 @@ impl GeyserPlugin for Plugin {
 ///
 /// This function returns the Plugin pointer as trait GeyserPlugin.
 pub unsafe extern "C" fn _create_plugin() -> *mut dyn GeyserPlugin {
-    let plugin = Plugin::default();
+    let plugin = Plugin::new(false, false);
     let plugin: Box<dyn GeyserPlugin> = Box::new(plugin);
     Box::into_raw(plugin)
 }
