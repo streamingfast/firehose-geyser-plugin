@@ -1,15 +1,10 @@
 use crate::block_printer::BlockPrinter;
 use crate::pb;
 use crate::utils::{convert_sol_timestamp, create_account_block};
-use agave_geyser_plugin_interface::geyser_plugin_interface::{
-    ReplicaTransactionInfoV2, ReplicaTransactionInfoVersions,
-};
 use pb::sf::solana::r#type::v1::Account;
 use prost_types::Timestamp;
 use solana_rpc_client::rpc_client::RpcClient;
 use std::collections::HashMap;
-use std::sync::RwLock;
-use std::thread;
 
 type BlockAccountChanges = HashMap<u64, AccountChanges>;
 pub type AccountChanges = HashMap<Vec<u8>, AccountWithWriteVersion>;
@@ -19,9 +14,7 @@ pub type Transactions = HashMap<u64, Vec<ConfirmTransactionWithIndex>>;
 
 type BlockInfoMap = HashMap<u64, BlockInfo>;
 type ConfirmedSlotsMap = HashMap<u64, bool>;
-use crate::pb::sf::solana::r#type::v1::{
-    Block, BlockHeight, ConfirmedTransaction, Transaction, UnixTimestamp,
-};
+use crate::pb::sf::solana::r#type::v1::{Block, BlockHeight, UnixTimestamp};
 use crate::plugins::ConfirmTransactionWithIndex;
 use log::{debug, info};
 use solana_rpc_client_api::config::RpcBlockConfig;
@@ -152,9 +145,6 @@ impl State {
 
     fn has_block_info(&self, slot: u64) -> bool {
         self.block_infos.contains_key(&slot)
-    }
-    fn get_block_info(&self, slot: u64) -> Option<&BlockInfo> {
-        self.block_infos.get(&slot)
     }
 
     pub fn cache_block_from_rpc(&mut self, slot: u64, try_remote: bool) {
@@ -448,8 +438,8 @@ impl State {
             // let b_printer = &mut self.block_printer.write().unwrap();
             let a_printer = &mut self.account_block_printer;
             let b_printer = &mut self.block_printer;
-            a_printer.print(&block_info, lib, &acc_block);
-            b_printer.print(&block_info, lib, &block);
+            a_printer.print(&block_info, lib, &acc_block).unwrap();
+            b_printer.print(&block_info, lib, &block).unwrap();
 
             self.purge_blocks_up_to(slot);
             write_cursor(&self.cursor_path, slot);

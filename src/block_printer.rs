@@ -1,9 +1,8 @@
-use crate::pb::sf::solana::r#type::v1::AccountBlock;
 use crate::state::BlockInfo;
 use base64;
 use log::debug;
 use prost::Message;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::Write;
 
 pub struct BlockPrinter {
