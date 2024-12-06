@@ -236,8 +236,6 @@ impl GeyserPlugin for Plugin {
         _parent: Option<u64>,
         status: SlotStatus,
     ) -> PluginResult<()> {
-        println!("GRRRRR: BLOCK STATUS ({}) {}", slot, status.as_str());
-
         match status {
             SlotStatus::Processed => match self.send_processed {
                 true => {
