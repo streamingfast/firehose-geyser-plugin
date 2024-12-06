@@ -139,26 +139,19 @@ impl GeyserPlugin for Plugin {
         let cursor = cursor_from_file(&plugin_config.cursor_file);
         self.send_processed = plugin_config.send_processed;
 
-        let mut account_block_printer = BlockPrinter::new(
-            OpenOptions::new()
-                .write(true)
-                .open(plugin_config.account_block_destination_file)
-                .expect("Failed to open FIFO"),
-            plugin_config.noop,
-        );
-        account_block_printer
-            .print_init("sf.solana.type.v1.AccountBlock")
-            .expect("Failed to print init");
+        let blk_file = OpenOptions::new()
+            .write(true)
+            .open(plugin_config.block_destination_file)
+            .expect("Failed to open FIFO");
 
-        let mut block_printer = BlockPrinter::new(
-            OpenOptions::new()
-                .write(true)
-                .open(plugin_config.block_destination_file)
-                .expect("Failed to open FIFO"),
-            plugin_config.noop,
-        );
-        block_printer
-            .print_init("sf.solana.type.v1.Block")
+        let acc_blk_file = OpenOptions::new()
+            .write(true)
+            .open(plugin_config.account_block_destination_file)
+            .expect("Failed to open FIFO");
+
+        let mut printer = BlockPrinter::new(blk_file, acc_blk_file, plugin_config.noop);
+        printer
+            .print_init("sf.solana.type.v1.Block", "sf.solana.type.v1.AccountBlock")
             .expect("Failed to print init");
 
         self.state = Some(RwLock::new(State::new(
@@ -166,8 +159,7 @@ impl GeyserPlugin for Plugin {
             remote_rpc_client,
             cursor,
             plugin_config.cursor_file,
-            account_block_printer,
-            block_printer,
+            printer,
         )));
 
         info!("cursor: {:?}", cursor);

@@ -64,10 +64,7 @@ pub struct State {
     local_rpc_client: Option<RpcClient>,
     remote_rpc_client: Option<RpcClient>,
     cursor_path: String,
-    // block_printer: RwLock<BlockPrinter>,
-    // account_block_printer: RwLock<BlockPrinter>,
     block_printer: BlockPrinter,
-    account_block_printer: BlockPrinter,
 }
 
 impl State {
@@ -76,7 +73,6 @@ impl State {
         remote_rpc_client: RpcClient,
         cursor: Option<u64>,
         cursor_path: String,
-        account_block_printer: BlockPrinter,
         block_printer: BlockPrinter,
     ) -> Self {
         State {
@@ -97,9 +93,6 @@ impl State {
             remote_rpc_client: Some(remote_rpc_client),
             cursor_path: cursor_path,
             block_printer: block_printer,
-            account_block_printer: account_block_printer,
-            // block_printer: RwLock::new(block_printer),
-            // account_block_printer: RwLock::new(account_block_printer),
         }
     }
 
@@ -436,10 +429,8 @@ impl State {
 
             // let a_printer = &mut self.account_block_printer.write().unwrap();
             // let b_printer = &mut self.block_printer.write().unwrap();
-            let a_printer = &mut self.account_block_printer;
-            let b_printer = &mut self.block_printer;
-            a_printer.print(&block_info, lib, &acc_block).unwrap();
-            b_printer.print(&block_info, lib, &block).unwrap();
+            let printer = &mut self.block_printer;
+            printer.print(&block_info, lib, &block, &acc_block).unwrap();
 
             self.purge_blocks_up_to(slot);
             write_cursor(&self.cursor_path, slot);

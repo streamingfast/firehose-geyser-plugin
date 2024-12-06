@@ -7,20 +7,38 @@ use std::io::Write;
 
 pub struct BlockPrinter {
     noop: bool,
-    out: File,
+    out_block: File,
+    out_account: File,
 }
 
 impl BlockPrinter {
-    pub fn new(out: File, noop: bool) -> Self {
-        BlockPrinter { noop, out }
+    pub fn new(out_block: File, out_account: File, noop: bool) -> Self {
+        BlockPrinter {
+            noop,
+            out_block,
+            out_account,
+        }
     }
 
-    pub fn print_init(&mut self, blocktype: &str) -> std::io::Result<()> {
+    pub fn print_init(
+        &mut self,
+        block_type: &str,
+        account_block_type: &str,
+    ) -> std::io::Result<()> {
         if self.noop {
-            debug!("printing init for type {} (noop mode)", blocktype);
+            debug!(
+                "printing init for type {} and {} (noop mode)",
+                block_type, account_block_type
+            );
             Ok(())
         } else {
-            writeln!(self.out, "INIT {blocktype}")
+            if let Err(e) = writeln!(self.out_block, "INIT {block_type}") {
+                return Err(e);
+            }
+            if let Err(e) = writeln!(self.out_account, "INIT {account_block_type}") {
+                return Err(e);
+            }
+            Ok(())
         }
     }
 
@@ -29,25 +47,43 @@ impl BlockPrinter {
         block_info: &BlockInfo,
         lib: u64,
         block: &impl Message,
+        account_block: &impl Message,
     ) -> std::io::Result<()> {
         if self.noop {
             debug!("printing block {} (noop mode)", block_info.slot);
             Ok(())
         } else {
-            let mut out = self.out.try_clone().unwrap();
+            let mut out_block = self.out_block.try_clone().unwrap();
             let slot = block_info.slot;
-            let block_hash = block_info.block_hash.clone();
             let parent_slot = block_info.parent_slot;
-            let parent_hash = block_info.parent_hash.clone();
             let timestamp_nano = block_info.timestamp.seconds * 1_000_000_000;
             let lib = lib;
+            let block_hash = block_info.block_hash.clone();
+            let parent_hash = block_info.parent_hash.clone();
+
             let encoded_block = block.encode_to_vec();
             let handle = std::thread::spawn(move || {
                 let base64_encoded_block = base64::encode(encoded_block);
                 let payload = base64_encoded_block;
-                writeln!(out, "FIRE BLOCK {slot} {block_hash} {parent_slot} {parent_hash} {lib} {timestamp_nano} {payload}")
+                writeln!(out_block, "FIRE BLOCK {slot} {block_hash} {parent_slot} {parent_hash} {lib} {timestamp_nano} {payload}")
             });
-            handle.join().unwrap()
+
+            let mut out_account = self.out_account.try_clone().unwrap();
+            let block_hash2 = block_info.block_hash.clone();
+            let parent_hash2 = block_info.parent_hash.clone();
+            let encoded_account_block = account_block.encode_to_vec();
+            let handle2 = std::thread::spawn(move || {
+                let base64_encoded_block = base64::encode(encoded_account_block);
+                let payload = base64_encoded_block;
+                writeln!(out_account, "FIRE BLOCK {slot} {block_hash2} {parent_slot} {parent_hash2} {lib} {timestamp_nano} {payload}")
+            });
+            if let Err(e) = handle.join().unwrap() {
+                return Err(e);
+            };
+            if let Err(e) = handle2.join().unwrap() {
+                return Err(e);
+            };
+            Ok(())
         }
     }
 }
