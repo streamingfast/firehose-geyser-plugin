@@ -430,7 +430,7 @@ impl State {
             // let a_printer = &mut self.account_block_printer.write().unwrap();
             // let b_printer = &mut self.block_printer.write().unwrap();
             let printer = &mut self.block_printer;
-            printer.print(&block_info, lib, &block, &acc_block).unwrap();
+            printer.print(&block_info, lib, block, acc_block).unwrap();
 
             self.purge_blocks_up_to(slot);
             write_cursor(&self.cursor_path, slot);

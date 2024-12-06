@@ -1,3 +1,4 @@
+use crate::pb::sf::solana::r#type::v1::{AccountBlock, Block};
 use crate::state::BlockInfo;
 use base64;
 use log::debug;
@@ -32,10 +33,10 @@ impl BlockPrinter {
             );
             Ok(())
         } else {
-            if let Err(e) = writeln!(self.out_block, "INIT {block_type}") {
+            if let Err(e) = writeln!(self.out_block, "FIRE INIT {block_type}") {
                 return Err(e);
             }
-            if let Err(e) = writeln!(self.out_account, "INIT {account_block_type}") {
+            if let Err(e) = writeln!(self.out_account, "FIRE INIT {account_block_type}") {
                 return Err(e);
             }
             Ok(())
@@ -46,8 +47,8 @@ impl BlockPrinter {
         &mut self,
         block_info: &BlockInfo,
         lib: u64,
-        block: &impl Message,
-        account_block: &impl Message,
+        block: Block,
+        account_block: AccountBlock,
     ) -> std::io::Result<()> {
         if self.noop {
             debug!("printing block {} (noop mode)", block_info.slot);
@@ -61,8 +62,8 @@ impl BlockPrinter {
             let block_hash = block_info.block_hash.clone();
             let parent_hash = block_info.parent_hash.clone();
 
-            let encoded_block = block.encode_to_vec();
             let handle = std::thread::spawn(move || {
+                let encoded_block = block.encode_to_vec();
                 let base64_encoded_block = base64::encode(encoded_block);
                 let payload = base64_encoded_block;
                 writeln!(out_block, "FIRE BLOCK {slot} {block_hash} {parent_slot} {parent_hash} {lib} {timestamp_nano} {payload}")
@@ -71,8 +72,8 @@ impl BlockPrinter {
             let mut out_account = self.out_account.try_clone().unwrap();
             let block_hash2 = block_info.block_hash.clone();
             let parent_hash2 = block_info.parent_hash.clone();
-            let encoded_account_block = account_block.encode_to_vec();
             let handle2 = std::thread::spawn(move || {
+                let encoded_account_block = account_block.encode_to_vec();
                 let base64_encoded_block = base64::encode(encoded_account_block);
                 let payload = base64_encoded_block;
                 writeln!(out_account, "FIRE BLOCK {slot} {block_hash2} {parent_slot} {parent_hash2} {lib} {timestamp_nano} {payload}")
