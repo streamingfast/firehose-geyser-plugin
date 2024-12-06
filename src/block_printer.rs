@@ -33,10 +33,10 @@ impl BlockPrinter {
             );
             Ok(())
         } else {
-            if let Err(e) = writeln!(self.out_block, "FIRE INIT {block_type}") {
+            if let Err(e) = writeln!(self.out_block, "FIRE INIT 3.0 {block_type}") {
                 return Err(e);
             }
-            if let Err(e) = writeln!(self.out_account, "FIRE INIT {account_block_type}") {
+            if let Err(e) = writeln!(self.out_account, "FIRE INIT 3.0 {account_block_type}") {
                 return Err(e);
             }
             Ok(())
