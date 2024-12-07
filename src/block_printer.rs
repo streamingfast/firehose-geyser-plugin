@@ -1,7 +1,7 @@
 use crate::pb::sf::solana::r#type::v1::{AccountBlock, Block};
 use crate::state::BlockInfo;
 use base64;
-use log::debug;
+use log::{debug, info};
 use prost::Message;
 use std::fs::File;
 use std::io::Write;
@@ -50,41 +50,48 @@ impl BlockPrinter {
         block: Block,
         account_block: AccountBlock,
     ) -> std::io::Result<()> {
-        if self.noop {
-            debug!("printing block {} (noop mode)", block_info.slot);
-            Ok(())
-        } else {
-            let mut out_block = self.out_block.try_clone().unwrap();
-            let slot = block_info.slot;
-            let parent_slot = block_info.parent_slot;
-            let timestamp_nano = block_info.timestamp.seconds * 1_000_000_000;
-            let lib = lib;
-            let block_hash = block_info.block_hash.clone();
-            let parent_hash = block_info.parent_hash.clone();
+        let mut out_block = self.out_block.try_clone().unwrap();
+        let slot = block_info.slot;
+        let parent_slot = block_info.parent_slot;
+        let timestamp_nano = block_info.timestamp.seconds * 1_000_000_000;
+        let lib = lib;
+        let block_hash = block_info.block_hash.clone();
+        let parent_hash = block_info.parent_hash.clone();
 
-            let handle = std::thread::spawn(move || {
-                let encoded_block = block.encode_to_vec();
-                let base64_encoded_block = base64::encode(encoded_block);
-                let payload = base64_encoded_block;
+        let noop = self.noop;
+        let handle = std::thread::spawn(move || {
+            let encoded_block = block.encode_to_vec();
+            let base64_encoded_block = base64::encode(encoded_block);
+            let payload = base64_encoded_block;
+
+            if noop {
+                info!("printing block {} (noop mode)", slot);
+                Ok(())
+            } else {
                 writeln!(out_block, "FIRE BLOCK {slot} {block_hash} {parent_slot} {parent_hash} {lib} {timestamp_nano} {payload}")
-            });
+            }
+        });
 
-            let mut out_account = self.out_account.try_clone().unwrap();
-            let block_hash2 = block_info.block_hash.clone();
-            let parent_hash2 = block_info.parent_hash.clone();
-            let handle2 = std::thread::spawn(move || {
-                let encoded_account_block = account_block.encode_to_vec();
-                let base64_encoded_block = base64::encode(encoded_account_block);
-                let payload = base64_encoded_block;
+        let mut out_account = self.out_account.try_clone().unwrap();
+        let block_hash2 = block_info.block_hash.clone();
+        let parent_hash2 = block_info.parent_hash.clone();
+        let handle2 = std::thread::spawn(move || {
+            let encoded_account_block = account_block.encode_to_vec();
+            let base64_encoded_block = base64::encode(encoded_account_block);
+            let payload = base64_encoded_block;
+            if noop {
+                info!("printing block {} (noop mode)", slot);
+                Ok(())
+            } else {
                 writeln!(out_account, "FIRE BLOCK {slot} {block_hash2} {parent_slot} {parent_hash2} {lib} {timestamp_nano} {payload}")
-            });
-            if let Err(e) = handle.join().unwrap() {
-                return Err(e);
-            };
-            if let Err(e) = handle2.join().unwrap() {
-                return Err(e);
-            };
-            Ok(())
-        }
+            }
+        });
+        if let Err(e) = handle.join().unwrap() {
+            return Err(e);
+        };
+        if let Err(e) = handle2.join().unwrap() {
+            return Err(e);
+        };
+        Ok(())
     }
 }
