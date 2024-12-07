@@ -376,7 +376,7 @@ impl GeyserPlugin for Plugin {
     }
 
     fn transaction_notifications_enabled(&self) -> bool {
-        false
+        true
     }
 
     fn entry_notifications_enabled(&self) -> bool {
