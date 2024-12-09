@@ -373,13 +373,13 @@ impl State {
         }
     }
 
-    pub fn process_upto(&mut self, slot: u64) {
+    pub fn process_upto(&mut self, slot: u64) -> Result<(), Box<dyn std::error::Error>> {
         if self.first_block_to_process.is_none() {
             debug!(
                 "No 'first_block_to_process' yet, skipping processing for slot {}",
                 slot
             );
-            return;
+            return Ok(());
         }
 
         if self.first_received_blockmeta.is_none() {
@@ -387,12 +387,12 @@ impl State {
                 "No 'first_received_blockmeta' yet, skipping processing for slot {}",
                 slot
             );
-            return;
+            return Ok(());
         }
 
         if self.get_lib().is_none() {
             debug!("No lib found yet, skipping processing of slot {}", slot);
-            return;
+            return Ok(());
         };
 
         if slot == self.first_received_blockmeta.unwrap() {
@@ -413,7 +413,7 @@ impl State {
                 self.cache_block_from_rpc(slot, try_remote);
                 block_info = match self.block_infos.get(&slot) {
                     None => {
-                        return;
+                        return Err("mutex poisoned".into());
                     }
                     Some(bi) => bi,
                 }
@@ -439,8 +439,12 @@ impl State {
             printer.print(&block_info, lib, block, acc_block).unwrap();
 
             self.purge_blocks_up_to(slot);
+            if BLOCK_MUTEX.is_poisoned() || ACC_MUTEX.is_poisoned() {
+                return Err("mutex poisoned".into());
+            }
             write_cursor(&self.cursor_path, slot);
         }
+        return Ok(());
     }
 
     pub fn get_hash_count(&self) -> usize {

@@ -16,6 +16,7 @@ use crate::pb::sf::solana::r#type::v1::{
     MessageAddressTableLookup, MessageHeader, ReturnData, Reward, Transaction,
     TransactionStatusMeta,
 };
+use crate::state::{ACC_MUTEX, BLOCK_MUTEX};
 use crate::utils::convert_sol_timestamp;
 use env_logger::Target;
 use log::{debug, info, LevelFilter};
@@ -27,6 +28,7 @@ use std::fs::OpenOptions;
 use std::str::FromStr;
 
 use crate::block_printer::BlockPrinter;
+use agave_geyser_plugin_interface::geyser_plugin_interface::GeyserPluginError::Custom;
 use solana_sdk::message::AccountKeys;
 use solana_sdk::transaction_context::TransactionReturnData;
 
@@ -236,6 +238,9 @@ impl GeyserPlugin for Plugin {
         _parent: Option<u64>,
         status: SlotStatus,
     ) -> PluginResult<()> {
+        if ACC_MUTEX.is_poisoned() || BLOCK_MUTEX.is_poisoned() {
+            return Err(Custom("Block mutex poisoned".into()));
+        }
         match status {
             SlotStatus::Processed => match self.send_processed {
                 true => {
@@ -275,7 +280,9 @@ impl GeyserPlugin for Plugin {
                     );
                     let mut lock_state = self.state.as_ref().unwrap().write().unwrap();
                     lock_state.set_confirmed_slot(slot);
-                    lock_state.process_upto(slot);
+                    if lock_state.process_upto(slot).is_err() {
+                        return Err(Custom("Block mutex poisoned".into()));
+                    }
                 }
             },
         }
@@ -312,6 +319,10 @@ impl GeyserPlugin for Plugin {
     }
 
     fn notify_block_metadata(&self, blockinfo: ReplicaBlockInfoVersions<'_>) -> PluginResult<()> {
+        if ACC_MUTEX.is_poisoned() || BLOCK_MUTEX.is_poisoned() {
+            return Err(Custom("Block mutex poisoned".into()));
+        }
+
         match blockinfo {
             ReplicaBlockInfoVersions::V0_0_1(_) => {
                 panic!("V0_0_1 not supported");
@@ -329,7 +340,9 @@ impl GeyserPlugin for Plugin {
                 let mut lock_state = self.state.as_ref().unwrap().write().unwrap();
                 lock_state.set_block_info(blockinfo.slot, block_info);
                 if lock_state.is_slot_confirm(blockinfo.slot) {
-                    lock_state.process_upto(blockinfo.slot);
+                    if lock_state.process_upto(blockinfo.slot).is_err() {
+                        return Err(Custom("Block mutex poisoned".into()));
+                    }
                 }
             }
 
@@ -346,7 +359,9 @@ impl GeyserPlugin for Plugin {
                 let mut lock_state = self.state.as_ref().unwrap().write().unwrap();
                 lock_state.set_block_info(blockinfo.slot, block_info);
                 if lock_state.is_slot_confirm(blockinfo.slot) {
-                    lock_state.process_upto(blockinfo.slot);
+                    if lock_state.process_upto(blockinfo.slot).is_err() {
+                        return Err(Custom("Block mutex poisoned".into()));
+                    }
                 }
             }
 
@@ -363,7 +378,9 @@ impl GeyserPlugin for Plugin {
                 let mut lock_state = self.state.as_ref().unwrap().write().unwrap();
                 lock_state.set_block_info(blockinfo.slot, block_info);
                 if lock_state.is_slot_confirm(blockinfo.slot) {
-                    lock_state.process_upto(blockinfo.slot);
+                    if lock_state.process_upto(blockinfo.slot).is_err() {
+                        return Err(Custom("Block mutex poisoned".into()));
+                    }
                 }
             }
         }
