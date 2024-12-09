@@ -1,11 +1,11 @@
 use crate::pb::sf::solana::r#type::v1::{AccountBlock, Block};
 use crate::state::BlockInfo;
+use crate::state::{ACC_MUTEX, BLOCK_MUTEX};
 use base64;
 use log::{debug, info};
 use prost::Message;
 use std::fs::File;
 use std::io::Write;
-use std::sync::Arc;
 
 pub struct BlockPrinter {
     noop: bool,
@@ -50,8 +50,6 @@ impl BlockPrinter {
         lib: u64,
         block: Block,
         account_block: AccountBlock,
-        mutex_block: Arc<std::sync::Mutex<()>>,
-        mutex_account: Arc<std::sync::Mutex<()>>,
     ) -> std::io::Result<()> {
         let mut out_block = self.out_block.try_clone().unwrap();
         let slot = block_info.slot;
@@ -63,16 +61,15 @@ impl BlockPrinter {
 
         let noop = self.noop;
         std::thread::spawn(move || {
-            let _lock = mutex_block.lock().unwrap();
             let encoded_block = block.encode_to_vec();
             let base64_encoded_block = base64::encode(encoded_block);
             let payload = base64_encoded_block;
 
             if noop {
                 info!("printing block {} (noop mode)", slot);
-                Ok(())
             } else {
-                writeln!(out_block, "FIRE BLOCK {slot} {block_hash} {parent_slot} {parent_hash} {lib} {timestamp_nano} {payload}")
+                let _lock = BLOCK_MUTEX.lock().unwrap();
+                writeln!(out_block, "FIRE BLOCK {slot} {block_hash} {parent_slot} {parent_hash} {lib} {timestamp_nano} {payload}").unwrap()
             }
         });
 
@@ -80,23 +77,16 @@ impl BlockPrinter {
         let block_hash2 = block_info.block_hash.clone();
         let parent_hash2 = block_info.parent_hash.clone();
         std::thread::spawn(move || {
-            let _lock = mutex_account.lock().unwrap();
             let encoded_account_block = account_block.encode_to_vec();
             let base64_encoded_block = base64::encode(encoded_account_block);
             let payload = base64_encoded_block;
             if noop {
                 info!("printing block {} (noop mode)", slot);
-                Ok(())
             } else {
-                writeln!(out_account, "FIRE BLOCK {slot} {block_hash2} {parent_slot} {parent_hash2} {lib} {timestamp_nano} {payload}")
+                let _lock = ACC_MUTEX.lock().unwrap();
+                writeln!(out_account, "FIRE BLOCK {slot} {block_hash2} {parent_slot} {parent_hash2} {lib} {timestamp_nano} {payload}").unwrap()
             }
         });
-        //if let Err(e) = handle.join().unwrap() {
-        //    return Err(e);
-        //};
-        //if let Err(e) = handle2.join().unwrap() {
-        //    return Err(e);
-        //};
         Ok(())
     }
 }

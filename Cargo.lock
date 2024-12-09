@@ -3017,6 +3017,7 @@ dependencies = [
  "git-version",
  "gxhash",
  "hex",
+ "lazy_static",
  "log",
  "prost",
  "prost-types",

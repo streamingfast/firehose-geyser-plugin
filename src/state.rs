@@ -1,11 +1,11 @@
 use crate::block_printer::BlockPrinter;
 use crate::pb;
 use crate::utils::{convert_sol_timestamp, create_account_block};
+use lazy_static::lazy_static;
 use pb::sf::solana::r#type::v1::Account;
 use prost_types::Timestamp;
 use solana_rpc_client::rpc_client::RpcClient;
 use std::collections::HashMap;
-use std::sync::*;
 
 type BlockAccountChanges = HashMap<u64, AccountChanges>;
 pub type AccountChanges = HashMap<Vec<u8>, AccountWithWriteVersion>;
@@ -25,6 +25,11 @@ use solana_transaction_status::TransactionDetails;
 pub struct AccountWithWriteVersion {
     pub account: Account,
     pub write_version: u64,
+}
+
+lazy_static! {
+    pub static ref BLOCK_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub static ref ACC_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 }
 
 #[derive(Default, Clone)]
@@ -394,8 +399,6 @@ impl State {
             debug!("First block was sent, now initialized");
             self.initialized = true;
         }
-        let block_mutex = Arc::new(std::sync::Mutex::new(()));
-        let acc_mutex = Arc::new(std::sync::Mutex::new(()));
 
         for slot in self.ordered_confirmed_slots_upto(slot) {
             if slot < self.first_block_to_process.unwrap() {
@@ -433,16 +436,7 @@ impl State {
             // let a_printer = &mut self.account_block_printer.write().unwrap();
             // let b_printer = &mut self.block_printer.write().unwrap();
             let printer = &mut self.block_printer;
-            printer
-                .print(
-                    &block_info,
-                    lib,
-                    block,
-                    acc_block,
-                    Arc::clone(&block_mutex),
-                    Arc::clone(&acc_mutex),
-                )
-                .unwrap();
+            printer.print(&block_info, lib, block, acc_block).unwrap();
 
             self.purge_blocks_up_to(slot);
             write_cursor(&self.cursor_path, slot);
