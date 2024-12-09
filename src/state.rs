@@ -412,9 +412,7 @@ impl State {
                 let try_remote = !self.initialized || self.confirmed_slots.len() >= 10;
                 self.cache_block_from_rpc(slot, try_remote);
                 block_info = match self.block_infos.get(&slot) {
-                    None => {
-                        return Err("mutex poisoned".into());
-                    }
+                    None => return Ok(()),
                     Some(bi) => bi,
                 }
             };

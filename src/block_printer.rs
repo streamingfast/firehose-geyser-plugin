@@ -87,6 +87,10 @@ impl BlockPrinter {
                 writeln!(out_account, "FIRE BLOCK {slot} {block_hash2} {parent_slot} {parent_hash2} {lib} {timestamp_nano} {payload}").unwrap()
             }
         });
+
+        // We are not waiting for the threads to finish, so that the plugin can be called again for the updates. The lock is only used to prevent interleaving of the output.
+        // If an error occurs while writing, the unwrap() will make it panic and poison the mutex.
+        // TODO: updating the cursor should be done with that knowledge (maybe wrapping the cursor in the mutex?)
         Ok(())
     }
 }
