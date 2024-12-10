@@ -664,22 +664,19 @@ fn to_recent_block_hash(h: &Hash) -> Vec<u8> {
 }
 
 fn to_account_keys(keys: AccountKeys, loaded_addresses: &LoadedAddresses) -> Vec<Vec<u8>> {
-    let mut lookup_keys: HashMap<&Pubkey, bool> = Default::default();
+    // Create a HashSet of all loaded addresses (address lookup table)
+    let lookup_keys: std::collections::HashSet<_> = loaded_addresses
+        .writable
+        .iter()
+        .chain(loaded_addresses.readonly.iter())
+        .collect();
 
-    // loaded adresses contain keys from account lookup tables, which we exclude from the 'account_keys' vec.
-    loaded_addresses.writable.iter().for_each(|key| {
-        lookup_keys.insert(key, true);
-    });
-    loaded_addresses.readonly.iter().for_each(|key| {
-        lookup_keys.insert(key, true);
-    });
-
+    // Filter and convert account keys
     keys.iter()
-        .filter(|key| lookup_keys.contains_key(key))
+        .filter(|key| lookup_keys.contains(key))
         .map(|key| key.to_bytes().to_vec())
         .collect()
 }
-
 fn to_header(h: &solana_sdk::message::MessageHeader) -> MessageHeader {
     MessageHeader {
         num_required_signatures: h.num_required_signatures as u32,
