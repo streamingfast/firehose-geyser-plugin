@@ -30,6 +30,7 @@ pub struct AccountWithWriteVersion {
 lazy_static! {
     pub static ref BLOCK_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
     pub static ref ACC_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub static ref CURSOR_MUTEX: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
 }
 
 #[derive(Default, Clone)]
@@ -82,7 +83,7 @@ impl State {
         block_printer: BlockPrinter,
     ) -> Self {
         State {
-            cursor: cursor,
+            cursor,
             first_block_to_process: None,
             first_received_blockmeta: None,
             lib: None,
@@ -97,8 +98,8 @@ impl State {
 
             local_rpc_client: Some(local_rpc_client),
             remote_rpc_client: Some(remote_rpc_client),
-            cursor_path: cursor_path,
-            block_printer: block_printer,
+            cursor_path,
+            block_printer,
         }
     }
 
@@ -321,12 +322,12 @@ impl State {
             address: pub_key.to_vec(),
             data: data.to_vec(),
             owner: owner.to_vec(),
-            deleted: deleted,
+            deleted,
         };
 
         let awv = AccountWithWriteVersion {
             account: pb_account,
-            write_version: write_version,
+            write_version,
         };
 
         if trace {
@@ -434,13 +435,14 @@ impl State {
             // let a_printer = &mut self.account_block_printer.write().unwrap();
             // let b_printer = &mut self.block_printer.write().unwrap();
             let printer = &mut self.block_printer;
-            printer.print(&block_info, lib, block, acc_block).unwrap();
+            printer
+                .print(&block_info, lib, block, acc_block, &self.cursor_path)
+                .unwrap();
 
             self.purge_blocks_up_to(slot);
             if BLOCK_MUTEX.is_poisoned() || ACC_MUTEX.is_poisoned() {
                 return Err("mutex poisoned".into());
             }
-            write_cursor(&self.cursor_path, slot);
         }
         return Ok(());
     }
@@ -472,8 +474,4 @@ fn compose_and_purge_block(
             block_height: block_info.height.unwrap(),
         }),
     }
-}
-
-fn write_cursor(cursor_file: &str, cursor: u64) {
-    std::fs::write(cursor_file, cursor.to_string()).unwrap();
 }
