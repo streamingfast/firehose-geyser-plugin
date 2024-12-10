@@ -411,16 +411,16 @@ pub fn to_block_rewards_from_vec(rewards: &[solana_transaction_status::Reward]) 
     rewards
         .iter()
         .map(|rw| {
-            let mut commission = rw.commission.unwrap_or_default().to_string();
-            if commission == "0" {
-                commission = "".to_string();
-            }
+            let commission = match rw.commission.unwrap_or_default().to_string() {
+                c if c == "0" => String::new(),
+                c => c,
+            };
             Reward {
                 pubkey: rw.pubkey.clone(),
                 lamports: rw.lamports,
                 post_balance: rw.post_balance,
                 reward_type: to_pb_reward_type(rw.reward_type.unwrap()) as i32,
-                commission: commission,
+                commission,
             }
         })
         .collect()
@@ -431,14 +431,21 @@ pub fn to_block_rewards(rewards: &Option<solana_transaction_status::Rewards>) ->
         None => {
             vec![]
         }
+
         Some(rewards) => rewards
             .iter()
-            .map(|rw| Reward {
-                pubkey: rw.pubkey.clone(),
-                lamports: rw.lamports,
-                post_balance: rw.post_balance,
-                reward_type: to_pb_reward_type(rw.reward_type.unwrap()) as i32,
-                commission: rw.commission.unwrap_or_default().to_string(),
+            .map(|rw| {
+                let commission = match rw.commission.unwrap_or_default().to_string() {
+                    c if c == "0" => String::new(),
+                    c => c,
+                };
+                Reward {
+                    pubkey: rw.pubkey.clone(),
+                    lamports: rw.lamports,
+                    post_balance: rw.post_balance,
+                    reward_type: to_pb_reward_type(rw.reward_type.unwrap()) as i32,
+                    commission,
+                }
             })
             .collect(),
     }
@@ -657,20 +664,20 @@ fn to_recent_block_hash(h: &Hash) -> Vec<u8> {
 }
 
 fn to_account_keys(keys: AccountKeys, loaded_addresses: &LoadedAddresses) -> Vec<Vec<u8>> {
-    let mut all_keys: HashMap<&Pubkey, Vec<u8>> = Default::default();
-    keys.iter().for_each(|key| {
-        all_keys.insert(key, key.to_bytes().to_vec());
-    });
+    let mut lookup_keys: HashMap<&Pubkey, bool> = Default::default();
 
+    // loaded adresses contain keys from account lookup tables, which we exclude from the 'account_keys' vec.
     loaded_addresses.writable.iter().for_each(|key| {
-        all_keys.remove(key);
+        lookup_keys.insert(key, true);
     });
-
     loaded_addresses.readonly.iter().for_each(|key| {
-        all_keys.remove(key);
+        lookup_keys.insert(key, true);
     });
 
-    all_keys.into_iter().map(|(_, v)| v).collect()
+    keys.iter()
+        .filter(|key| lookup_keys.contains_key(key))
+        .map(|key| key.to_bytes().to_vec())
+        .collect()
 }
 
 fn to_header(h: &solana_sdk::message::MessageHeader) -> MessageHeader {
