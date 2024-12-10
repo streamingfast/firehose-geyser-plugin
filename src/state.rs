@@ -15,12 +15,12 @@ pub type Transactions = HashMap<u64, Vec<ConfirmTransactionWithIndex>>;
 
 type BlockInfoMap = HashMap<u64, BlockInfo>;
 type ConfirmedSlotsMap = HashMap<u64, bool>;
-use crate::pb::sf::solana::r#type::v1::{Block, BlockHeight, UnixTimestamp};
-use crate::plugins::ConfirmTransactionWithIndex;
+use crate::pb::sf::solana::r#type::v1::{Block, BlockHeight, Reward, UnixTimestamp};
+use crate::plugins::{to_block_rewards, ConfirmTransactionWithIndex};
 use log::{debug, info};
 use solana_rpc_client_api::config::RpcBlockConfig;
 use solana_sdk::commitment_config::CommitmentConfig;
-use solana_transaction_status::TransactionDetails;
+use solana_transaction_status::{Rewards, TransactionDetails};
 
 pub struct AccountWithWriteVersion {
     pub account: Account,
@@ -41,6 +41,7 @@ pub struct BlockInfo {
     pub parent_hash: String,
     pub timestamp: Timestamp,
     pub height: Option<u64>,
+    pub rewards: Vec<Reward>,
 }
 
 const DEFAULT_RPC_BLOCK_CONFIG: RpcBlockConfig = RpcBlockConfig {
@@ -165,6 +166,7 @@ impl State {
                         block_hash: block.blockhash.clone(),
                         parent_hash: block.previous_blockhash.clone(),
                         height: block.block_height,
+                        rewards: to_block_rewards(&block.rewards.unwrap()),
                     },
                 )
             }
@@ -189,6 +191,7 @@ impl State {
                                 block_hash: block.blockhash.clone(),
                                 parent_hash: block.previous_blockhash.clone(),
                                 height: block.block_height,
+                                rewards: to_block_rewards(&block.rewards.unwrap()),
                             },
                         )
                     }
@@ -465,7 +468,7 @@ fn compose_and_purge_block(
             .into_iter()
             .map(|ti| ti.transaction)
             .collect(),
-        rewards: vec![], //todo
+        rewards: block_info.rewards.clone(), //todo: clone?????
         block_time: Some(UnixTimestamp {
             timestamp: block_info.timestamp.seconds,
         }),

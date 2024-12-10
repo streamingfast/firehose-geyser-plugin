@@ -13,23 +13,26 @@ use {
 
 use crate::pb::sf::solana::r#type::v1::{
     CompiledInstruction, ConfirmedTransaction, InnerInstruction, InnerInstructions, Message,
-    MessageAddressTableLookup, MessageHeader, ReturnData, Reward, Transaction,
-    TransactionStatusMeta,
+    MessageAddressTableLookup, MessageHeader, ReturnData, Reward, TokenBalance, Transaction,
+    TransactionError, TransactionStatusMeta, UiTokenAmount,
 };
+
 use crate::state::{ACC_MUTEX, BLOCK_MUTEX};
 use crate::utils::convert_sol_timestamp;
 use env_logger::Target;
 use log::{debug, info, LevelFilter};
 use solana_rpc_client::rpc_client::RpcClient;
 
+use crate::block_printer::BlockPrinter;
+
+use serde::Serialize;
 use solana_sdk::hash::Hash;
+use solana_sdk::message::AccountKeys;
+use solana_sdk::transaction_context::TransactionReturnData;
+use solana_transaction_status::TransactionTokenBalance;
 use std::fmt;
 use std::fs::OpenOptions;
 use std::str::FromStr;
-
-use crate::block_printer::BlockPrinter;
-use solana_sdk::message::AccountKeys;
-use solana_sdk::transaction_context::TransactionReturnData;
 
 const SEED: i64 = 76;
 
@@ -317,12 +320,12 @@ impl GeyserPlugin for Plugin {
         Ok(())
     }
 
-    fn notify_block_metadata(&self, blockinfo: ReplicaBlockInfoVersions<'_>) -> PluginResult<()> {
+    fn notify_block_metadata(&self, block_info: ReplicaBlockInfoVersions<'_>) -> PluginResult<()> {
         if ACC_MUTEX.is_poisoned() || BLOCK_MUTEX.is_poisoned() {
             panic!("poisoned mutex")
         }
 
-        match blockinfo {
+        match block_info {
             ReplicaBlockInfoVersions::V0_0_1(_) => {
                 panic!("V0_0_1 not supported");
             }
@@ -334,6 +337,7 @@ impl GeyserPlugin for Plugin {
                     slot: blockinfo.slot,
                     height: blockinfo.block_height,
                     timestamp: convert_sol_timestamp(blockinfo.block_time.unwrap()),
+                    rewards: to_block_rewards_from_vec(blockinfo.rewards),
                 };
 
                 let mut lock_state = self.state.as_ref().unwrap().write().unwrap();
@@ -353,6 +357,7 @@ impl GeyserPlugin for Plugin {
                     slot: blockinfo.slot,
                     height: blockinfo.block_height,
                     timestamp: convert_sol_timestamp(blockinfo.block_time.unwrap()),
+                    rewards: to_block_rewards_from_vec(blockinfo.rewards),
                 };
 
                 let mut lock_state = self.state.as_ref().unwrap().write().unwrap();
@@ -372,6 +377,7 @@ impl GeyserPlugin for Plugin {
                     slot: blockinfo.slot,
                     height: blockinfo.block_height,
                     timestamp: convert_sol_timestamp(blockinfo.block_time.unwrap()),
+                    rewards: to_block_rewards(&blockinfo.rewards.rewards),
                 };
 
                 let mut lock_state = self.state.as_ref().unwrap().write().unwrap();
@@ -400,6 +406,32 @@ impl GeyserPlugin for Plugin {
     }
 }
 
+pub fn to_block_rewards_from_vec(rewards: &[solana_transaction_status::Reward]) -> Vec<Reward> {
+    rewards
+        .iter()
+        .map(|rw| Reward {
+            pubkey: rw.pubkey.clone(),
+            lamports: rw.lamports,
+            post_balance: rw.post_balance,
+            reward_type: rw.reward_type.unwrap() as i32,
+            commission: rw.commission.unwrap_or_default().to_string(),
+        })
+        .collect()
+}
+
+pub fn to_block_rewards(rewards: &solana_transaction_status::Rewards) -> Vec<Reward> {
+    rewards
+        .iter()
+        .map(|rw| Reward {
+            pubkey: rw.pubkey.clone(),
+            lamports: rw.lamports,
+            post_balance: rw.post_balance,
+            reward_type: rw.reward_type.unwrap() as i32,
+            commission: rw.commission.unwrap_or_default().to_string(),
+        })
+        .collect()
+}
+
 #[no_mangle]
 #[allow(improper_ctypes_definitions)]
 /// # Safety
@@ -422,19 +454,74 @@ fn to_transaction_meta_status(
     status: &solana_transaction_status::TransactionStatusMeta,
 ) -> TransactionStatusMeta {
     TransactionStatusMeta {
-        err: None, //todo
+        err: to_transaction_err(status),
         fee: 0,
         pre_balances: status.pre_balances.to_vec(),
         post_balances: status.post_balances.to_vec(),
         inner_instructions: to_inner_instructions(&status.inner_instructions),
-        log_messages: vec![],       //todo
-        pre_token_balances: vec![], //todo
-        post_token_balances: vec![],
+        log_messages: to_log_messages(&status.log_messages),
+        pre_token_balances: to_token_balances(&status.pre_token_balances),
+        post_token_balances: to_token_balances(&status.post_token_balances),
         rewards: to_rewards(&status.rewards),
-        loaded_writable_addresses: vec![], //todo
-        loaded_readonly_addresses: vec![], //todo
+        loaded_writable_addresses: status
+            .loaded_addresses
+            .writable
+            .iter()
+            .map(|pubkey| pubkey.to_bytes().to_vec())
+            .collect(),
+        loaded_readonly_addresses: status
+            .loaded_addresses
+            .readonly
+            .iter()
+            .map(|pubkey| pubkey.to_bytes().to_vec())
+            .collect(),
         return_data: to_return_data(&status.return_data),
         compute_units_consumed: status.compute_units_consumed,
+    }
+}
+
+fn to_token_balances(
+    balances: &Option<Vec<solana_transaction_status::TransactionTokenBalance>>,
+) -> Vec<TokenBalance> {
+    balances
+        .as_ref()
+        .map(|balances_vec| {
+            balances_vec
+                .iter()
+                .map(|balance| TokenBalance {
+                    account_index: balance.account_index as u32,
+                    mint: balance.mint.clone(),
+                    owner: balance.owner.clone(),
+                    program_id: balance.program_id.clone(),
+                    ui_token_amount: Some(UiTokenAmount {
+                        ui_amount: balance.ui_token_amount.ui_amount.unwrap(),
+                        decimals: balance.ui_token_amount.decimals as u32,
+                        amount: balance.ui_token_amount.amount.clone(),
+                        ui_amount_string: balance.ui_token_amount.ui_amount_string.clone(),
+                    }),
+                })
+                .collect()
+        })
+        .unwrap_or_else(Vec::new)
+}
+
+fn to_log_messages(logs: &Option<Vec<String>>) -> Vec<String> {
+    match logs {
+        Some(logs) => logs.clone(),
+        None => vec![],
+    }
+}
+
+fn to_transaction_err(
+    status: &solana_transaction_status::TransactionStatusMeta,
+) -> Option<TransactionError> {
+    match &status.status {
+        Ok(_) => None,
+        Err(e) => {
+            let bytes = bincode::serialize(e).unwrap();
+            let err = TransactionError { err: bytes };
+            Some(err)
+        }
     }
 }
 
@@ -474,7 +561,7 @@ fn to_rewards(rewards: &Option<solana_transaction_status::Rewards>) -> Vec<Rewar
                     lamports: rw.lamports,
                     post_balance: rw.post_balance,
                     reward_type: rw.reward_type.unwrap() as i32,
-                    commission: "".to_string(), //todo
+                    commission: "".to_string(), //was not set in the poller to keep compatibility
                 })
                 .collect()
         })
@@ -504,7 +591,7 @@ fn to_message(msg: &solana_sdk::message::SanitizedMessage) -> Message {
         account_keys: to_account_keys(msg.account_keys()),
         recent_blockhash: to_recent_block_hash(msg.recent_blockhash()),
         instructions: to_compiled_instructions(msg.instructions()),
-        versioned: true, //todo: What is this?
+        versioned: msg.legacy_message().is_none(),
         address_table_lookups: to_address_table_lookups(msg.message_address_table_lookups()),
     }
 }

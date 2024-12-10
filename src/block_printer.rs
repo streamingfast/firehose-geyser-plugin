@@ -81,7 +81,8 @@ impl BlockPrinter {
         let parent_hash2 = block_info.parent_hash.clone();
         std::thread::spawn(move || {
             let encoded_account_block = account_block.encode_to_vec();
-            let base64_encoded_block = base64::encode(encoded_account_block);
+
+                        let base64_encoded_block = base64::encode(encoded_account_block);
             let payload = base64_encoded_block;
             if noop {
                 info!("printing block {} (noop mode)", slot);
