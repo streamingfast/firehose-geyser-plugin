@@ -1,6 +1,7 @@
 use agave_geyser_plugin_interface::geyser_plugin_interface::{
     ReplicaTransactionInfoV2, SlotStatus,
 };
+use std::collections::HashMap;
 use {
     crate::{config::Config as PluginConfig, state::BlockInfo, state::State},
     agave_geyser_plugin_interface::geyser_plugin_interface::{
@@ -13,8 +14,8 @@ use {
 
 use crate::pb::sf::solana::r#type::v1::{
     CompiledInstruction, ConfirmedTransaction, InnerInstruction, InnerInstructions, Message,
-    MessageAddressTableLookup, MessageHeader, ReturnData, Reward, TokenBalance, Transaction,
-    TransactionError, TransactionStatusMeta, UiTokenAmount,
+    MessageAddressTableLookup, MessageHeader, ReturnData, Reward, RewardType, TokenBalance,
+    Transaction, TransactionError, TransactionStatusMeta, UiTokenAmount,
 };
 
 use crate::state::{ACC_MUTEX, BLOCK_MUTEX};
@@ -25,11 +26,11 @@ use solana_rpc_client::rpc_client::RpcClient;
 
 use crate::block_printer::BlockPrinter;
 
-use serde::Serialize;
 use solana_sdk::hash::Hash;
+use solana_sdk::message::v0::LoadedAddresses;
 use solana_sdk::message::AccountKeys;
+use solana_sdk::pubkey::Pubkey;
 use solana_sdk::transaction_context::TransactionReturnData;
-use solana_transaction_status::{Rewards, TransactionTokenBalance};
 use std::fmt;
 use std::fs::OpenOptions;
 use std::str::FromStr;
@@ -409,12 +410,18 @@ impl GeyserPlugin for Plugin {
 pub fn to_block_rewards_from_vec(rewards: &[solana_transaction_status::Reward]) -> Vec<Reward> {
     rewards
         .iter()
-        .map(|rw| Reward {
-            pubkey: rw.pubkey.clone(),
-            lamports: rw.lamports,
-            post_balance: rw.post_balance,
-            reward_type: rw.reward_type.unwrap() as i32,
-            commission: rw.commission.unwrap_or_default().to_string(),
+        .map(|rw| {
+            let mut commission = rw.commission.unwrap_or_default().to_string();
+            if commission == "0" {
+                commission = "".to_string();
+            }
+            Reward {
+                pubkey: rw.pubkey.clone(),
+                lamports: rw.lamports,
+                post_balance: rw.post_balance,
+                reward_type: to_pb_reward_type(rw.reward_type.unwrap()) as i32,
+                commission: commission,
+            }
         })
         .collect()
 }
@@ -430,7 +437,7 @@ pub fn to_block_rewards(rewards: &Option<solana_transaction_status::Rewards>) ->
                 pubkey: rw.pubkey.clone(),
                 lamports: rw.lamports,
                 post_balance: rw.post_balance,
-                reward_type: rw.reward_type.unwrap() as i32,
+                reward_type: to_pb_reward_type(rw.reward_type.unwrap()) as i32,
                 commission: rw.commission.unwrap_or_default().to_string(),
             })
             .collect(),
@@ -450,7 +457,10 @@ pub unsafe extern "C" fn _create_plugin() -> *mut dyn GeyserPlugin {
 
 fn to_confirm_transaction(tx: &'_ ReplicaTransactionInfoV2<'_>) -> ConfirmedTransaction {
     ConfirmedTransaction {
-        transaction: Some(to_transaction(tx.transaction)),
+        transaction: Some(to_transaction(
+            tx.transaction,
+            &tx.transaction_status_meta.loaded_addresses,
+        )),
         meta: Some(to_transaction_meta_status(tx.transaction_status_meta)),
     }
 }
@@ -460,7 +470,7 @@ fn to_transaction_meta_status(
 ) -> TransactionStatusMeta {
     TransactionStatusMeta {
         err: to_transaction_err(status),
-        fee: 0,
+        fee: status.fee,
         pre_balances: status.pre_balances.to_vec(),
         post_balances: status.post_balances.to_vec(),
         inner_instructions: to_inner_instructions(&status.inner_instructions),
@@ -565,12 +575,21 @@ fn to_rewards(rewards: &Option<solana_transaction_status::Rewards>) -> Vec<Rewar
                     pubkey: rw.pubkey.clone(),
                     lamports: rw.lamports,
                     post_balance: rw.post_balance,
-                    reward_type: rw.reward_type.unwrap() as i32,
+                    reward_type: to_pb_reward_type(rw.reward_type.unwrap()) as i32,
                     commission: "".to_string(), //was not set in the poller to keep compatibility
                 })
                 .collect()
         })
         .unwrap_or_else(Vec::new)
+}
+
+fn to_pb_reward_type(reward_type: solana_transaction_status::RewardType) -> RewardType {
+    match reward_type {
+        solana_transaction_status::RewardType::Fee => RewardType::Fee,
+        solana_transaction_status::RewardType::Rent => RewardType::Rent,
+        solana_transaction_status::RewardType::Voting => RewardType::Voting,
+        solana_transaction_status::RewardType::Staking => RewardType::Staking,
+    }
 }
 
 fn to_return_data(d: &Option<TransactionReturnData>) -> Option<ReturnData> {
@@ -583,17 +602,23 @@ fn to_return_data(d: &Option<TransactionReturnData>) -> Option<ReturnData> {
     }
 }
 
-fn to_transaction(tx: &solana_sdk::transaction::SanitizedTransaction) -> Transaction {
+fn to_transaction(
+    tx: &solana_sdk::transaction::SanitizedTransaction,
+    loaded_addresses: &LoadedAddresses,
+) -> Transaction {
     Transaction {
         signatures: to_signature(tx.signatures()),
-        message: Some(to_message(tx.message())),
+        message: Some(to_message(tx.message(), loaded_addresses)),
     }
 }
 
-fn to_message(msg: &solana_sdk::message::SanitizedMessage) -> Message {
+fn to_message(
+    msg: &solana_sdk::message::SanitizedMessage,
+    loaded_addresses: &LoadedAddresses,
+) -> Message {
     Message {
         header: Some(to_header(msg.header())),
-        account_keys: to_account_keys(msg.account_keys()),
+        account_keys: to_account_keys(msg.account_keys(), loaded_addresses),
         recent_blockhash: to_recent_block_hash(msg.recent_blockhash()),
         instructions: to_compiled_instructions(msg.instructions()),
         versioned: msg.legacy_message().is_none(),
@@ -631,8 +656,21 @@ fn to_recent_block_hash(h: &Hash) -> Vec<u8> {
     h.as_ref().to_vec()
 }
 
-fn to_account_keys(keys: AccountKeys) -> Vec<Vec<u8>> {
-    keys.iter().map(|key| key.to_bytes().to_vec()).collect()
+fn to_account_keys(keys: AccountKeys, loaded_addresses: &LoadedAddresses) -> Vec<Vec<u8>> {
+    let mut all_keys: HashMap<&Pubkey, Vec<u8>> = Default::default();
+    keys.iter().for_each(|key| {
+        all_keys.insert(key, key.to_bytes().to_vec());
+    });
+
+    loaded_addresses.writable.iter().for_each(|key| {
+        all_keys.remove(key);
+    });
+
+    loaded_addresses.readonly.iter().for_each(|key| {
+        all_keys.remove(key);
+    });
+
+    all_keys.into_iter().map(|(_, v)| v).collect()
 }
 
 fn to_header(h: &solana_sdk::message::MessageHeader) -> MessageHeader {

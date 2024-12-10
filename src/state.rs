@@ -20,7 +20,7 @@ use crate::plugins::{to_block_rewards, ConfirmTransactionWithIndex};
 use log::{debug, info};
 use solana_rpc_client_api::config::RpcBlockConfig;
 use solana_sdk::commitment_config::CommitmentConfig;
-use solana_transaction_status::{Rewards, TransactionDetails};
+use solana_transaction_status::TransactionDetails;
 
 pub struct AccountWithWriteVersion {
     pub account: Account,
@@ -462,7 +462,7 @@ fn compose_and_purge_block(
 ) -> Block {
     Block {
         previous_blockhash: block_info.parent_hash.clone(),
-        blockhash: block_info.parent_hash.clone(),
+        blockhash: block_info.block_hash.clone(),
         slot,
         transactions: transactions_with_index
             .into_iter()
