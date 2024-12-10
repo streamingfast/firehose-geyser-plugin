@@ -1,7 +1,6 @@
 use agave_geyser_plugin_interface::geyser_plugin_interface::{
     ReplicaTransactionInfoV2, SlotStatus,
 };
-use std::collections::HashMap;
 use {
     crate::{config::Config as PluginConfig, state::BlockInfo, state::State},
     agave_geyser_plugin_interface::geyser_plugin_interface::{
@@ -29,7 +28,6 @@ use crate::block_printer::BlockPrinter;
 use solana_sdk::hash::Hash;
 use solana_sdk::message::v0::LoadedAddresses;
 use solana_sdk::message::AccountKeys;
-use solana_sdk::pubkey::Pubkey;
 use solana_sdk::transaction_context::TransactionReturnData;
 use std::fmt;
 use std::fs::OpenOptions;
