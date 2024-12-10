@@ -166,7 +166,7 @@ impl State {
                         block_hash: block.blockhash.clone(),
                         parent_hash: block.previous_blockhash.clone(),
                         height: block.block_height,
-                        rewards: to_block_rewards(&block.rewards.unwrap()),
+                        rewards: to_block_rewards(&block.rewards),
                     },
                 )
             }
@@ -191,7 +191,7 @@ impl State {
                                 block_hash: block.blockhash.clone(),
                                 parent_hash: block.previous_blockhash.clone(),
                                 height: block.block_height,
-                                rewards: to_block_rewards(&block.rewards.unwrap()),
+                                rewards: to_block_rewards(&block.rewards),
                             },
                         )
                     }

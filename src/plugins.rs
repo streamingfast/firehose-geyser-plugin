@@ -29,7 +29,7 @@ use serde::Serialize;
 use solana_sdk::hash::Hash;
 use solana_sdk::message::AccountKeys;
 use solana_sdk::transaction_context::TransactionReturnData;
-use solana_transaction_status::TransactionTokenBalance;
+use solana_transaction_status::{Rewards, TransactionTokenBalance};
 use std::fmt;
 use std::fs::OpenOptions;
 use std::str::FromStr;
@@ -377,7 +377,7 @@ impl GeyserPlugin for Plugin {
                     slot: blockinfo.slot,
                     height: blockinfo.block_height,
                     timestamp: convert_sol_timestamp(blockinfo.block_time.unwrap()),
-                    rewards: to_block_rewards(&blockinfo.rewards.rewards),
+                    rewards: to_block_rewards(&Some(blockinfo.rewards.rewards.clone())),
                 };
 
                 let mut lock_state = self.state.as_ref().unwrap().write().unwrap();
@@ -419,17 +419,22 @@ pub fn to_block_rewards_from_vec(rewards: &[solana_transaction_status::Reward]) 
         .collect()
 }
 
-pub fn to_block_rewards(rewards: &solana_transaction_status::Rewards) -> Vec<Reward> {
-    rewards
-        .iter()
-        .map(|rw| Reward {
-            pubkey: rw.pubkey.clone(),
-            lamports: rw.lamports,
-            post_balance: rw.post_balance,
-            reward_type: rw.reward_type.unwrap() as i32,
-            commission: rw.commission.unwrap_or_default().to_string(),
-        })
-        .collect()
+pub fn to_block_rewards(rewards: &Option<solana_transaction_status::Rewards>) -> Vec<Reward> {
+    match rewards {
+        None => {
+            vec![]
+        }
+        Some(rewards) => rewards
+            .iter()
+            .map(|rw| Reward {
+                pubkey: rw.pubkey.clone(),
+                lamports: rw.lamports,
+                post_balance: rw.post_balance,
+                reward_type: rw.reward_type.unwrap() as i32,
+                commission: rw.commission.unwrap_or_default().to_string(),
+            })
+            .collect(),
+    }
 }
 
 #[no_mangle]
