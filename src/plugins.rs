@@ -671,7 +671,7 @@ fn to_account_keys(keys: AccountKeys, loaded_addresses: &LoadedAddresses) -> Vec
 
     // Filter and convert account keys
     keys.iter()
-        .filter(|key| lookup_keys.contains(key))
+        .filter(|key| !lookup_keys.contains(key))
         .map(|key| key.to_bytes().to_vec())
         .collect()
 }
