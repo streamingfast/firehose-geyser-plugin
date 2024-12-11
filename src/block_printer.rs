@@ -1,8 +1,8 @@
 use crate::pb::sf::solana::r#type::v1::{AccountBlock, Block};
 use crate::state::{BlockInfo, ACC_MUTEX, BLOCK_MUTEX, CURSOR_MUTEX};
-use base64;
 use log::{debug, info};
 use prost::Message;
+use rbase64;
 use std::fs::File;
 use std::io::Write;
 
@@ -63,7 +63,7 @@ impl BlockPrinter {
         let noop = self.noop;
         std::thread::spawn(move || {
             let encoded_block = block.encode_to_vec();
-            let base64_encoded_block = base64::encode(encoded_block);
+            let base64_encoded_block = rbase64::encode(&encoded_block);
             let payload = base64_encoded_block;
 
             if noop {
@@ -82,7 +82,7 @@ impl BlockPrinter {
         std::thread::spawn(move || {
             let encoded_account_block = account_block.encode_to_vec();
 
-            let base64_encoded_block = base64::encode(encoded_account_block);
+            let base64_encoded_block = rbase64::encode(&encoded_account_block);
             let payload = base64_encoded_block;
             if noop {
                 info!("printing block {} (noop mode)", slot);
