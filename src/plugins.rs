@@ -70,6 +70,11 @@ impl Plugin {
             trace,
         }
     }
+    const VOTE111111111111111111111111111111111111111: [u8; 32] = [
+        0x07, 0x61, 0x48, 0x1d, 0x35, 0x74, 0x74, 0xbb, 0x7c, 0x4d, 0x76, 0x24, 0xeb, 0xd3, 0xbd,
+        0xb3, 0xd8, 0x35, 0x5e, 0x73, 0xd1, 0x10, 0x43, 0xfc, 0x0d, 0xa3, 0x53, 0x80, 0x00, 0x00,
+        0x00, 0x00,
+    ];
 
     fn set_account(
         &self,
@@ -81,8 +86,11 @@ impl Plugin {
         deleted: bool,
         is_startup: bool,
     ) {
-        let mut lock_state = self.state.as_ref().unwrap().write().unwrap();
+        if pub_key == Self::VOTE111111111111111111111111111111111111111 {
+            return;
+        }
 
+        let mut lock_state = self.state.as_ref().unwrap().write().unwrap();
         if !is_startup && lock_state.should_skip_slot(slot) {
             return;
         }
