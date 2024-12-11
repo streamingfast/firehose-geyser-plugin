@@ -1,6 +1,7 @@
 use crate::block_printer::BlockPrinter;
 use crate::pb;
 use crate::utils::{convert_sol_timestamp, create_account_block};
+use lazy_static::lazy_static;
 use pb::sf::solana::r#type::v1::Account;
 use prost_types::Timestamp;
 use solana_rpc_client::rpc_client::RpcClient;
@@ -9,26 +10,38 @@ use std::collections::HashMap;
 type BlockAccountChanges = HashMap<u64, AccountChanges>;
 pub type AccountChanges = HashMap<Vec<u8>, AccountWithWriteVersion>;
 pub type AccountDataHash = HashMap<Vec<u8>, u64>;
+
+pub type Transactions = HashMap<u64, Vec<ConfirmTransactionWithIndex>>;
+
 type BlockInfoMap = HashMap<u64, BlockInfo>;
 type ConfirmedSlotsMap = HashMap<u64, bool>;
+use crate::pb::sf::solana::r#type::v1::{Block, BlockHeight, Reward, UnixTimestamp};
+use crate::plugins::{to_block_rewards, ConfirmTransactionWithIndex};
 use log::{debug, info};
 use solana_rpc_client_api::config::RpcBlockConfig;
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_transaction_status::TransactionDetails;
-
 
 pub struct AccountWithWriteVersion {
     pub account: Account,
     pub write_version: u64,
 }
 
-#[derive(Default)]
+lazy_static! {
+    pub static ref BLOCK_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub static ref ACC_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub static ref CURSOR_MUTEX: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
+}
+
+#[derive(Default, Clone)]
 pub struct BlockInfo {
     pub slot: u64,
     pub parent_slot: u64,
     pub block_hash: String,
     pub parent_hash: String,
     pub timestamp: Timestamp,
+    pub height: Option<u64>,
+    pub rewards: Vec<Reward>,
 }
 
 const DEFAULT_RPC_BLOCK_CONFIG: RpcBlockConfig = RpcBlockConfig {
@@ -39,7 +52,6 @@ const DEFAULT_RPC_BLOCK_CONFIG: RpcBlockConfig = RpcBlockConfig {
     max_supported_transaction_version: Some(0),
 };
 
-#[derive(Default)]
 pub struct State {
     initialized: bool, // passed the first received blockmeta
 
@@ -55,10 +67,12 @@ pub struct State {
     block_infos: BlockInfoMap,
     confirmed_slots: ConfirmedSlotsMap,
 
+    transactions: Transactions,
+
     local_rpc_client: Option<RpcClient>,
     remote_rpc_client: Option<RpcClient>,
     cursor_path: String,
-    noop: bool,
+    block_printer: BlockPrinter,
 }
 
 impl State {
@@ -67,10 +81,10 @@ impl State {
         remote_rpc_client: RpcClient,
         cursor: Option<u64>,
         cursor_path: String,
-        noop: bool,
+        block_printer: BlockPrinter,
     ) -> Self {
         State {
-            cursor: cursor,
+            cursor,
             first_block_to_process: None,
             first_received_blockmeta: None,
             lib: None,
@@ -81,10 +95,12 @@ impl State {
             block_infos: HashMap::new(),
             confirmed_slots: HashMap::new(),
 
+            transactions: HashMap::new(),
+
             local_rpc_client: Some(local_rpc_client),
             remote_rpc_client: Some(remote_rpc_client),
-            cursor_path: cursor_path,
-            noop: noop,
+            cursor_path,
+            block_printer,
         }
     }
 
@@ -128,11 +144,11 @@ impl State {
         self.block_account_changes.get(&slot)
     }
 
-    fn get_block_info(&self, slot: u64) -> Option<&BlockInfo> {
-        self.block_infos.get(&slot)
+    fn has_block_info(&self, slot: u64) -> bool {
+        self.block_infos.contains_key(&slot)
     }
 
-    pub fn get_block_from_rpc(&self, slot: u64, try_remote: bool) -> Option<BlockInfo> {
+    pub fn cache_block_from_rpc(&mut self, slot: u64, try_remote: bool) {
         match self
             .local_rpc_client
             .as_ref()
@@ -141,17 +157,22 @@ impl State {
         {
             Ok(block) => {
                 debug!("Block Info fetched locally for slot {}", slot);
-                Some(BlockInfo {
-                    timestamp: convert_sol_timestamp(block.block_time.unwrap()),
-                    parent_slot: block.parent_slot.clone(),
-                    slot: slot,
-                    block_hash: block.blockhash.clone(),
-                    parent_hash: block.previous_blockhash.clone(),
-                })
+                self.set_block_info(
+                    slot,
+                    BlockInfo {
+                        timestamp: convert_sol_timestamp(block.block_time.unwrap()),
+                        parent_slot: block.parent_slot.clone(),
+                        slot: slot,
+                        block_hash: block.blockhash.clone(),
+                        parent_hash: block.previous_blockhash.clone(),
+                        height: block.block_height,
+                        rewards: to_block_rewards(&block.rewards),
+                    },
+                )
             }
             Err(_err) => {
                 if !try_remote {
-                    return None;
+                    return;
                 }
                 match self
                     .remote_rpc_client
@@ -161,15 +182,20 @@ impl State {
                 {
                     Ok(block) => {
                         debug!("Block Info fetched remotely for slot {}", slot);
-                        Some(BlockInfo {
-                            timestamp: convert_sol_timestamp(block.block_time.unwrap()),
-                            parent_slot: block.parent_slot.clone(),
-                            slot: slot,
-                            block_hash: block.blockhash.clone(),
-                            parent_hash: block.previous_blockhash.clone(),
-                        })
+                        self.set_block_info(
+                            slot,
+                            BlockInfo {
+                                timestamp: convert_sol_timestamp(block.block_time.unwrap()),
+                                parent_slot: block.parent_slot.clone(),
+                                slot: slot,
+                                block_hash: block.blockhash.clone(),
+                                parent_hash: block.previous_blockhash.clone(),
+                                height: block.block_height,
+                                rewards: to_block_rewards(&block.rewards),
+                            },
+                        )
                     }
-                    Err(_err) => None,
+                    Err(_err) => return,
                 }
             }
         }
@@ -200,7 +226,7 @@ impl State {
         if self.cursor.is_some() && slot <= self.cursor.unwrap() {
             return true;
         };
-       return false;
+        return false;
     }
 
     pub fn set_confirmed_slot(&mut self, slot: u64) {
@@ -217,7 +243,10 @@ impl State {
             }
         }
         self.confirmed_slots.insert(slot, true);
-        self.process_upto(slot);
+    }
+
+    pub fn is_slot_confirm(&self, slot: u64) -> bool {
+        self.confirmed_slots.get(&slot).is_some()
     }
 
     pub fn set_block_info(&mut self, slot: u64, block_info: BlockInfo) {
@@ -233,12 +262,11 @@ impl State {
                 self.purge_blocks_up_to(slot - 1);
             }
         }
-        debug!("setting block info for slot {}, hash {}", slot, block_info.block_hash);
+        debug!(
+            "setting block info for slot {}, hash {}",
+            slot, block_info.block_hash
+        );
         self.block_infos.insert(slot, block_info);
-
-        if self.confirmed_slots.get(&slot).is_some() {
-            self.process_upto(slot);
-        }
     }
 
     pub fn set_account(
@@ -297,12 +325,12 @@ impl State {
             address: pub_key.to_vec(),
             data: data.to_vec(),
             owner: owner.to_vec(),
-            deleted: deleted,
+            deleted,
         };
 
         let awv = AccountWithWriteVersion {
             account: pb_account,
-            write_version: write_version,
+            write_version,
         };
 
         if trace {
@@ -314,6 +342,16 @@ impl State {
 
         self.account_data_hash.insert(pub_key.to_vec(), data_hash);
         slot_entries.insert(address, awv);
+    }
+
+    pub fn set_transaction(&mut self, slot: u64, transaction: ConfirmTransactionWithIndex) {
+        if let Some(txs) = self.transactions.get_mut(&slot) {
+            txs.push(transaction);
+        } else {
+            let mut txs = Vec::new();
+            txs.push(transaction);
+            self.transactions.insert(slot, txs);
+        }
     }
 
     fn purge_blocks_up_to(&mut self, upto: u64) {
@@ -339,13 +377,13 @@ impl State {
         }
     }
 
-    fn process_upto(&mut self, slot: u64) {
+    pub fn process_upto(&mut self, slot: u64) -> Result<(), Box<dyn std::error::Error>> {
         if self.first_block_to_process.is_none() {
             debug!(
                 "No 'first_block_to_process' yet, skipping processing for slot {}",
                 slot
             );
-            return;
+            return Ok(());
         }
 
         if self.first_received_blockmeta.is_none() {
@@ -353,61 +391,63 @@ impl State {
                 "No 'first_received_blockmeta' yet, skipping processing for slot {}",
                 slot
             );
-            return;
+            return Ok(());
         }
 
         if self.get_lib().is_none() {
             debug!("No lib found yet, skipping processing of slot {}", slot);
-            return;
+            return Ok(());
         };
 
-        for toproc in self.ordered_confirmed_slots_upto(slot) {
-            if toproc < self.first_block_to_process.unwrap() {
+        if slot == self.first_received_blockmeta.unwrap() {
+            debug!("First block was sent, now initialized");
+            self.initialized = true;
+        }
+
+        for slot in self.ordered_confirmed_slots_upto(slot) {
+            if slot < self.first_block_to_process.unwrap() {
                 continue;
             }
 
-            let mut _rpc_block = None; // lifetime hack for block_info
-            let block_info = match self.get_block_info(toproc) {
-                Some(bi) => bi,
-                None => {
-                    // we don't want to use remote RPC unless we have to:
-                    // - sometimes early blocks metadata after a restart will never become available
-                    // - if blocks start piling up
-                    let try_remote = !self.initialized || self.confirmed_slots.len() >= 10 ;
-                    match self.get_block_from_rpc(toproc, try_remote) {
-                        Some(bi) => {
-                            _rpc_block = Some(bi);
-                            _rpc_block.as_ref().unwrap()
-                        }
-                        None => {
-                            debug!(
-                                "process_upto({}): block info not found for slot {}",
-                                slot, toproc
-                            );
-                            return;
-                        }
-                    }
+            let block_info: &BlockInfo;
+            if self.has_block_info(slot) {
+                block_info = self.block_infos.get(&slot).unwrap()
+            } else {
+                let try_remote = !self.initialized || self.confirmed_slots.len() >= 10;
+                self.cache_block_from_rpc(slot, try_remote);
+                block_info = match self.block_infos.get(&slot) {
+                    None => return Ok(()),
+                    Some(bi) => bi,
                 }
             };
 
-            let account_changes = self.get_account_changes(toproc);
+            let account_changes = self.get_account_changes(slot);
             let acc_block = create_account_block(
                 account_changes.unwrap_or(&AccountChanges::default()),
-                block_info,
+                &block_info,
             );
-            if toproc == self.first_received_blockmeta.unwrap() {
-                debug!("First block was sent, now initialized");
-                self.initialized = true;
+            let lib = self.lib.unwrap();
+
+            let mut transactions_with_index =
+                self.transactions.remove(&slot).unwrap_or_else(|| vec![]);
+
+            transactions_with_index.sort_by_key(|ti| ti.index);
+
+            let block = compose_and_purge_block(slot, &block_info, transactions_with_index);
+
+            // let a_printer = &mut self.account_block_printer.write().unwrap();
+            // let b_printer = &mut self.block_printer.write().unwrap();
+            let printer = &mut self.block_printer;
+            printer
+                .print(&block_info, lib, block, acc_block, &self.cursor_path)
+                .unwrap();
+
+            self.purge_blocks_up_to(slot);
+            if BLOCK_MUTEX.is_poisoned() || ACC_MUTEX.is_poisoned() {
+                return Err("mutex poisoned".into());
             }
-            if self.noop {
-                debug!("printing block {} - {} entries (noop mode)", toproc, acc_block.accounts.len());
-            } else {
-                debug!("printing block {}", toproc);
-                BlockPrinter::new(&acc_block).print(self.lib.unwrap());
-            }
-            self.purge_blocks_up_to(toproc);
-            write_cursor(&self.cursor_path, toproc);
         }
+        return Ok(());
     }
 
     pub fn get_hash_count(&self) -> usize {
@@ -415,6 +455,26 @@ impl State {
     }
 }
 
-fn write_cursor(cursor_file: &str, cursor: u64) {
-    std::fs::write(cursor_file, cursor.to_string()).unwrap();
+fn compose_and_purge_block(
+    slot: u64,
+    block_info: &BlockInfo,
+    transactions_with_index: Vec<ConfirmTransactionWithIndex>,
+) -> Block {
+    Block {
+        previous_blockhash: block_info.parent_hash.clone(),
+        blockhash: block_info.block_hash.clone(),
+        slot,
+        transactions: transactions_with_index
+            .into_iter()
+            .map(|ti| ti.transaction)
+            .collect(),
+        rewards: block_info.rewards.clone(), //todo: clone?????
+        block_time: Some(UnixTimestamp {
+            timestamp: block_info.timestamp.seconds,
+        }),
+        parent_slot: block_info.parent_slot,
+        block_height: Some(BlockHeight {
+            block_height: block_info.height.unwrap(),
+        }),
+    }
 }

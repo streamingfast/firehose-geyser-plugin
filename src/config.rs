@@ -8,7 +8,7 @@ use std::{fs::read_to_string, path::Path};
 
 #[derive(Deserialize, Default, Debug)]
 pub struct Config {
-    pub libpath: String,
+    //pub libpath: String,
     pub local_rpc_client: RpcClientConfig,
     pub remote_rpc_client: RpcClientConfig,
     pub cursor_file: String,
@@ -20,6 +20,8 @@ pub struct Config {
     pub send_processed: bool,
     #[serde(default)]
     pub log: ConfigLog,
+    pub account_block_destination_file: String,
+    pub block_destination_file: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
