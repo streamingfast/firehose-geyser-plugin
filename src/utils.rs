@@ -1,4 +1,4 @@
-use crate::pb::sf::solana::r#type::v1::{Account, AccountBlock, Block, BlockHeight};
+use crate::pb::sf::solana::r#type::v1::{Account, AccountBlock};
 use crate::state::{AccountChanges, BlockInfo};
 use base58::ToBase58;
 use log::debug;
@@ -40,21 +40,5 @@ pub fn create_account_block(
         parent_slot: block_info.parent_slot,
         accounts: accounts,
         timestamp: Some(block_info.timestamp.clone()),
-    }
-}
-
-pub fn create_trx_block(
-    block_info: &BlockInfo,
-) -> Block {
-
-    Block {
-        slot: block_info.slot,
-        parent_slot: block_info.parent_slot,
-        blockhash: block_info.block_hash.clone(),
-        previous_blockhash: block_info.parent_hash.clone(),
-        block_height: Some( BlockHeight{block_height: block_info.slot}),
-        block_time: Some(crate::pb::sf::solana::r#type::v1::UnixTimestamp { timestamp: block_info.timestamp.seconds }),
-        rewards: vec![],
-        transactions: vec![],
     }
 }

@@ -1,6 +1,6 @@
-use crate::block_printer::{BlockPrinter, TrxBlockPrinter};
+use crate::block_printer::BlockPrinter;
 use crate::pb;
-use crate::utils::{convert_sol_timestamp, create_account_block, create_trx_block};
+use crate::utils::{convert_sol_timestamp, create_account_block};
 use pb::sf::solana::r#type::v1::Account;
 use prost_types::Timestamp;
 use solana_rpc_client::rpc_client::RpcClient;
@@ -395,9 +395,6 @@ impl State {
                 account_changes.unwrap_or(&AccountChanges::default()),
                 block_info,
             );
-            let trx_block = create_trx_block(
-                block_info,
-            );
             if toproc == self.first_received_blockmeta.unwrap() {
                 debug!("First block was sent, now initialized");
                 self.initialized = true;
@@ -407,7 +404,6 @@ impl State {
             } else {
                 debug!("printing block {}", toproc);
                 BlockPrinter::new(&acc_block).print(self.lib.unwrap());
-                TrxBlockPrinter::new(&trx_block).print(self.lib.unwrap());
             }
             self.purge_blocks_up_to(toproc);
             write_cursor(&self.cursor_path, toproc);

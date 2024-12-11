@@ -232,17 +232,6 @@ impl GeyserPlugin for Plugin {
         _transaction: ReplicaTransactionInfoVersions<'_>,
         _slot: u64,
     ) -> PluginResult<()> {
-       // match transaction {
-       //     ReplicaTransactionInfoVersions::V0_0_1(transaction) => {
-       //         let mut lock_state = self.state.write().unwrap();
-       //         lock_state.update_transaction(transaction);
-       //         transaction.transaction
-       //     }
-       //     ReplicaTransactionInfoVersions::V0_0_2(transaction) => {
-       //         let mut lock_state = self.state.write().unwrap();
-       //         lock_state.update_transaction(transaction);
-       //     }
-       // }
         Ok(())
     }
 
