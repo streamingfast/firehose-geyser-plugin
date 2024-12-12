@@ -86,7 +86,7 @@ impl Plugin {
         deleted: bool,
         is_startup: bool,
     ) {
-        if pub_key == Self::VOTE111111111111111111111111111111111111111 {
+        if owner == Self::VOTE111111111111111111111111111111111111111 {
             return;
         }
 
