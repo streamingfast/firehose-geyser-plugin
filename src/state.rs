@@ -47,7 +47,7 @@ pub struct BlockInfo {
 const DEFAULT_RPC_BLOCK_CONFIG: RpcBlockConfig = RpcBlockConfig {
     encoding: None,
     transaction_details: Some(TransactionDetails::None),
-    rewards: Some(false),
+    rewards: Some(true),
     commitment: Some(CommitmentConfig::confirmed()),
     max_supported_transaction_version: Some(0),
 };
