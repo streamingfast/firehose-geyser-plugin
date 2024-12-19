@@ -8,12 +8,12 @@ use std::io::Write;
 
 pub struct BlockPrinter {
     noop: bool,
-    out_block: File,
-    out_account: File,
+    out_block: Option<File>,
+    out_account: Option<File>,
 }
 
 impl BlockPrinter {
-    pub fn new(out_block: File, out_account: File, noop: bool) -> Self {
+    pub fn new(out_block: Option<File>, out_account: Option<File>, noop: bool) -> Self {
         BlockPrinter {
             noop,
             out_block,
@@ -33,11 +33,15 @@ impl BlockPrinter {
             );
             Ok(())
         } else {
-            if let Err(e) = writeln!(self.out_block, "FIRE INIT 3.0 {block_type}") {
-                return Err(e);
+            if let Some(ref mut out_block) = self.out_block {
+                if let Err(e) = writeln!(out_block, "FIRE INIT 3.0 {block_type}") {
+                    return Err(e);
+                }
             }
-            if let Err(e) = writeln!(self.out_account, "FIRE INIT 3.0 {account_block_type}") {
-                return Err(e);
+            if let Some(ref mut out_account) = self.out_account {
+                if let Err(e) = writeln!(out_account, "FIRE INIT 3.0 {account_block_type}") {
+                    return Err(e);
+                }
             }
             Ok(())
         }
@@ -51,47 +55,54 @@ impl BlockPrinter {
         account_block: AccountBlock,
         cursor_path: &str,
     ) -> std::io::Result<()> {
-        let mut out_block = self.out_block.try_clone().unwrap();
         let slot = block_info.slot;
         let parent_slot = block_info.parent_slot;
         let timestamp_nano = block_info.timestamp.seconds * 1_000_000_000;
-        let lib = lib;
-        let block_hash = block_info.block_hash.clone();
-        let parent_hash = block_info.parent_hash.clone();
-        let cursor_path_1 = cursor_path.to_string();
-
         let noop = self.noop;
-        std::thread::spawn(move || {
-            let encoded_block = block.encode_to_vec();
-            let base64_encoded_block = rbase64::encode(&encoded_block);
-            let payload = base64_encoded_block;
+        if let Some(out_block) = &self.out_block {
+            let mut out_block = out_block.try_clone().unwrap();
+            let block_hash = block_info.block_hash.clone();
+            let parent_hash = block_info.parent_hash.clone();
+            let cursor_path = cursor_path.to_string();
 
-            if noop {
-                info!("printing block {} (noop mode)", slot);
-            } else {
-                let _lock = BLOCK_MUTEX.lock().unwrap();
-                writeln!(out_block, "FIRE BLOCK {slot} {block_hash} {parent_slot} {parent_hash} {lib} {timestamp_nano} {payload}").unwrap();
-                write_cursor(&cursor_path_1, slot);
-            }
-        });
+            std::thread::spawn(move || {
+                let encoded_block = block.encode_to_vec();
+                let base64_encoded_block = rbase64::encode(&encoded_block);
+                let payload = base64_encoded_block;
 
-        let cursor_path2 = cursor_path.to_string();
-        let mut out_account = self.out_account.try_clone().unwrap();
-        let block_hash2 = block_info.block_hash.clone();
-        let parent_hash2 = block_info.parent_hash.clone();
-        std::thread::spawn(move || {
-            let encoded_account_block = account_block.encode_to_vec();
+                if noop {
+                    info!("printing block {} (noop mode)", slot);
+                } else {
+                    let _lock = BLOCK_MUTEX.lock().unwrap();
+                    writeln!(out_block, "FIRE BLOCK {slot} {block_hash} {parent_slot} {parent_hash} {lib} {timestamp_nano} {payload}").unwrap();
+                    write_cursor(&cursor_path, slot);
+                }
+            });
+        } else {
+            write_cursor(cursor_path, slot); // must still be called twice
+        }
 
-            let base64_encoded_block = rbase64::encode(&encoded_account_block);
-            let payload = base64_encoded_block;
-            if noop {
-                info!("printing block {} (noop mode)", slot);
-            } else {
-                let _lock = ACC_MUTEX.lock().unwrap();
-                writeln!(out_account, "FIRE BLOCK {slot} {block_hash2} {parent_slot} {parent_hash2} {lib} {timestamp_nano} {payload}").unwrap();
-                write_cursor(&cursor_path2, slot);
-            }
-        });
+        if let Some(out_account) = &self.out_account {
+            let mut out_account = out_account.try_clone().unwrap();
+            let block_hash = block_info.block_hash.clone();
+            let parent_hash = block_info.parent_hash.clone();
+            let cursor_path = cursor_path.to_string();
+            std::thread::spawn(move || {
+                let encoded_account_block = account_block.encode_to_vec();
+
+                let base64_encoded_block = rbase64::encode(&encoded_account_block);
+                let payload = base64_encoded_block;
+                if noop {
+                    info!("printing account_block {} (noop mode)", slot);
+                } else {
+                    let _lock = ACC_MUTEX.lock().unwrap();
+                    writeln!(out_account, "FIRE BLOCK {slot} {block_hash} {parent_slot} {parent_hash} {lib} {timestamp_nano} {payload}").unwrap();
+                    write_cursor(&cursor_path, slot);
+                }
+            });
+        } else {
+            write_cursor(cursor_path, slot); // must still be called twice
+        }
 
         // We are not waiting for the threads to finish, so that the plugin can be called again for the updates. The lock is only used to prevent interleaving of the output.
         // If an error occurs while writing, the unwrap() will make it panic and poison the mutex.

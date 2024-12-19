@@ -44,6 +44,8 @@ pub struct Plugin {
     state: Option<RwLock<State>>,
     send_processed: bool,
     trace: bool,
+    with_block: bool,
+    with_account: bool,
 }
 
 impl fmt::Debug for Plugin {
@@ -68,6 +70,8 @@ impl Plugin {
             state: None,
             send_processed,
             trace,
+            with_account: true, // in case account_data_notifications_enabled gets called before on_load
+            with_block: true, // in case transaction_notifications_enabled gets called before on_load
         }
     }
     const VOTE111111111111111111111111111111111111111: [u8; 32] = [
@@ -150,15 +154,40 @@ impl GeyserPlugin for Plugin {
         let cursor = cursor_from_file(&plugin_config.cursor_file);
         self.send_processed = plugin_config.send_processed;
 
-        let blk_file = OpenOptions::new()
-            .write(true)
-            .open(plugin_config.block_destination_file)
-            .expect("Failed to open FIFO");
+        let blk_file = match plugin_config.block_destination_file.as_str() {
+            "" => None,
+            _ => {
+                self.with_block = true;
+                Some(
+                    OpenOptions::new()
+                        .write(true)
+                        .open(plugin_config.block_destination_file)
+                        .expect("Failed to open FIFO"),
+                )
+            }
+        };
 
-        let acc_blk_file = OpenOptions::new()
-            .write(true)
-            .open(plugin_config.account_block_destination_file)
-            .expect("Failed to open FIFO");
+        let acc_blk_file = match plugin_config.account_block_destination_file.as_str() {
+            "" => None,
+            _ => {
+                self.with_account = true;
+                Some(
+                    OpenOptions::new()
+                        .write(true)
+                        .open(plugin_config.account_block_destination_file)
+                        .expect("Failed to open FIFO"),
+                )
+            }
+        };
+        if self.with_account && self.with_block {
+            info!("processing blocks and accountBlocks...");
+        } else if self.with_account {
+            info!("processing accountBlocks only (no block)...");
+        } else if self.with_block {
+            info!("processing blocks only (no accountsBlocks)...");
+        } else {
+            info!("no processing enabled...");
+        }
 
         let mut printer = BlockPrinter::new(blk_file, acc_blk_file, plugin_config.noop);
         printer
@@ -186,6 +215,9 @@ impl GeyserPlugin for Plugin {
         slot: u64,
         is_startup: bool,
     ) -> PluginResult<()> {
+        if !self.with_account {
+            return Ok(());
+        }
         match account {
             ReplicaAccountInfoVersions::V0_0_1(account) => {
                 self.set_account(
@@ -304,6 +336,9 @@ impl GeyserPlugin for Plugin {
         transaction: ReplicaTransactionInfoVersions<'_>,
         slot: u64,
     ) -> PluginResult<()> {
+        if !self.with_block {
+            return Ok(());
+        }
         let transaction = match transaction {
             ReplicaTransactionInfoVersions::V0_0_1(_info) => {
                 unreachable!("ReplicaAccountInfoVersions::V0_0_1 is not supported")
@@ -401,11 +436,11 @@ impl GeyserPlugin for Plugin {
     }
 
     fn account_data_notifications_enabled(&self) -> bool {
-        true
+        self.with_account
     }
 
     fn transaction_notifications_enabled(&self) -> bool {
-        true
+        self.with_block
     }
 
     fn entry_notifications_enabled(&self) -> bool {
