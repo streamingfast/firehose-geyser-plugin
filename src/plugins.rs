@@ -155,7 +155,10 @@ impl GeyserPlugin for Plugin {
         self.send_processed = plugin_config.send_processed;
 
         let blk_file = match plugin_config.block_destination_file.as_str() {
-            "" => None,
+            "" => {
+                self.with_block = false;
+                None
+            }
             _ => {
                 self.with_block = true;
                 Some(
@@ -168,7 +171,10 @@ impl GeyserPlugin for Plugin {
         };
 
         let acc_blk_file = match plugin_config.account_block_destination_file.as_str() {
-            "" => None,
+            "" => {
+                self.with_account = false;
+                None
+            }
             _ => {
                 self.with_account = true;
                 Some(
