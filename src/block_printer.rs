@@ -60,7 +60,7 @@ impl BlockPrinter {
         let timestamp_nano = block_info.timestamp.seconds * 1_000_000_000;
         let noop = self.noop;
         if let Some(out_block) = &self.out_block {
-            let mut out_block = out_block.try_clone().unwrap();
+            let mut out_block = out_block.try_clone().expect("cannot clone out_block");
             let block_hash = block_info.block_hash.clone();
             let parent_hash = block_info.parent_hash.clone();
             let cursor_path = cursor_path.to_string();
@@ -73,8 +73,8 @@ impl BlockPrinter {
                 if noop {
                     info!("printing block {} (noop mode)", slot);
                 } else {
-                    let _lock = BLOCK_MUTEX.lock().unwrap();
-                    writeln!(out_block, "FIRE BLOCK {slot} {block_hash} {parent_slot} {parent_hash} {lib} {timestamp_nano} {payload}").unwrap();
+                    let _lock = BLOCK_MUTEX.lock().expect("block_mutex lock poisoned");
+                    writeln!(out_block, "FIRE BLOCK {slot} {block_hash} {parent_slot} {parent_hash} {lib} {timestamp_nano} {payload}").expect("cannot write to out_block");
                     write_cursor(&cursor_path, slot);
                 }
             });
@@ -83,7 +83,7 @@ impl BlockPrinter {
         }
 
         if let Some(out_account) = &self.out_account {
-            let mut out_account = out_account.try_clone().unwrap();
+            let mut out_account = out_account.try_clone().expect("cannot clone out_account");
             let block_hash = block_info.block_hash.clone();
             let parent_hash = block_info.parent_hash.clone();
             let cursor_path = cursor_path.to_string();
@@ -95,8 +95,8 @@ impl BlockPrinter {
                 if noop {
                     info!("printing account_block {} (noop mode)", slot);
                 } else {
-                    let _lock = ACC_MUTEX.lock().unwrap();
-                    writeln!(out_account, "FIRE BLOCK {slot} {block_hash} {parent_slot} {parent_hash} {lib} {timestamp_nano} {payload}").unwrap();
+                    let _lock = ACC_MUTEX.lock().expect("acc_mutex lock poisoned");
+                    writeln!(out_account, "FIRE BLOCK {slot} {block_hash} {parent_slot} {parent_hash} {lib} {timestamp_nano} {payload}").expect("cannot write to out_account");
                     write_cursor(&cursor_path, slot);
                 }
             });
@@ -105,7 +105,7 @@ impl BlockPrinter {
         }
 
         // We are not waiting for the threads to finish, so that the plugin can be called again for the updates. The lock is only used to prevent interleaving of the output.
-        // If an error occurs while writing, the unwrap() will make it panic and poison the mutex.
+        // If an error occurs while writing, the expect() will make it panic and poison the mutex.
         // TODO: updating the cursor should be done with that knowledge (maybe wrapping the cursor in the mutex?)
         Ok(())
     }
@@ -117,13 +117,13 @@ impl BlockPrinter {
 // If that situation persists, the worst that can happen is that the cursor moves only every other block.
 // This would be less damageful that moving the cursor while one of the two blocks wasn't correctly written.
 fn write_cursor(cursor_file: &str, cursor: u64) {
-    let mut last = CURSOR_MUTEX.lock().unwrap();
+    let mut last = CURSOR_MUTEX.lock().expect("cursor_mutex lock poisoned");
     if *last < cursor {
         *last = cursor;
         return;
     }
     if *last == cursor {
-        std::fs::write(cursor_file, cursor.to_string()).unwrap();
+        std::fs::write(cursor_file, cursor.to_string()).expect("cannot write cursor");
     }
 }
 

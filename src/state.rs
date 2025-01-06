@@ -109,7 +109,7 @@ impl State {
         match self
             .local_rpc_client
             .as_ref()
-            .unwrap()
+            .expect("local_rpc_client not set")
             .get_slot_with_commitment(commitment_config)
         {
             Ok(lib_num) => {
@@ -144,15 +144,11 @@ impl State {
         self.block_account_changes.get(&slot)
     }
 
-    fn has_block_info(&self, slot: u64) -> bool {
-        self.block_infos.contains_key(&slot)
-    }
-
     pub fn cache_block_from_rpc(&mut self, slot: u64, try_remote: bool) {
         match self
             .local_rpc_client
             .as_ref()
-            .unwrap()
+            .expect("local_rpc_client not set")
             .get_block_with_config(slot, DEFAULT_RPC_BLOCK_CONFIG)
         {
             Ok(block) => {
@@ -160,7 +156,7 @@ impl State {
                 self.set_block_info(
                     slot,
                     BlockInfo {
-                        timestamp: convert_sol_timestamp(block.block_time.unwrap()),
+                        timestamp: convert_sol_timestamp(block.block_time.unwrap_or_default()),
                         parent_slot: block.parent_slot.clone(),
                         slot: slot,
                         block_hash: block.blockhash.clone(),
@@ -177,7 +173,7 @@ impl State {
                 match self
                     .remote_rpc_client
                     .as_ref()
-                    .unwrap()
+                    .expect("remote_rpc_client not set")
                     .get_block_with_config(slot, DEFAULT_RPC_BLOCK_CONFIG)
                 {
                     Ok(block) => {
@@ -185,7 +181,9 @@ impl State {
                         self.set_block_info(
                             slot,
                             BlockInfo {
-                                timestamp: convert_sol_timestamp(block.block_time.unwrap()),
+                                timestamp: convert_sol_timestamp(
+                                    block.block_time.unwrap_or_default(),
+                                ),
                                 parent_slot: block.parent_slot.clone(),
                                 slot: slot,
                                 block_hash: block.blockhash.clone(),
@@ -223,9 +221,9 @@ impl State {
         if self.first_block_to_process.is_some() && slot < self.first_block_to_process.unwrap() {
             return true;
         }
-        if self.cursor.is_some() && slot <= self.cursor.unwrap() {
-            return true;
-        };
+        if let Some(cursor) = self.cursor {
+            return slot <= cursor;
+        }
         return false;
     }
 
@@ -378,47 +376,56 @@ impl State {
     }
 
     pub fn process_upto(&mut self, slot: u64) -> Result<(), Box<dyn std::error::Error>> {
-        if self.first_block_to_process.is_none() {
-            debug!(
-                "No 'first_block_to_process' yet, skipping processing for slot {}",
-                slot
-            );
-            return Ok(());
-        }
-
-        if self.first_received_blockmeta.is_none() {
-            debug!(
-                "No 'first_received_blockmeta' yet, skipping processing for slot {}",
-                slot
-            );
-            return Ok(());
-        }
-
-        if self.get_lib().is_none() {
-            debug!("No lib found yet, skipping processing of slot {}", slot);
-            return Ok(());
+        let first_block_to_process = match self.first_block_to_process {
+            Some(slot) => slot,
+            None => {
+                debug!(
+                    "No 'first_block_to_process' yet, skipping processing for slot {}",
+                    slot
+                );
+                return Ok(());
+            }
         };
 
-        if slot == self.first_received_blockmeta.unwrap() {
+        let first_received_blockmeta = match self.first_received_blockmeta {
+            Some(slot) => slot,
+            None => {
+                debug!(
+                    "No 'first_received_blockmeta' yet, skipping processing for slot {}",
+                    slot
+                );
+                return Ok(());
+            }
+        };
+
+        let lib = match self.get_lib() {
+            Some(lib) => lib,
+            None => {
+                debug!("No 'lib' yet, skipping processing for slot {}", slot);
+                return Ok(());
+            }
+        };
+
+        if slot == first_received_blockmeta {
             debug!("First block was sent, now initialized");
             self.initialized = true;
         }
 
         for slot in self.ordered_confirmed_slots_upto(slot) {
-            if slot < self.first_block_to_process.unwrap() {
+            if slot < first_block_to_process {
                 continue;
             }
 
-            let block_info: &BlockInfo;
-            if self.has_block_info(slot) {
-                block_info = self.block_infos.get(&slot).unwrap()
-            } else {
-                let try_remote = !self.initialized || self.confirmed_slots.len() >= 10;
-                self.cache_block_from_rpc(slot, try_remote);
-                block_info = match self.block_infos.get(&slot) {
-                    None => return Ok(()),
-                    Some(bi) => bi,
+            let block_info = match self.block_infos.get(&slot) {
+                None => {
+                    let try_remote = !self.initialized || self.confirmed_slots.len() >= 10;
+                    self.cache_block_from_rpc(slot, try_remote);
+                    match self.block_infos.get(&slot) {
+                        None => return Ok(()),
+                        Some(bi) => bi,
+                    }
                 }
+                Some(bi) => bi,
             };
 
             let account_changes = self.get_account_changes(slot);
@@ -426,7 +433,6 @@ impl State {
                 account_changes.unwrap_or(&AccountChanges::default()),
                 &block_info,
             );
-            let lib = self.lib.unwrap();
 
             let mut transactions_with_index =
                 self.transactions.remove(&slot).unwrap_or_else(|| vec![]);
@@ -435,12 +441,12 @@ impl State {
 
             let block = compose_and_purge_block(slot, &block_info, transactions_with_index);
 
-            // let a_printer = &mut self.account_block_printer.write().unwrap();
-            // let b_printer = &mut self.block_printer.write().unwrap();
             let printer = &mut self.block_printer;
-            printer
-                .print(&block_info, lib, block, acc_block, &self.cursor_path)
-                .unwrap();
+            let result = printer.print(&block_info, lib, block, acc_block, &self.cursor_path);
+            if !result.is_ok() {
+                info!("Error printing block at {}", slot);
+                return Err("Error printing block".into());
+            }
 
             self.purge_blocks_up_to(slot);
             if BLOCK_MUTEX.is_poisoned() || ACC_MUTEX.is_poisoned() {
@@ -473,8 +479,11 @@ fn compose_and_purge_block(
             timestamp: block_info.timestamp.seconds,
         }),
         parent_slot: block_info.parent_slot,
-        block_height: Some(BlockHeight {
-            block_height: block_info.height.unwrap(),
-        }),
+        block_height: match block_info.height {
+            Some(height) => Some(BlockHeight {
+                block_height: height,
+            }),
+            None => None,
+        },
     }
 }

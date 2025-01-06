@@ -94,7 +94,13 @@ impl Plugin {
             return;
         }
 
-        let mut lock_state = self.state.as_ref().unwrap().write().unwrap();
+        let mut lock_state = self
+            .state
+            .as_ref()
+            .expect("cannot get RW lock for set_account (state is None)")
+            .write()
+            .expect("cannot get RW lock for set_account (poisoned)");
+
         if !is_startup && lock_state.should_skip_slot(slot) {
             return;
         }
@@ -165,7 +171,7 @@ impl GeyserPlugin for Plugin {
                     OpenOptions::new()
                         .write(true)
                         .open(plugin_config.block_destination_file)
-                        .expect("Failed to open FIFO"),
+                        .expect("Failed to open FIFO for blocks"),
                 )
             }
         };
@@ -181,7 +187,7 @@ impl GeyserPlugin for Plugin {
                     OpenOptions::new()
                         .write(true)
                         .open(plugin_config.account_block_destination_file)
-                        .expect("Failed to open FIFO"),
+                        .expect("Failed to open FIFO for account_blocks"),
                 )
             }
         };
@@ -270,9 +276,9 @@ impl GeyserPlugin for Plugin {
             "preloaded account data hash count: {}",
             self.state
                 .as_ref()
-                .unwrap()
+                .expect("cannot get state while getting hash count (state is None)")
                 .read()
-                .unwrap()
+                .expect("cannot get state while getting hash count (poisoned)")
                 .get_hash_count()
         );
         info!("end of startup");
@@ -296,7 +302,12 @@ impl GeyserPlugin for Plugin {
                         slot,
                         _parent.unwrap_or_default()
                     );
-                    let mut lock_state = self.state.as_ref().unwrap().write().unwrap();
+                    let mut lock_state = self
+                        .state
+                        .as_ref()
+                        .expect("cannot get RW lock for update_slot_status (state is None)")
+                        .write()
+                        .expect("cannot get RW lock for update_slot_status (poisoned)");
                     lock_state.set_confirmed_slot(slot);
                 }
                 false => {
@@ -309,7 +320,12 @@ impl GeyserPlugin for Plugin {
             },
             SlotStatus::Rooted => {
                 debug!("slot rooted {}", slot);
-                self.state.as_ref().unwrap().write().unwrap().set_lib(slot);
+                self.state
+                    .as_ref()
+                    .expect("cannot get RW lock for set_lib (state is None)")
+                    .write()
+                    .expect("cannot get RW lock for set_lib (poisoned)")
+                    .set_lib(slot);
             }
             SlotStatus::Confirmed => match self.send_processed {
                 true => {
@@ -325,7 +341,12 @@ impl GeyserPlugin for Plugin {
                         slot,
                         _parent.unwrap_or_default()
                     );
-                    let mut lock_state = self.state.as_ref().unwrap().write().unwrap();
+                    let mut lock_state = self
+                        .state
+                        .as_ref()
+                        .expect("cannot get RW lock for set_confirmed_slot (state is None)")
+                        .write()
+                        .expect("cannot get RW lock for set_confirmed_slot (poisoned)");
                     lock_state.set_confirmed_slot(slot);
                     if lock_state.process_upto(slot).is_err() {
                         panic!("poisoned mutex")
@@ -358,7 +379,12 @@ impl GeyserPlugin for Plugin {
             transaction: compiled_transaction,
         };
 
-        let mut lock_state = self.state.as_ref().unwrap().write().unwrap();
+        let mut lock_state = self
+            .state
+            .as_ref()
+            .expect("cannot get RW lock for update_slot_status (state is None)")
+            .write()
+            .expect("cannot get RW lock for update_slot_status (poisoned)");
         lock_state.set_transaction(slot, tx);
 
         Ok(())
@@ -373,68 +399,54 @@ impl GeyserPlugin for Plugin {
             panic!("poisoned mutex")
         }
 
-        match block_info {
+        let block_info = match block_info {
             ReplicaBlockInfoVersions::V0_0_1(_) => {
                 panic!("V0_0_1 not supported");
             }
-            ReplicaBlockInfoVersions::V0_0_2(blockinfo) => {
-                let block_info = BlockInfo {
-                    block_hash: blockinfo.blockhash.to_string(),
-                    parent_hash: blockinfo.parent_blockhash.to_string(),
-                    parent_slot: blockinfo.parent_slot,
-                    slot: blockinfo.slot,
-                    height: blockinfo.block_height,
-                    timestamp: convert_sol_timestamp(blockinfo.block_time.unwrap()),
-                    rewards: to_block_rewards_from_vec(blockinfo.rewards),
-                };
+            ReplicaBlockInfoVersions::V0_0_2(blockinfo) => BlockInfo {
+                block_hash: blockinfo.blockhash.to_string(),
+                parent_hash: blockinfo.parent_blockhash.to_string(),
+                parent_slot: blockinfo.parent_slot,
+                slot: blockinfo.slot,
+                height: blockinfo.block_height,
+                timestamp: convert_sol_timestamp(blockinfo.block_time.unwrap_or_default()),
+                rewards: to_block_rewards_from_vec(blockinfo.rewards),
+            },
 
-                let mut lock_state = self.state.as_ref().unwrap().write().unwrap();
-                lock_state.set_block_info(blockinfo.slot, block_info);
-                if lock_state.is_slot_confirm(blockinfo.slot) {
-                    if lock_state.process_upto(blockinfo.slot).is_err() {
-                        panic!("poisoned mutex")
-                    }
-                }
-            }
+            ReplicaBlockInfoVersions::V0_0_3(blockinfo) => BlockInfo {
+                block_hash: blockinfo.blockhash.to_string(),
+                parent_hash: blockinfo.parent_blockhash.to_string(),
+                parent_slot: blockinfo.parent_slot,
+                slot: blockinfo.slot,
+                height: blockinfo.block_height,
+                timestamp: convert_sol_timestamp(blockinfo.block_time.unwrap_or_default()),
+                rewards: to_block_rewards_from_vec(blockinfo.rewards),
+            },
 
-            ReplicaBlockInfoVersions::V0_0_3(blockinfo) => {
-                let block_info = BlockInfo {
-                    block_hash: blockinfo.blockhash.to_string(),
-                    parent_hash: blockinfo.parent_blockhash.to_string(),
-                    parent_slot: blockinfo.parent_slot,
-                    slot: blockinfo.slot,
-                    height: blockinfo.block_height,
-                    timestamp: convert_sol_timestamp(blockinfo.block_time.unwrap()),
-                    rewards: to_block_rewards_from_vec(blockinfo.rewards),
-                };
+            ReplicaBlockInfoVersions::V0_0_4(blockinfo) => BlockInfo {
+                block_hash: blockinfo.blockhash.to_string(),
+                parent_hash: blockinfo.parent_blockhash.to_string(),
+                parent_slot: blockinfo.parent_slot,
+                slot: blockinfo.slot,
+                height: blockinfo.block_height,
+                timestamp: convert_sol_timestamp(blockinfo.block_time.unwrap_or_default()),
+                rewards: to_block_rewards(&Some(blockinfo.rewards.rewards.clone())),
+            },
+        };
+        let slot = block_info.slot;
 
-                let mut lock_state = self.state.as_ref().unwrap().write().unwrap();
-                lock_state.set_block_info(blockinfo.slot, block_info);
-                if lock_state.is_slot_confirm(blockinfo.slot) {
-                    if lock_state.process_upto(blockinfo.slot).is_err() {
-                        panic!("poisoned mutex")
-                    }
-                }
-            }
+        let mut lock_state = self
+            .state
+            .as_ref()
+            .expect("state is None while updating slot status")
+            .write()
+            .expect("rw mutex poisoned while updating slot status");
 
-            ReplicaBlockInfoVersions::V0_0_4(blockinfo) => {
-                let block_info = BlockInfo {
-                    block_hash: blockinfo.blockhash.to_string(),
-                    parent_hash: blockinfo.parent_blockhash.to_string(),
-                    parent_slot: blockinfo.parent_slot,
-                    slot: blockinfo.slot,
-                    height: blockinfo.block_height,
-                    timestamp: convert_sol_timestamp(blockinfo.block_time.unwrap()),
-                    rewards: to_block_rewards(&Some(blockinfo.rewards.rewards.clone())),
-                };
+        lock_state.set_block_info(slot, block_info);
 
-                let mut lock_state = self.state.as_ref().unwrap().write().unwrap();
-                lock_state.set_block_info(blockinfo.slot, block_info);
-                if lock_state.is_slot_confirm(blockinfo.slot) {
-                    if lock_state.process_upto(blockinfo.slot).is_err() {
-                        panic!("poisoned mutex")
-                    }
-                }
+        if lock_state.is_slot_confirm(slot) {
+            if lock_state.process_upto(slot).is_err() {
+                panic!("poisoned mutex")
             }
         }
 
@@ -466,7 +478,7 @@ pub fn to_block_rewards_from_vec(rewards: &[solana_transaction_status::Reward]) 
                 pubkey: rw.pubkey.clone(),
                 lamports: rw.lamports,
                 post_balance: rw.post_balance,
-                reward_type: to_pb_reward_type(rw.reward_type.unwrap()) as i32,
+                reward_type: to_pb_reward_type(rw.reward_type) as i32,
                 commission,
             }
         })
@@ -490,7 +502,7 @@ pub fn to_block_rewards(rewards: &Option<solana_transaction_status::Rewards>) ->
                     pubkey: rw.pubkey.clone(),
                     lamports: rw.lamports,
                     post_balance: rw.post_balance,
-                    reward_type: to_pb_reward_type(rw.reward_type.unwrap()) as i32,
+                    reward_type: to_pb_reward_type(rw.reward_type) as i32,
                     commission,
                 }
             })
@@ -563,7 +575,7 @@ fn to_token_balances(
                     owner: balance.owner.clone(),
                     program_id: balance.program_id.clone(),
                     ui_token_amount: Some(UiTokenAmount {
-                        ui_amount: balance.ui_token_amount.ui_amount.unwrap(),
+                        ui_amount: balance.ui_token_amount.ui_amount.unwrap_or_default(),
                         decimals: balance.ui_token_amount.decimals as u32,
                         amount: balance.ui_token_amount.amount.clone(),
                         ui_amount_string: balance.ui_token_amount.ui_amount_string.clone(),
@@ -587,7 +599,7 @@ fn to_transaction_err(
     match &status.status {
         Ok(_) => None,
         Err(e) => {
-            let bytes = bincode::serialize(e).unwrap();
+            let bytes = bincode::serialize(e).expect("error serializing TransactionError");
             let err = TransactionError { err: bytes };
             Some(err)
         }
@@ -629,7 +641,7 @@ fn to_rewards(rewards: &Option<solana_transaction_status::Rewards>) -> Vec<Rewar
                     pubkey: rw.pubkey.clone(),
                     lamports: rw.lamports,
                     post_balance: rw.post_balance,
-                    reward_type: to_pb_reward_type(rw.reward_type.unwrap()) as i32,
+                    reward_type: to_pb_reward_type(rw.reward_type) as i32, // SCARY
                     commission: "".to_string(), //was not set in the poller to keep compatibility
                 })
                 .collect()
@@ -637,12 +649,13 @@ fn to_rewards(rewards: &Option<solana_transaction_status::Rewards>) -> Vec<Rewar
         .unwrap_or_else(Vec::new)
 }
 
-fn to_pb_reward_type(reward_type: solana_transaction_status::RewardType) -> RewardType {
+fn to_pb_reward_type(reward_type: Option<solana_transaction_status::RewardType>) -> RewardType {
     match reward_type {
-        solana_transaction_status::RewardType::Fee => RewardType::Fee,
-        solana_transaction_status::RewardType::Rent => RewardType::Rent,
-        solana_transaction_status::RewardType::Voting => RewardType::Voting,
-        solana_transaction_status::RewardType::Staking => RewardType::Staking,
+        None => RewardType::Unspecified,
+        Some(solana_transaction_status::RewardType::Fee) => RewardType::Fee,
+        Some(solana_transaction_status::RewardType::Rent) => RewardType::Rent,
+        Some(solana_transaction_status::RewardType::Voting) => RewardType::Voting,
+        Some(solana_transaction_status::RewardType::Staking) => RewardType::Staking,
     }
 }
 
