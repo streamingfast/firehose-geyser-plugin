@@ -35,6 +35,7 @@ use std::str::FromStr;
 
 const SEED: i64 = 76;
 
+#[derive(Clone)]
 pub struct ConfirmTransactionWithIndex {
     pub index: usize,
     pub transaction: ConfirmedTransaction,
@@ -442,9 +443,9 @@ impl GeyserPlugin for Plugin {
             .write()
             .expect("rw mutex poisoned while updating slot status");
 
-        lock_state.set_block_info(slot, block_info);
+        lock_state.set_block_info(block_info);
 
-        if lock_state.is_slot_confirm(slot) {
+        if lock_state.is_slot_confirmed(slot) {
             if lock_state.process_upto(slot).is_err() {
                 panic!("poisoned mutex")
             }

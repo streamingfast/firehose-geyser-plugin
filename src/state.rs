@@ -17,7 +17,7 @@ type BlockInfoMap = HashMap<u64, BlockInfo>;
 type ConfirmedSlotsMap = HashMap<u64, bool>;
 use crate::pb::sf::solana::r#type::v1::{Block, BlockHeight, Reward, UnixTimestamp};
 use crate::plugins::{to_block_rewards, ConfirmTransactionWithIndex};
-use log::{debug, info};
+use log::{debug, info, warn};
 use solana_rpc_client_api::config::RpcBlockConfig;
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_transaction_status::TransactionDetails;
@@ -58,6 +58,8 @@ pub struct State {
     first_received_blockmeta: Option<u64>,
     first_block_to_process: Option<u64>,
 
+    last_sent_block: Option<u64>,
+
     cursor: Option<u64>,
     lib: Option<u64>,
 
@@ -94,6 +96,7 @@ impl State {
             account_data_hash: HashMap::new(),
             block_infos: HashMap::new(),
             confirmed_slots: HashMap::new(),
+            last_sent_block: None,
 
             transactions: HashMap::new(),
 
@@ -113,7 +116,7 @@ impl State {
             .get_slot_with_commitment(commitment_config)
         {
             Ok(lib_num) => {
-                println!("Block lib received from rpc client: {}", lib_num);
+                info!("Block lib received from rpc client: {}", lib_num);
                 self.lib = Some(lib_num);
                 if let Some(cursor) = self.cursor {
                     if lib_num > cursor {
@@ -153,18 +156,15 @@ impl State {
         {
             Ok(block) => {
                 debug!("Block Info fetched locally for slot {}", slot);
-                self.set_block_info(
-                    slot,
-                    BlockInfo {
-                        timestamp: convert_sol_timestamp(block.block_time.unwrap_or_default()),
-                        parent_slot: block.parent_slot.clone(),
-                        slot: slot,
-                        block_hash: block.blockhash.clone(),
-                        parent_hash: block.previous_blockhash.clone(),
-                        height: block.block_height,
-                        rewards: to_block_rewards(&block.rewards),
-                    },
-                )
+                self.set_block_info(BlockInfo {
+                    timestamp: convert_sol_timestamp(block.block_time.unwrap_or_default()),
+                    parent_slot: block.parent_slot.clone(),
+                    slot: slot,
+                    block_hash: block.blockhash.clone(),
+                    parent_hash: block.previous_blockhash.clone(),
+                    height: block.block_height,
+                    rewards: to_block_rewards(&block.rewards),
+                })
             }
             Err(_err) => {
                 if !try_remote {
@@ -178,20 +178,15 @@ impl State {
                 {
                     Ok(block) => {
                         debug!("Block Info fetched remotely for slot {}", slot);
-                        self.set_block_info(
-                            slot,
-                            BlockInfo {
-                                timestamp: convert_sol_timestamp(
-                                    block.block_time.unwrap_or_default(),
-                                ),
-                                parent_slot: block.parent_slot.clone(),
-                                slot: slot,
-                                block_hash: block.blockhash.clone(),
-                                parent_hash: block.previous_blockhash.clone(),
-                                height: block.block_height,
-                                rewards: to_block_rewards(&block.rewards),
-                            },
-                        )
+                        self.set_block_info(BlockInfo {
+                            timestamp: convert_sol_timestamp(block.block_time.unwrap_or_default()),
+                            parent_slot: block.parent_slot.clone(),
+                            slot: slot,
+                            block_hash: block.blockhash.clone(),
+                            parent_hash: block.previous_blockhash.clone(),
+                            height: block.block_height,
+                            rewards: to_block_rewards(&block.rewards),
+                        })
                     }
                     Err(_err) => return,
                 }
@@ -209,6 +204,36 @@ impl State {
             .collect();
         slots.sort();
         slots
+    }
+
+    fn add_missing_slots_to_confirmed_slots(&mut self, last_sent: u64, parent_slot: u64) -> bool {
+        let mut i = parent_slot;
+        while i > last_sent {
+            match self.block_infos.get(&i) {
+                Some(bi) => {
+                    if self.confirmed_slots.insert(i, true).is_none() {
+                        info!("added missing slot {} to confirmed_slots", i);
+                    };
+                    i = bi.parent_slot;
+                }
+                None => {
+                    self.cache_block_from_rpc(i, true);
+                    match self.block_infos.get(&i) {
+                        Some(bi) => {
+                            if self.confirmed_slots.insert(i, true).is_none() {
+                                info!("added missing slot {} to confirmed_slots", i);
+                            };
+                            i = bi.parent_slot;
+                        }
+                        None => {
+                            warn!("Failed to get block info for slot {} while adding missing slots to confirmed_slots", i);
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        return i == last_sent;
     }
 
     pub fn should_skip_slot(&self, slot: u64) -> bool {
@@ -243,11 +268,12 @@ impl State {
         self.confirmed_slots.insert(slot, true);
     }
 
-    pub fn is_slot_confirm(&self, slot: u64) -> bool {
+    pub fn is_slot_confirmed(&self, slot: u64) -> bool {
         self.confirmed_slots.get(&slot).is_some()
     }
 
-    pub fn set_block_info(&mut self, slot: u64, block_info: BlockInfo) {
+    pub fn set_block_info(&mut self, block_info: BlockInfo) {
+        let slot = block_info.slot;
         if self.lib.is_none() {
             self.set_last_finalized_block_from_rpc();
         }
@@ -428,6 +454,23 @@ impl State {
                 Some(bi) => bi,
             };
 
+            if let Some(last_sent_block) = self.last_sent_block {
+                if last_sent_block < block_info.parent_slot {
+                    warn!(
+                            "last sent block {} is not the parent of slot {}. Expecting {}. (This is a very rare case that would create a hole). Manually adding missing slots to 'confirmed_slots', they will be sent on next loop",
+                            last_sent_block,
+                            slot,
+                            block_info.parent_slot,
+                        );
+
+                    let success = self.add_missing_slots_to_confirmed_slots(last_sent_block, slot);
+                    if !success {
+                        warn!("Failed to add all missing slots to 'confirmed_slots' between {} and {}", last_sent_block, slot);
+                    }
+                    break; //
+                }
+            }
+
             let account_changes = self.get_account_changes(slot);
             let acc_block = create_account_block(
                 account_changes.unwrap_or(&AccountChanges::default()),
@@ -447,7 +490,7 @@ impl State {
                 info!("Error printing block at {}", slot);
                 return Err("Error printing block".into());
             }
-
+            self.last_sent_block = Some(block_info.slot);
             self.purge_blocks_up_to(slot);
             if BLOCK_MUTEX.is_poisoned() || ACC_MUTEX.is_poisoned() {
                 return Err("mutex poisoned".into());
@@ -485,5 +528,127 @@ fn compose_and_purge_block(
             }),
             None => None,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn test_block_info(slot: u64, parent_slot: u64) -> BlockInfo {
+        BlockInfo {
+            timestamp: Timestamp {
+                seconds: 1234,
+                nanos: 0,
+            },
+            parent_slot,
+            slot,
+            block_hash: "hash1".to_string(),
+            parent_hash: "parent1".to_string(),
+            height: Some(100),
+            rewards: vec![],
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_set_block_info() {
+        let mock_server = MockServer::start().await;
+        let test_url = mock_server.uri();
+
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "result": 100,
+                "id": 1
+            })))
+            .mount(&mock_server)
+            .await;
+
+        // Initialize state with no lib and no first_received_blockmeta
+
+        let mut state = State::new(
+            RpcClient::new(test_url.clone()),
+            RpcClient::new(test_url.clone()),
+            None,
+            "test_cursor_file".to_string(),
+            BlockPrinter::new(None, None, false),
+        );
+
+        // Test case 1: No lib set yet
+        let block_info = test_block_info(100, 99);
+
+        state.set_block_info(block_info.clone());
+        assert_eq!(state.lib, Some(100)); // From mock response
+        assert_eq!(state.first_received_blockmeta, Some(100));
+        assert_eq!(state.first_block_to_process, Some(100));
+
+        // Test case 2: With cursor set, lib is before cursor
+        let mut state_with_cursor = State::new(
+            RpcClient::new(test_url.clone()),
+            RpcClient::new(test_url.clone()),
+            Some(110),
+            "test_cursor_file".to_string(),
+            BlockPrinter::new(None, None, false),
+        );
+
+        state_with_cursor.set_block_info(block_info.clone());
+        assert_eq!(state_with_cursor.first_received_blockmeta, Some(100));
+        assert_eq!(state_with_cursor.first_block_to_process, None); // Should not be set since cursor exists
+        assert_eq!(state_with_cursor.cursor, Some(110));
+
+        // Test case 3: With cursor set, lib is greater than cursor which will get cancelled
+        let mut state_with_cursor = State::new(
+            RpcClient::new(test_url.clone()),
+            RpcClient::new(test_url.clone()),
+            Some(90),
+            "test_cursor_file".to_string(),
+            BlockPrinter::new(None, None, false),
+        );
+
+        state_with_cursor.set_block_info(block_info.clone());
+        assert_eq!(state_with_cursor.first_received_blockmeta, Some(100));
+        assert_eq!(state_with_cursor.first_block_to_process, Some(100)); // gets set since cursor must be ignored
+        assert_eq!(state_with_cursor.cursor, None);
+
+        // Test case 4: Already initialized state
+        state.first_received_blockmeta = Some(50);
+        state.set_block_info(test_block_info(100, 99));
+        // Check block was added without modifying first_received_blockmeta
+        assert_eq!(state.first_received_blockmeta, Some(50));
+        assert!(state.block_infos.contains_key(&100));
+    }
+
+    #[test]
+    fn test_add_missing_slots_to_confirmed_slots() {
+        let mut state = State::new(
+            RpcClient::new("http://test.local"),
+            RpcClient::new("http://test.remote"),
+            None,
+            "test_cursor.txt".to_string(),
+            BlockPrinter::new(None, None, false),
+        );
+
+        // Setup initial state
+        state.initialized = true;
+        state.last_sent_block = Some(1);
+
+        state.block_infos.insert(1, test_block_info(1, 0));
+        state.block_infos.insert(2, test_block_info(2, 1));
+        state.block_infos.insert(4, test_block_info(4, 2));
+        state.block_infos.insert(6, test_block_info(6, 4));
+
+        // assume we receive confirmed_slot 7 with parent_slot 6
+        let result = state.add_missing_slots_to_confirmed_slots(state.last_sent_block.unwrap(), 6);
+        assert!(result);
+
+        assert!(!state.is_slot_confirmed(1)); // was already sent
+
+        assert!(state.is_slot_confirmed(2));
+        assert!(state.is_slot_confirmed(4));
+        assert!(state.is_slot_confirmed(6));
     }
 }
