@@ -70,6 +70,8 @@ impl BlockPrinter {
                 let base64_encoded_block = rbase64::encode(&encoded_block);
                 let payload = base64_encoded_block;
 
+                info!("printing block {} {} with transaction count of {}", block.slot, block_hash, block.transactions.len());
+
                 if noop {
                     info!("printing block {} (noop mode)", slot);
                 } else {
