@@ -12,6 +12,8 @@ pub type AccountChanges = HashMap<Vec<u8>, AccountWithWriteVersion>;
 pub type AccountDataHash = HashMap<Vec<u8>, u64>;
 
 pub type Transactions = HashMap<u64, Vec<ConfirmTransactionWithIndex>>;
+type ProcessedSlot = HashMap<u64, bool>;
+
 
 type BlockInfoMap = HashMap<u64, BlockInfo>;
 type ConfirmedSlotsMap = HashMap<u64, bool>;
@@ -70,6 +72,7 @@ pub struct State {
     confirmed_slots: ConfirmedSlotsMap,
 
     transactions: Transactions,
+    processed_slots: ProcessedSlot,
 
     local_rpc_client: Option<RpcClient>,
     remote_rpc_client: Option<RpcClient>,
@@ -99,6 +102,7 @@ impl State {
             last_sent_block: None,
 
             transactions: HashMap::new(),
+            processed_slots: HashMap::new(),
 
             local_rpc_client: Some(local_rpc_client),
             remote_rpc_client: Some(remote_rpc_client),
@@ -369,6 +373,10 @@ impl State {
     }
 
     pub fn set_transaction(&mut self, slot: u64, transaction: ConfirmTransactionWithIndex) {
+        if let Some(processSlot) = self.processed_slots.get(&slot) {
+            panic!("slot {} already processed should not receive transaction for it", slot);
+        }
+
         if let Some(txs) = self.transactions.get_mut(&slot) {
             txs.push(transaction);
         } else {
@@ -397,6 +405,10 @@ impl State {
             if slot <= upto {
                 debug!("purging confirmed slot {}", slot);
                 self.confirmed_slots.remove(&slot);
+                let processed_slot_remove = upto - 100;
+                if processed_slot_remove >= 0 {
+                    self.processed_slots.remove(&processed_slot_remove);
+                }
             }
         }
     }
@@ -492,6 +504,8 @@ impl State {
             }
             self.last_sent_block = Some(block_info.slot);
             self.purge_blocks_up_to(slot);
+            self.processed_slots.insert(slot, true);
+
             if BLOCK_MUTEX.is_poisoned() || ACC_MUTEX.is_poisoned() {
                 return Err("mutex poisoned".into());
             }
