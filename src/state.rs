@@ -19,7 +19,7 @@ type BlockInfoMap = HashMap<u64, BlockInfo>;
 type ConfirmedSlotsMap = HashMap<u64, bool>;
 use crate::pb::sf::solana::r#type::v1::{Block, BlockHeight, Reward, UnixTimestamp};
 use crate::plugins::{to_block_rewards, ConfirmTransactionWithIndex};
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use solana_rpc_client_api::config::RpcBlockConfig;
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_transaction_status::TransactionDetails;
@@ -374,7 +374,8 @@ impl State {
 
     pub fn set_transaction(&mut self, slot: u64, transaction: ConfirmTransactionWithIndex) {
         if let Some(processSlot) = self.processed_slots.get(&slot) {
-            panic!("slot {} already processed should not receive transaction for it", slot);
+            error!("slot {} already processed should not receive transaction for it", slot);
+            return;
         }
 
         if let Some(txs) = self.transactions.get_mut(&slot) {
