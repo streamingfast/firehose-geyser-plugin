@@ -364,9 +364,21 @@ impl GeyserPlugin for Plugin {
         transaction: ReplicaTransactionInfoVersions<'_>,
         slot: u64,
     ) -> PluginResult<()> {
+        let mut lock_state = self
+            .state
+            .as_ref()
+            .expect("cannot get RW lock for update_slot_status (state is None)")
+            .write()
+            .expect("cannot get RW lock for update_slot_status (poisoned)");
+
+        lock_state
+            .update_highest_trx(slot)
+            .expect("updating the highest trx");
+
         if !self.with_block {
             return Ok(());
         }
+
         let transaction = match transaction {
             ReplicaTransactionInfoVersions::V0_0_1(_info) => {
                 unreachable!("ReplicaAccountInfoVersions::V0_0_1 is not supported")
@@ -380,12 +392,6 @@ impl GeyserPlugin for Plugin {
             transaction: compiled_transaction,
         };
 
-        let mut lock_state = self
-            .state
-            .as_ref()
-            .expect("cannot get RW lock for update_slot_status (state is None)")
-            .write()
-            .expect("cannot get RW lock for update_slot_status (poisoned)");
         lock_state.set_transaction(slot, tx);
 
         Ok(())
@@ -459,7 +465,7 @@ impl GeyserPlugin for Plugin {
     }
 
     fn transaction_notifications_enabled(&self) -> bool {
-        self.with_block
+        true
     }
 
     fn entry_notifications_enabled(&self) -> bool {

@@ -14,7 +14,6 @@ pub type AccountDataHash = HashMap<Vec<u8>, u64>;
 pub type Transactions = HashMap<u64, Vec<ConfirmTransactionWithIndex>>;
 type ProcessedSlot = HashMap<u64, bool>;
 
-
 type BlockInfoMap = HashMap<u64, BlockInfo>;
 type ConfirmedSlotsMap = HashMap<u64, bool>;
 use crate::pb::sf::solana::r#type::v1::{Block, BlockHeight, Reward, UnixTimestamp};
@@ -64,6 +63,8 @@ pub struct State {
 
     cursor: Option<u64>,
     lib: Option<u64>,
+    highest_trx: Option<u64>,
+    finalized_block_waiting_on_trx: Option<u64>,
 
     block_account_changes: BlockAccountChanges,
     account_data_hash: AccountDataHash,
@@ -92,6 +93,8 @@ impl State {
             cursor,
             first_block_to_process: None,
             first_received_blockmeta: None,
+            highest_trx: None,
+            finalized_block_waiting_on_trx: None,
             lib: None,
             initialized: false,
 
@@ -135,6 +138,28 @@ impl State {
             }
             Err(e) => {
                 println!("Error getting lib num from rpc client: {}", e);
+            }
+        }
+    }
+
+    pub fn update_highest_trx(&mut self, slot: u64) -> Result<(), Box<dyn std::error::Error>> {
+        match self.highest_trx {
+            Some(trx) => {
+                if slot > trx {
+                    self.highest_trx = Some(slot);
+                    if let Some(toproc) = self.finalized_block_waiting_on_trx {
+                        debug!("got transaction for slot {}. processing {}", slot, toproc);
+                        self.process_upto(toproc)
+                    } else {
+                        Ok(())
+                    }
+                } else {
+                    Ok(())
+                }
+            }
+            None => {
+                self.highest_trx = Some(slot);
+                Ok(())
             }
         }
     }
@@ -373,8 +398,11 @@ impl State {
     }
 
     pub fn set_transaction(&mut self, slot: u64, transaction: ConfirmTransactionWithIndex) {
-        if let Some(processSlot) = self.processed_slots.get(&slot) {
-            error!("slot {} already processed should not receive transaction for it", slot);
+        if self.processed_slots.get(&slot).is_some() {
+            error!(
+                "slot {} already processed should not receive transaction for it",
+                slot
+            );
             return;
         }
 
@@ -406,8 +434,8 @@ impl State {
             if slot <= upto {
                 debug!("purging confirmed slot {}", slot);
                 self.confirmed_slots.remove(&slot);
-                let processed_slot_remove = upto - 100;
-                if processed_slot_remove >= 0 {
+                if upto > 100 {
+                    let processed_slot_remove = upto - 100;
                     self.processed_slots.remove(&processed_slot_remove);
                 }
             }
@@ -415,6 +443,28 @@ impl State {
     }
 
     pub fn process_upto(&mut self, slot: u64) -> Result<(), Box<dyn std::error::Error>> {
+        let mut slot = slot;
+        match self.highest_trx {
+            Some(trx) => {
+                if slot >= trx {
+                    debug!(
+                        "Not sending up to {} yet because we haven't received trx on next block, capping to {}",
+                        slot, trx -1
+                    );
+                    self.finalized_block_waiting_on_trx = Some(slot);
+                    slot = trx - 1
+                } else {
+                    self.finalized_block_waiting_on_trx = None
+                }
+            }
+            None => {
+                debug!(
+                    "No 'highest_trx' yet, skipping processing for slot {}",
+                    slot
+                );
+                return Ok(());
+            }
+        }
         let first_block_to_process = match self.first_block_to_process {
             Some(slot) => slot,
             None => {
