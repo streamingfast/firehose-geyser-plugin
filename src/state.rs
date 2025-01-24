@@ -281,27 +281,29 @@ impl State {
             return false;
         }
         match self.block_infos.get(&slot) {
-            None => false,
+            None => return false,
             Some(blk) => {
                 if let Some(trxs) = self.transactions.get(&slot) {
-                    match blk.transaction_count == trxs.len() as u64 {
-                        true => true,
-                        false => {
-                            debug!(
-                                "slot {} has {} transactions, but {} were received, waiting for more",
-                                slot,
-                                blk.transaction_count,
-                                trxs.len()
-                            );
-                            false
+                    if blk.transaction_count == trxs.len() as u64 {
+                        return true;
+                    } else {
+                        debug!(
+                            "slot {} has {} transactions, but {} were received, waiting for more",
+                            slot,
+                            blk.transaction_count,
+                            trxs.len()
+                        );
+                        {
+                            return false;
                         }
                     };
+                } else {
+                    debug!(
+                        "slot {} has no transactions, but is confirmed, waiting for transactions",
+                        slot
+                    );
+                    return false;
                 }
-                debug!(
-                    "slot {} has no transactions, but is confirmed, waiting for transactions",
-                    slot
-                );
-                return false;
             }
         }
     }
