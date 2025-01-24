@@ -257,6 +257,7 @@ impl State {
 
     pub fn set_confirmed_slot(&mut self, slot: u64) {
         if self.should_skip_slot(slot) {
+            debug!("skipping slot {}", slot);
             return;
         }
         if let Some(cursor) = self.cursor {
@@ -296,6 +297,10 @@ impl State {
                         }
                     };
                 }
+                debug!(
+                    "slot {} has no transactions, but is confirmed, waiting for transactions",
+                    slot
+                );
                 return false;
             }
         }
@@ -408,6 +413,7 @@ impl State {
         if let Some(txs) = self.transactions.get_mut(&slot) {
             txs.push(transaction);
         } else {
+            debug!("inserting first transaction for slot {}", slot);
             let mut txs = Vec::new();
             txs.push(transaction);
             self.transactions.insert(slot, txs);
@@ -442,6 +448,7 @@ impl State {
     }
 
     pub fn process_upto(&mut self, slot: u64) -> Result<(), Box<dyn std::error::Error>> {
+        debug!("processing upto slot {}", slot);
         let first_block_to_process = match self.first_block_to_process {
             Some(slot) => slot,
             None => {
@@ -479,6 +486,10 @@ impl State {
 
         for slot in self.ordered_confirmed_slots_upto(slot) {
             if slot < first_block_to_process {
+                debug!(
+                    "in process_upto, skipping slot {} below first_block_to_process {}",
+                    slot, first_block_to_process
+                );
                 continue;
             }
 
