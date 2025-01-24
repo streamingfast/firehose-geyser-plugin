@@ -43,11 +43,12 @@ pub struct BlockInfo {
     pub timestamp: Timestamp,
     pub height: Option<u64>,
     pub rewards: Vec<Reward>,
+    pub transaction_count: u64,
 }
 
 const DEFAULT_RPC_BLOCK_CONFIG: RpcBlockConfig = RpcBlockConfig {
     encoding: None,
-    transaction_details: Some(TransactionDetails::None),
+    transaction_details: Some(TransactionDetails::Signatures),
     rewards: Some(true),
     commitment: Some(CommitmentConfig::confirmed()),
     max_supported_transaction_version: Some(0),
@@ -63,8 +64,6 @@ pub struct State {
 
     cursor: Option<u64>,
     lib: Option<u64>,
-    highest_trx: Option<u64>,
-    finalized_block_waiting_on_trx: Option<u64>,
 
     block_account_changes: BlockAccountChanges,
     account_data_hash: AccountDataHash,
@@ -93,8 +92,6 @@ impl State {
             cursor,
             first_block_to_process: None,
             first_received_blockmeta: None,
-            highest_trx: None,
-            finalized_block_waiting_on_trx: None,
             lib: None,
             initialized: false,
 
@@ -142,28 +139,6 @@ impl State {
         }
     }
 
-    pub fn update_highest_trx(&mut self, slot: u64) -> Result<(), Box<dyn std::error::Error>> {
-        match self.highest_trx {
-            Some(trx) => {
-                if slot > trx {
-                    self.highest_trx = Some(slot);
-                    if let Some(toproc) = self.finalized_block_waiting_on_trx {
-                        debug!("got transaction for slot {}. processing {}", slot, toproc);
-                        self.process_upto(toproc)
-                    } else {
-                        Ok(())
-                    }
-                } else {
-                    Ok(())
-                }
-            }
-            None => {
-                self.highest_trx = Some(slot);
-                Ok(())
-            }
-        }
-    }
-
     pub fn set_lib(&mut self, slot: u64) {
         self.lib = Some(slot);
     }
@@ -176,7 +151,7 @@ impl State {
         self.block_account_changes.get(&slot)
     }
 
-    pub fn cache_block_from_rpc(&mut self, slot: u64, try_remote: bool) {
+    pub fn cache_block_from_rpc(&mut self, slot: u64) {
         match self
             .local_rpc_client
             .as_ref()
@@ -188,17 +163,15 @@ impl State {
                 self.set_block_info(BlockInfo {
                     timestamp: convert_sol_timestamp(block.block_time.unwrap_or_default()),
                     parent_slot: block.parent_slot.clone(),
-                    slot: slot,
+                    slot,
                     block_hash: block.blockhash.clone(),
                     parent_hash: block.previous_blockhash.clone(),
                     height: block.block_height,
                     rewards: to_block_rewards(&block.rewards),
+                    transaction_count: block.transactions.unwrap_or_default().len() as u64,
                 })
             }
             Err(_err) => {
-                if !try_remote {
-                    return;
-                }
                 match self
                     .remote_rpc_client
                     .as_ref()
@@ -215,6 +188,7 @@ impl State {
                             parent_hash: block.previous_blockhash.clone(),
                             height: block.block_height,
                             rewards: to_block_rewards(&block.rewards),
+                            transaction_count: block.transactions.unwrap_or_default().len() as u64,
                         })
                     }
                     Err(_err) => return,
@@ -223,7 +197,7 @@ impl State {
         }
     }
 
-    fn ordered_confirmed_slots_upto(&self, slot: u64) -> Vec<u64> {
+    pub fn ordered_confirmed_slots_upto(&self, slot: u64) -> Vec<u64> {
         // Collect all keys from confirmed_slots that are less than the given slot
         let mut slots: Vec<u64> = self
             .confirmed_slots
@@ -246,7 +220,7 @@ impl State {
                     i = bi.parent_slot;
                 }
                 None => {
-                    self.cache_block_from_rpc(i, true);
+                    self.cache_block_from_rpc(i);
                     match self.block_infos.get(&i) {
                         Some(bi) => {
                             if self.confirmed_slots.insert(i, true).is_none() {
@@ -297,8 +271,34 @@ impl State {
         self.confirmed_slots.insert(slot, true);
     }
 
-    pub fn is_slot_confirmed(&self, slot: u64) -> bool {
-        self.confirmed_slots.get(&slot).is_some()
+    pub fn has_block_info(&self, slot: u64) -> bool {
+        return self.block_infos.get(&slot).is_some();
+    }
+
+    pub fn is_ready(&self, slot: u64) -> bool {
+        if self.confirmed_slots.get(&slot).is_none() {
+            return false;
+        }
+        match self.block_infos.get(&slot) {
+            None => false,
+            Some(blk) => {
+                if let Some(trxs) = self.transactions.get(&slot) {
+                    match blk.transaction_count == trxs.len() as u64 {
+                        true => true,
+                        false => {
+                            debug!(
+                                "slot {} has {} transactions, but {} were received, waiting for more",
+                                slot,
+                                blk.transaction_count,
+                                trxs.len()
+                            );
+                            false
+                        }
+                    };
+                }
+                return false;
+            }
+        }
     }
 
     pub fn set_block_info(&mut self, block_info: BlockInfo) {
@@ -403,7 +403,6 @@ impl State {
                 "slot {} already processed should not receive transaction for it",
                 slot
             );
-            return;
         }
 
         if let Some(txs) = self.transactions.get_mut(&slot) {
@@ -443,28 +442,6 @@ impl State {
     }
 
     pub fn process_upto(&mut self, slot: u64) -> Result<(), Box<dyn std::error::Error>> {
-        let mut slot = slot;
-        match self.highest_trx {
-            Some(trx) => {
-                if slot >= trx {
-                    debug!(
-                        "Not sending up to {} yet because we haven't received trx on next block, capping to {}",
-                        slot, trx -1
-                    );
-                    self.finalized_block_waiting_on_trx = Some(slot);
-                    slot = trx - 1
-                } else {
-                    self.finalized_block_waiting_on_trx = None
-                }
-            }
-            None => {
-                debug!(
-                    "No 'highest_trx' yet, skipping processing for slot {}",
-                    slot
-                );
-                return Ok(());
-            }
-        }
         let first_block_to_process = match self.first_block_to_process {
             Some(slot) => slot,
             None => {
@@ -507,12 +484,8 @@ impl State {
 
             let block_info = match self.block_infos.get(&slot) {
                 None => {
-                    let try_remote = !self.initialized || self.confirmed_slots.len() >= 10;
-                    self.cache_block_from_rpc(slot, try_remote);
-                    match self.block_infos.get(&slot) {
-                        None => return Ok(()),
-                        Some(bi) => bi,
-                    }
+                    info!("No block info for slot {} in process_upto", slot);
+                    return Ok(());
                 }
                 Some(bi) => bi,
             };
@@ -615,6 +588,7 @@ mod tests {
             parent_hash: "parent1".to_string(),
             height: Some(100),
             rewards: vec![],
+            transaction_count: 0,
         }
     }
 
@@ -710,10 +684,10 @@ mod tests {
         let result = state.add_missing_slots_to_confirmed_slots(state.last_sent_block.unwrap(), 6);
         assert!(result);
 
-        assert!(!state.is_slot_confirmed(1)); // was already sent
+        assert!(state.confirmed_slots.get(&1).is_none()); // was already sent
 
-        assert!(state.is_slot_confirmed(2));
-        assert!(state.is_slot_confirmed(4));
-        assert!(state.is_slot_confirmed(6));
+        assert!(state.confirmed_slots.get(&2).is_some());
+        assert!(state.confirmed_slots.get(&4).is_some());
+        assert!(state.confirmed_slots.get(&6).is_some());
     }
 }

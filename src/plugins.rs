@@ -310,6 +310,11 @@ impl GeyserPlugin for Plugin {
                         .write()
                         .expect("cannot get RW lock for update_slot_status (poisoned)");
                     lock_state.set_confirmed_slot(slot);
+                    if lock_state.is_ready(slot) {
+                        if lock_state.process_upto(slot).is_err() {
+                            panic!("poisoned mutex")
+                        }
+                    }
                 }
                 false => {
                     debug!(
@@ -349,8 +354,10 @@ impl GeyserPlugin for Plugin {
                         .write()
                         .expect("cannot get RW lock for set_confirmed_slot (poisoned)");
                     lock_state.set_confirmed_slot(slot);
-                    if lock_state.process_upto(slot).is_err() {
-                        panic!("poisoned mutex")
+                    if lock_state.is_ready(slot) {
+                        if lock_state.process_upto(slot).is_err() {
+                            panic!("poisoned mutex")
+                        }
                     }
                 }
             },
@@ -364,17 +371,6 @@ impl GeyserPlugin for Plugin {
         transaction: ReplicaTransactionInfoVersions<'_>,
         slot: u64,
     ) -> PluginResult<()> {
-        let mut lock_state = self
-            .state
-            .as_ref()
-            .expect("cannot get RW lock for update_slot_status (state is None)")
-            .write()
-            .expect("cannot get RW lock for update_slot_status (poisoned)");
-
-        lock_state
-            .update_highest_trx(slot)
-            .expect("updating the highest trx");
-
         if !self.with_block {
             return Ok(());
         }
@@ -392,7 +388,19 @@ impl GeyserPlugin for Plugin {
             transaction: compiled_transaction,
         };
 
+        let mut lock_state = self
+            .state
+            .as_ref()
+            .expect("cannot get RW lock for notify_transaction (state is None)")
+            .write()
+            .expect("cannot get RW lock for notify_transaction (poisoned)");
+
         lock_state.set_transaction(slot, tx);
+        if lock_state.is_ready(slot) {
+            if lock_state.process_upto(slot).is_err() {
+                panic!("poisoned mutex")
+            }
+        }
 
         Ok(())
     }
@@ -418,6 +426,7 @@ impl GeyserPlugin for Plugin {
                 height: blockinfo.block_height,
                 timestamp: convert_sol_timestamp(blockinfo.block_time.unwrap_or_default()),
                 rewards: to_block_rewards_from_vec(blockinfo.rewards),
+                transaction_count: blockinfo.executed_transaction_count,
             },
 
             ReplicaBlockInfoVersions::V0_0_3(blockinfo) => BlockInfo {
@@ -428,6 +437,7 @@ impl GeyserPlugin for Plugin {
                 height: blockinfo.block_height,
                 timestamp: convert_sol_timestamp(blockinfo.block_time.unwrap_or_default()),
                 rewards: to_block_rewards_from_vec(blockinfo.rewards),
+                transaction_count: blockinfo.executed_transaction_count,
             },
 
             ReplicaBlockInfoVersions::V0_0_4(blockinfo) => BlockInfo {
@@ -438,6 +448,7 @@ impl GeyserPlugin for Plugin {
                 height: blockinfo.block_height,
                 timestamp: convert_sol_timestamp(blockinfo.block_time.unwrap_or_default()),
                 rewards: to_block_rewards(&Some(blockinfo.rewards.rewards.clone())),
+                transaction_count: blockinfo.executed_transaction_count,
             },
         };
         let slot = block_info.slot;
@@ -451,7 +462,14 @@ impl GeyserPlugin for Plugin {
 
         lock_state.set_block_info(block_info);
 
-        if lock_state.is_slot_confirmed(slot) {
+        // if we get block_info for block 25, but we have 'confirmed blocks' 20 to 24, we'll fetch their block_info from RPC, which is a bit costly but prevents being stuck forever. This happens in rare cases, mostly upon startup
+        for slot in lock_state.ordered_confirmed_slots_upto(slot) {
+            if !lock_state.has_block_info(slot) {
+                lock_state.cache_block_from_rpc(slot);
+            }
+        }
+
+        if lock_state.is_ready(slot) {
             if lock_state.process_upto(slot).is_err() {
                 panic!("poisoned mutex")
             }
