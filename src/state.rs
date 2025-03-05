@@ -417,7 +417,16 @@ impl State {
         }
 
         self.account_data_hash.insert(pub_key.to_vec(), data_hash);
-        self.account_owners.insert(pub_key.to_vec(), owner.to_vec());
+        if deleted {
+            // That account will end up being remove from the chain since there is no more lamport to pay the rent.
+            // Best practice is to change the owner of an account to the system contract. If we keep track of this change and the account
+            // is recreated will emit a account change with 'owner' set to system contract and `new_owner` to contract creating the account.
+            // But in the case a account is recreated we want the owner to be set to the contract address creating the account.
+            self.account_owners.remove(&address);
+        }
+        else {
+            self.account_owners.insert(pub_key.to_vec(), owner.to_vec());
+        }
 
         slot_entries.insert(address, awv);
     }
@@ -737,6 +746,67 @@ mod tests {
         assert_eq!(SYSTEM_KEY, new_owner);
         assert_eq!(true, account_with_version.account.deleted);
     }
+    #[test]
+    fn test_set_account_delete_recreate_account() {
+        let mut state = test_state_no_rpc(None);
+
+        apply_account_changes(
+            &mut state,
+            vec![
+                SetAccountData {
+                    slot: 100,
+                    ..Default::default()
+                },
+                SetAccountData {
+                    slot: 101,
+                    owner: SYSTEM_KEY,
+                    deleted: true,
+                    ..Default::default()
+                },
+                SetAccountData {
+                    slot: 102,
+                    ..Default::default()
+                },
+            ]
+            .as_ref(),
+        );
+
+        let deleted_at_slot_num: u64 = 101;
+
+        let deleted_account_with_version = state
+            .block_account_changes
+            .get(&deleted_at_slot_num)
+            .unwrap()
+            .get(PUB_KEY_1)
+            .unwrap();
+
+        // let system_address = std::str::from_utf8(SYSTEM_KEY).unwrap();
+        let new_owner = deleted_account_with_version.account.new_owner.as_ref().unwrap();
+        let owner = &deleted_account_with_version.account.owner;
+
+        assert_eq!(SYSTEM_KEY, new_owner);
+        assert_eq!(OWNER_KEY_1, owner);
+        assert_eq!(true, deleted_account_with_version.account.deleted);
+
+
+        let recreated_at_slot_num: u64 = 102;
+
+        let recreated_account_with_version = state
+            .block_account_changes
+            .get(&recreated_at_slot_num)
+            .unwrap()
+            .get(PUB_KEY_1)
+            .unwrap();
+
+        // let system_address = std::str::from_utf8(SYSTEM_KEY).unwrap();
+        let new_owner = recreated_account_with_version.account.new_owner.as_ref();
+        let owner = &recreated_account_with_version.account.owner;
+
+        assert_eq!(None, new_owner);
+        assert_eq!(OWNER_KEY_1, owner);
+        assert_eq!(false, recreated_account_with_version.account.deleted);
+
+    }
 
     #[test]
     fn test_set_account_owner_change() {
@@ -752,7 +822,6 @@ mod tests {
                 SetAccountData {
                     slot: 101,
                     owner: SYSTEM_KEY,
-                    deleted: false,
                     ..Default::default()
                 },
             ]
