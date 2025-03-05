@@ -10,6 +10,7 @@ use std::collections::HashMap;
 type BlockAccountChanges = HashMap<u64, AccountChanges>;
 pub type AccountChanges = HashMap<Vec<u8>, AccountWithWriteVersion>;
 pub type AccountDataHash = HashMap<Vec<u8>, u64>;
+pub type AccountOwners = HashMap<Vec<u8>, Vec<u8>>;
 
 pub type Transactions = HashMap<u64, Vec<ConfirmTransactionWithIndex>>;
 type ProcessedSlot = HashMap<u64, bool>;
@@ -67,6 +68,7 @@ pub struct State {
 
     block_account_changes: BlockAccountChanges,
     account_data_hash: AccountDataHash,
+    account_owners: AccountOwners,
 
     block_infos: BlockInfoMap,
     confirmed_slots: ConfirmedSlotsMap,
@@ -97,6 +99,7 @@ impl State {
 
             block_account_changes: HashMap::new(),
             account_data_hash: HashMap::new(),
+            account_owners: HashMap::new(),
             block_infos: HashMap::new(),
             confirmed_slots: HashMap::new(),
             last_sent_block: None,
@@ -183,7 +186,7 @@ impl State {
                         self.set_block_info(BlockInfo {
                             timestamp: convert_sol_timestamp(block.block_time.unwrap_or_default()),
                             parent_slot: block.parent_slot.clone(),
-                            slot: slot,
+                            slot,
                             block_hash: block.blockhash.clone(),
                             parent_hash: block.previous_blockhash.clone(),
                             height: block.block_height,
@@ -236,7 +239,7 @@ impl State {
                 }
             }
         }
-        return i == last_sent;
+        i == last_sent
     }
 
     pub fn should_skip_slot(&self, slot: u64) -> bool {
@@ -252,7 +255,7 @@ impl State {
         if let Some(cursor) = self.cursor {
             return slot <= cursor;
         }
-        return false;
+        false
     }
 
     pub fn set_confirmed_slot(&mut self, slot: u64) {
@@ -273,7 +276,7 @@ impl State {
     }
 
     pub fn has_block_info(&self, slot: u64) -> bool {
-        return self.block_infos.get(&slot).is_some();
+        self.block_infos.get(&slot).is_some()
     }
 
     pub fn is_ready(&self, slot: u64) -> bool {
@@ -281,11 +284,11 @@ impl State {
             return false;
         }
         match self.block_infos.get(&slot) {
-            None => return false,
+            None => false,
             Some(blk) => {
                 if let Some(trxs) = self.transactions.get(&slot) {
                     if blk.transaction_count == trxs.len() as u64 {
-                        return true;
+                        true
                     } else {
                         debug!(
                             "slot {} has {} transactions, but {} were received, waiting for more",
@@ -294,15 +297,15 @@ impl State {
                             trxs.len()
                         );
                         {
-                            return false;
+                            false
                         }
-                    };
+                    }
                 } else {
                     debug!(
                         "slot {} has no transactions, but is confirmed, waiting for transactions",
                         slot
                     );
-                    return false;
+                    false
                 }
             }
         }
@@ -343,6 +346,7 @@ impl State {
     ) {
         if is_startup {
             self.account_data_hash.insert(pub_key.to_vec(), data_hash);
+            self.account_owners.insert(pub_key.to_vec(), owner.to_vec());
             return;
         }
 
@@ -361,6 +365,12 @@ impl State {
             .or_insert_with(HashMap::new);
 
         let address = pub_key.to_vec();
+
+        let current_owner = match self.account_owners.get(&address) {
+            None => owner,
+            Some(known_owner) => known_owner,
+        };
+
         if let Some(prev) = slot_entries.get(&address) {
             if prev.write_version > write_version {
                 if trace {
@@ -381,11 +391,17 @@ impl State {
             }
         }
 
+        let mut new_owner = None;
+        if current_owner != owner {
+            new_owner = Some(owner.to_vec());
+        }
+
         let pb_account = Account {
             address: pub_key.to_vec(),
             data: data.to_vec(),
-            owner: owner.to_vec(),
+            owner: current_owner.to_vec(),
             deleted,
+            new_owner,
         };
 
         let awv = AccountWithWriteVersion {
@@ -401,6 +417,8 @@ impl State {
         }
 
         self.account_data_hash.insert(pub_key.to_vec(), data_hash);
+        self.account_owners.insert(pub_key.to_vec(), owner.to_vec());
+
         slot_entries.insert(address, awv);
     }
 
@@ -547,7 +565,7 @@ impl State {
                 return Err("mutex poisoned".into());
             }
         }
-        return Ok(());
+        Ok(())
     }
 
     pub fn get_hash_count(&self) -> usize {
@@ -568,7 +586,7 @@ fn compose_and_purge_block(
             .into_iter()
             .map(|ti| ti.transaction)
             .collect(),
-        rewards: block_info.rewards.clone(), //todo: clone?????
+        rewards: block_info.rewards.clone(),
         block_time: Some(UnixTimestamp {
             timestamp: block_info.timestamp.seconds,
         }),
@@ -583,8 +601,11 @@ fn compose_and_purge_block(
 }
 
 #[cfg(test)]
+
 mod tests {
     use super::*;
+    use gxhash::gxhash64;
+    use pretty_assertions::assert_eq;
 
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -622,13 +643,7 @@ mod tests {
 
         // Initialize state with no lib and no first_received_blockmeta
 
-        let mut state = State::new(
-            RpcClient::new(test_url.clone()),
-            RpcClient::new(test_url.clone()),
-            None,
-            "test_cursor_file".to_string(),
-            BlockPrinter::new(None, None, false),
-        );
+        let mut state = test_state(test_url.clone(), test_url.clone(), None);
 
         // Test case 1: No lib set yet
         let block_info = test_block_info(100, 99);
@@ -639,13 +654,7 @@ mod tests {
         assert_eq!(state.first_block_to_process, Some(100));
 
         // Test case 2: With cursor set, lib is before cursor
-        let mut state_with_cursor = State::new(
-            RpcClient::new(test_url.clone()),
-            RpcClient::new(test_url.clone()),
-            Some(110),
-            "test_cursor_file".to_string(),
-            BlockPrinter::new(None, None, false),
-        );
+        let mut state_with_cursor = test_state(test_url.clone(), test_url.clone(), Some(110));
 
         state_with_cursor.set_block_info(block_info.clone());
         assert_eq!(state_with_cursor.first_received_blockmeta, Some(100));
@@ -653,13 +662,7 @@ mod tests {
         assert_eq!(state_with_cursor.cursor, Some(110));
 
         // Test case 3: With cursor set, lib is greater than cursor which will get cancelled
-        let mut state_with_cursor = State::new(
-            RpcClient::new(test_url.clone()),
-            RpcClient::new(test_url.clone()),
-            Some(90),
-            "test_cursor_file".to_string(),
-            BlockPrinter::new(None, None, false),
-        );
+        let mut state_with_cursor = test_state(test_url.clone(), test_url.clone(), Some(90));
 
         state_with_cursor.set_block_info(block_info.clone());
         assert_eq!(state_with_cursor.first_received_blockmeta, Some(100));
@@ -676,13 +679,7 @@ mod tests {
 
     #[test]
     fn test_add_missing_slots_to_confirmed_slots() {
-        let mut state = State::new(
-            RpcClient::new("http://test.local"),
-            RpcClient::new("http://test.remote"),
-            None,
-            "test_cursor.txt".to_string(),
-            BlockPrinter::new(None, None, false),
-        );
+        let mut state = test_state_no_rpc(None);
 
         // Setup initial state
         state.initialized = true;
@@ -702,5 +699,145 @@ mod tests {
         assert!(state.confirmed_slots.get(&2).is_some());
         assert!(state.confirmed_slots.get(&4).is_some());
         assert!(state.confirmed_slots.get(&6).is_some());
+    }
+
+    #[test]
+    fn test_set_account_delete_account() {
+        let mut state = test_state_no_rpc(None);
+
+        apply_account_changes(
+            &mut state,
+            vec![
+                SetAccountData {
+                    slot: 100,
+                    ..Default::default()
+                },
+                SetAccountData {
+                    slot: 101,
+                    owner: SYSTEM_KEY,
+                    deleted: true,
+                    ..Default::default()
+                },
+            ]
+            .as_ref(),
+        );
+
+        let slot_num: u64 = 101;
+
+        let account_with_version = state
+            .block_account_changes
+            .get(&slot_num)
+            .unwrap()
+            .get(PUB_KEY_1)
+            .unwrap();
+
+        // let system_address = std::str::from_utf8(SYSTEM_KEY).unwrap();
+        let new_owner = account_with_version.account.new_owner.as_ref().unwrap();
+
+        assert_eq!(SYSTEM_KEY, new_owner);
+        assert_eq!(true, account_with_version.account.deleted);
+    }
+
+    #[test]
+    fn test_set_account_owner_change() {
+        let mut state = test_state_no_rpc(None);
+
+        apply_account_changes(
+            &mut state,
+            vec![
+                SetAccountData {
+                    slot: 100,
+                    ..Default::default()
+                },
+                SetAccountData {
+                    slot: 101,
+                    owner: SYSTEM_KEY,
+                    deleted: false,
+                    ..Default::default()
+                },
+            ]
+            .as_ref(),
+        );
+
+        let slot_num: u64 = 101;
+
+        let account_with_version = state
+            .block_account_changes
+            .get(&slot_num)
+            .unwrap()
+            .get(PUB_KEY_1)
+            .unwrap();
+
+        // let system_address = std::str::from_utf8(SYSTEM_KEY).unwrap();
+        let new_owner = account_with_version.account.new_owner.as_ref().unwrap();
+
+        assert_eq!(SYSTEM_KEY, new_owner);
+        assert_eq!(false, account_with_version.account.deleted);
+    }
+
+    const PUB_KEY_1: &[u8] = b"pubkey.1".as_slice();
+    const OWNER_KEY_1: &[u8] = b"owner.1".as_slice();
+    const SYSTEM_KEY: &[u8] = b"111111111111".as_slice();
+    const DATA_1: &[u8] = b"data.1";
+
+    struct SetAccountData<'a> {
+        slot: u64,
+        pub_key: &'a [u8],
+        data: &'a [u8],
+        owner: &'a [u8],
+        write_version: u64,
+        deleted: bool,
+        is_startup: bool,
+        trace: bool,
+    }
+
+    impl<'a> Default for SetAccountData<'a> {
+        fn default() -> SetAccountData<'a> {
+            SetAccountData {
+                slot: 0,
+                pub_key: PUB_KEY_1,
+                data: DATA_1,
+                owner: OWNER_KEY_1,
+                write_version: 0,
+                deleted: false,
+                is_startup: false,
+                trace: false,
+            }
+        }
+    }
+
+    fn apply_account_changes(state: &mut State, account_changes: &Vec<SetAccountData>) {
+        account_changes.iter().for_each(|ac| {
+            let data_hash = gxhash64(b"data.1", 76);
+            state.set_account(
+                ac.slot,
+                ac.pub_key,
+                ac.data,
+                ac.owner,
+                ac.write_version,
+                ac.deleted,
+                ac.is_startup,
+                data_hash,
+                ac.trace,
+            )
+        })
+    }
+
+    fn test_state_no_rpc(cursor: Option<u64>) -> State {
+        test_state(
+            "http://localhost:8899".to_string(),
+            "http://localhost:8899".to_string(),
+            cursor,
+        )
+    }
+
+    fn test_state(local_rpc: String, remote_rpc: String, cursor: Option<u64>) -> State {
+        State::new(
+            RpcClient::new(local_rpc),
+            RpcClient::new(remote_rpc),
+            cursor,
+            "test_cursor.txt".to_string(),
+            BlockPrinter::new(None, None, false),
+        )
     }
 }

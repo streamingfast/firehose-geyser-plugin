@@ -283,5 +283,7 @@ pub struct Account {
     pub data: ::prost::alloc::vec::Vec<u8>,
     #[prost(bool, tag="7")]
     pub deleted: bool,
+    #[prost(bytes="vec", optional, tag="10")]
+    pub new_owner: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
 }
 // @@protoc_insertion_point(module)
