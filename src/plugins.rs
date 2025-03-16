@@ -138,84 +138,14 @@ impl GeyserPlugin for Plugin {
         concat!(env!("CARGO_PKG_NAME"), "-", env!("CARGO_PKG_VERSION"))
     }
 
-    fn on_load(&mut self, config_file: &str, _is_reload: bool) -> PluginResult<()> {
-        let plugin_config = PluginConfig::load_from_file(config_file)?;
-
-        let filter_level =
-            LevelFilter::from_str(plugin_config.log.level.as_str()).unwrap_or(LevelFilter::Info);
-
-        if filter_level == LevelFilter::Trace {
-            self.trace = true;
-        }
-
+    fn on_load(&mut self, _config_file: &str, _is_reload: bool) -> PluginResult<()> {
         env_logger::Builder::new()
-            .filter_level(filter_level)
+            .filter_level(LevelFilter::Debug)
             .format_timestamp_nanos()
             .target(Target::Stdout)
             .init();
 
-        debug!("on load");
-
-        let local_rpc_client = RpcClient::new(plugin_config.local_rpc_client.endpoint);
-        let remote_rpc_client = RpcClient::new(plugin_config.remote_rpc_client.endpoint);
-        let cursor = cursor_from_file(&plugin_config.cursor_file);
-        self.send_processed = plugin_config.send_processed;
-
-        let blk_file = match plugin_config.block_destination_file.as_str() {
-            "" => {
-                self.with_block = false;
-                None
-            }
-            _ => {
-                self.with_block = true;
-                Some(
-                    OpenOptions::new()
-                        .write(true)
-                        .open(plugin_config.block_destination_file)
-                        .expect("Failed to open FIFO for blocks"),
-                )
-            }
-        };
-
-        let acc_blk_file = match plugin_config.account_block_destination_file.as_str() {
-            "" => {
-                self.with_account = false;
-                None
-            }
-            _ => {
-                self.with_account = true;
-                Some(
-                    OpenOptions::new()
-                        .write(true)
-                        .open(plugin_config.account_block_destination_file)
-                        .expect("Failed to open FIFO for account_blocks"),
-                )
-            }
-        };
-        if self.with_account && self.with_block {
-            info!("processing blocks and accountBlocks...");
-        } else if self.with_account {
-            info!("processing accountBlocks only (no block)...");
-        } else if self.with_block {
-            info!("processing blocks only (no accountsBlocks)...");
-        } else {
-            info!("no processing enabled...");
-        }
-
-        let mut printer = BlockPrinter::new(blk_file, acc_blk_file, plugin_config.noop);
-        printer
-            .print_init("sf.solana.type.v1.Block", "sf.solana.type.v1.AccountBlock")
-            .expect("Failed to print init");
-
-        self.state = Some(RwLock::new(State::new(
-            local_rpc_client,
-            remote_rpc_client,
-            cursor,
-            plugin_config.cursor_file,
-            printer,
-        )));
-
-        info!("cursor: {:?}", cursor);
+        debug!("on load, dumb-printer-mode");
 
         Ok(())
     }
@@ -231,40 +161,32 @@ impl GeyserPlugin for Plugin {
         if !self.with_account {
             return Ok(());
         }
+
         match account {
             ReplicaAccountInfoVersions::V0_0_1(account) => {
-                self.set_account(
+                debug!(
+                    "update_account {} on slot {}, is_startup {} (noop)",
+                    hex::encode(account.pubkey),
                     slot,
-                    account.pubkey,
-                    account.data,
-                    account.owner,
-                    account.write_version,
-                    account.lamports == 0,
-                    is_startup,
+                    is_startup
                 );
             }
 
             ReplicaAccountInfoVersions::V0_0_2(account) => {
-                self.set_account(
+                debug!(
+                    "update_account {} on slot {}, is_startup {} (noop)",
+                    hex::encode(account.pubkey),
                     slot,
-                    account.pubkey,
-                    account.data,
-                    account.owner,
-                    account.write_version,
-                    account.lamports == 0,
-                    is_startup,
+                    is_startup
                 );
             }
 
             ReplicaAccountInfoVersions::V0_0_3(account) => {
-                self.set_account(
+                debug!(
+                    "update_account {} on slot {}, is_startup {} (noop)",
+                    hex::encode(account.pubkey),
                     slot,
-                    account.pubkey,
-                    account.data,
-                    account.owner,
-                    account.write_version,
-                    account.lamports == 0,
-                    is_startup,
+                    is_startup
                 );
             }
         }
@@ -273,94 +195,34 @@ impl GeyserPlugin for Plugin {
     }
 
     fn notify_end_of_startup(&self) -> PluginResult<()> {
-        info!(
-            "preloaded account data hash count: {}",
-            self.state
-                .as_ref()
-                .expect("cannot get state while getting hash count (state is None)")
-                .read()
-                .expect("cannot get state while getting hash count (poisoned)")
-                .get_hash_count()
-        );
-        info!("end of startup");
+        debug!("end of startup");
         Ok(())
     }
 
     fn update_slot_status(
         &self,
         slot: u64,
-        _parent: Option<u64>,
+        parent: Option<u64>,
         status: SlotStatus,
     ) -> PluginResult<()> {
-        if ACC_MUTEX.is_poisoned() || BLOCK_MUTEX.is_poisoned() {
-            panic!("poisoned mutex")
-        }
         match status {
-            SlotStatus::Processed => match self.send_processed {
-                true => {
-                    debug!(
-                        "slot processed {} (parent: {}) acting as confirmed",
-                        slot,
-                        _parent.unwrap_or_default()
-                    );
-                    let mut lock_state = self
-                        .state
-                        .as_ref()
-                        .expect("cannot get RW lock for update_slot_status (state is None)")
-                        .write()
-                        .expect("cannot get RW lock for update_slot_status (poisoned)");
-                    lock_state.set_confirmed_slot(slot);
-                    if lock_state.is_ready(slot) {
-                        if lock_state.process_upto(slot).is_err() {
-                            panic!("poisoned mutex")
-                        }
-                    }
-                }
-                false => {
-                    debug!(
-                        "slot processed {} (parent: {}) (noop)",
-                        slot,
-                        _parent.unwrap_or_default()
-                    );
-                }
-            },
+            SlotStatus::Processed => {
+                debug!(
+                    "slot processed {} (parent: {})",
+                    slot,
+                    parent.unwrap_or_default()
+                )
+            }
             SlotStatus::Rooted => {
                 debug!("slot rooted {}", slot);
-                self.state
-                    .as_ref()
-                    .expect("cannot get RW lock for set_lib (state is None)")
-                    .write()
-                    .expect("cannot get RW lock for set_lib (poisoned)")
-                    .set_lib(slot);
             }
-            SlotStatus::Confirmed => match self.send_processed {
-                true => {
-                    debug!(
-                        "slot confirmed {} (parent: {}) (noop)",
-                        slot,
-                        _parent.unwrap_or_default()
-                    );
-                }
-                false => {
-                    debug!(
-                        "slot confirmed {} (parent: {})",
-                        slot,
-                        _parent.unwrap_or_default()
-                    );
-                    let mut lock_state = self
-                        .state
-                        .as_ref()
-                        .expect("cannot get RW lock for set_confirmed_slot (state is None)")
-                        .write()
-                        .expect("cannot get RW lock for set_confirmed_slot (poisoned)");
-                    lock_state.set_confirmed_slot(slot);
-                    if lock_state.is_ready(slot) {
-                        if lock_state.process_upto(slot).is_err() {
-                            panic!("poisoned mutex")
-                        }
-                    }
-                }
-            },
+            SlotStatus::Confirmed => {
+                debug!(
+                    "slot confirmed {} (parent: {})",
+                    slot,
+                    parent.unwrap_or_default()
+                )
+            }
         }
 
         Ok(())
@@ -368,40 +230,10 @@ impl GeyserPlugin for Plugin {
 
     fn notify_transaction(
         &self,
-        transaction: ReplicaTransactionInfoVersions<'_>,
+        _transaction: ReplicaTransactionInfoVersions<'_>,
         slot: u64,
     ) -> PluginResult<()> {
-        if !self.with_block {
-            return Ok(());
-        }
-
-        let transaction = match transaction {
-            ReplicaTransactionInfoVersions::V0_0_1(_info) => {
-                unreachable!("ReplicaAccountInfoVersions::V0_0_1 is not supported")
-            }
-            ReplicaTransactionInfoVersions::V0_0_2(info) => info,
-        };
-
-        let compiled_transaction = to_confirm_transaction(&transaction);
-        let tx = ConfirmTransactionWithIndex {
-            index: transaction.index,
-            transaction: compiled_transaction,
-        };
-
-        let mut lock_state = self
-            .state
-            .as_ref()
-            .expect("cannot get RW lock for notify_transaction (state is None)")
-            .write()
-            .expect("cannot get RW lock for notify_transaction (poisoned)");
-
-        lock_state.set_transaction(slot, tx);
-        if lock_state.is_ready(slot) {
-            if lock_state.process_upto(slot).is_err() {
-                panic!("poisoned mutex")
-            }
-        }
-
+        debug!("transaction on slot {}", slot);
         Ok(())
     }
 
@@ -410,10 +242,6 @@ impl GeyserPlugin for Plugin {
     }
 
     fn notify_block_metadata(&self, block_info: ReplicaBlockInfoVersions<'_>) -> PluginResult<()> {
-        if ACC_MUTEX.is_poisoned() || BLOCK_MUTEX.is_poisoned() {
-            panic!("poisoned mutex")
-        }
-
         let block_info = match block_info {
             ReplicaBlockInfoVersions::V0_0_1(_) => {
                 panic!("V0_0_1 not supported");
@@ -451,35 +279,19 @@ impl GeyserPlugin for Plugin {
                 transaction_count: blockinfo.executed_transaction_count,
             },
         };
-        let slot = block_info.slot;
-
-        let mut lock_state = self
-            .state
-            .as_ref()
-            .expect("state is None while updating slot status")
-            .write()
-            .expect("rw mutex poisoned while updating slot status");
-
-        lock_state.set_block_info(block_info);
-
-        // if we get block_info for block 25, but we have 'confirmed blocks' 20 to 24, we'll fetch their block_info from RPC, which is a bit costly but prevents being stuck forever. This happens in rare cases, mostly upon startup
-        for slot in lock_state.ordered_confirmed_slots_upto(slot) {
-            if !lock_state.has_block_info(slot) {
-                lock_state.cache_block_from_rpc(slot);
-            }
-        }
-
-        if lock_state.is_ready(slot) {
-            if lock_state.process_upto(slot).is_err() {
-                panic!("poisoned mutex")
-            }
-        }
-
+        debug!(
+            "block metadata: slot: {}, blockhash: {}, parent: {}, timestamp: {}, tx count: {}",
+            block_info.slot,
+            block_info.block_hash,
+            block_info.parent_hash,
+            block_info.timestamp,
+            block_info.transaction_count
+        );
         Ok(())
     }
 
     fn account_data_notifications_enabled(&self) -> bool {
-        self.with_account
+        true
     }
 
     fn transaction_notifications_enabled(&self) -> bool {
