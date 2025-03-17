@@ -1307,6 +1307,7 @@ dependencies = [
  "anyhow",
  "base58",
  "bincode",
+ "bs58 0.5.1",
  "cargo-lock",
  "config",
  "crossbeam-channel",

@@ -1,13 +1,13 @@
 use agave_geyser_plugin_interface::geyser_plugin_interface::{
     ReplicaTransactionInfoV2, SlotStatus,
 };
+use bs58;
 use {
     crate::{config::Config as PluginConfig, state::BlockInfo, state::State},
     agave_geyser_plugin_interface::geyser_plugin_interface::{
         GeyserPlugin, ReplicaAccountInfoVersions, ReplicaBlockInfoVersions,
         ReplicaEntryInfoVersions, ReplicaTransactionInfoVersions, Result as PluginResult,
     },
-    gxhash::gxhash64,
     std::{concat, env, sync::RwLock},
 };
 
@@ -17,13 +17,9 @@ use crate::pb::sf::solana::r#type::v1::{
     Transaction, TransactionError, TransactionStatusMeta, UiTokenAmount,
 };
 
-use crate::state::{ACC_MUTEX, BLOCK_MUTEX};
 use crate::utils::convert_sol_timestamp;
 use env_logger::Target;
-use log::{debug, info, LevelFilter};
-use solana_rpc_client::rpc_client::RpcClient;
-
-use crate::block_printer::BlockPrinter;
+use log::{debug, LevelFilter};
 
 use solana_sdk::hash::Hash;
 use solana_sdk::message::v0::LoadedAddresses;
@@ -31,7 +27,6 @@ use solana_sdk::message::AccountKeys;
 use solana_sdk::transaction_context::TransactionReturnData;
 use std::fmt;
 use std::fs::OpenOptions;
-use std::str::FromStr;
 
 const SEED: i64 = 76;
 
@@ -43,10 +38,11 @@ pub struct ConfirmTransactionWithIndex {
 
 pub struct Plugin {
     state: Option<RwLock<State>>,
-    send_processed: bool,
-    trace: bool,
     with_block: bool,
     with_account: bool,
+    with_sampling: bool,
+    sampling_rate: u8,
+    print_startup: bool,
 }
 
 impl fmt::Debug for Plugin {
@@ -55,81 +51,21 @@ impl fmt::Debug for Plugin {
     }
 }
 
-fn cursor_from_file(cursor_file: &str) -> Option<u64> {
-    match std::fs::read_to_string(cursor_file) {
-        Ok(cursor) => {
-            let cursor = cursor.trim().parse::<u64>().ok();
-            cursor
-        }
-        Err(_) => None,
-    }
-}
+//const VOTE111111111111111111111111111111111111111: [u8; 32] = [
+//    0x07, 0x61, 0x48, 0x1d, 0x35, 0x74, 0x74, 0xbb, 0x7c, 0x4d, 0x76, 0x24, 0xeb, 0xd3, 0xbd, 0xb3,
+//    0xd8, 0x35, 0x5e, 0x73, 0xd1, 0x10, 0x43, 0xfc, 0x0d, 0xa3, 0x53, 0x80, 0x00, 0x00, 0x00, 0x00,
+//];
 
 impl Plugin {
-    pub fn new(send_processed: bool, trace: bool) -> Self {
+    pub fn new() -> Self {
         Plugin {
             state: None,
-            send_processed,
-            trace,
-            with_account: true, // in case account_data_notifications_enabled gets called before on_load
-            with_block: true, // in case transaction_notifications_enabled gets called before on_load
+            with_account: true,
+            with_block: true,
+            print_startup: false,
+            with_sampling: false,
+            sampling_rate: 0,
         }
-    }
-    const VOTE111111111111111111111111111111111111111: [u8; 32] = [
-        0x07, 0x61, 0x48, 0x1d, 0x35, 0x74, 0x74, 0xbb, 0x7c, 0x4d, 0x76, 0x24, 0xeb, 0xd3, 0xbd,
-        0xb3, 0xd8, 0x35, 0x5e, 0x73, 0xd1, 0x10, 0x43, 0xfc, 0x0d, 0xa3, 0x53, 0x80, 0x00, 0x00,
-        0x00, 0x00,
-    ];
-
-    fn set_account(
-        &self,
-        slot: u64,
-        pub_key: &[u8],
-        data: &[u8],
-        owner: &[u8],
-        write_version: u64,
-        deleted: bool,
-        is_startup: bool,
-    ) {
-        if owner == Self::VOTE111111111111111111111111111111111111111 {
-            return;
-        }
-
-        let mut lock_state = self
-            .state
-            .as_ref()
-            .expect("cannot get RW lock for set_account (state is None)")
-            .write()
-            .expect("cannot get RW lock for set_account (poisoned)");
-
-        if !is_startup && lock_state.should_skip_slot(slot) {
-            return;
-        }
-
-        let data_hash = if data.len() == 0 {
-            0
-        } else {
-            gxhash64(data, SEED)
-        };
-
-        if self.trace {
-            debug!(
-                "slot: {}, pub_key: {:?}, owner: {:?}, write_version: {}, deleted: {}, data_hash: {}, is_startup: {}",
-                slot, hex::encode(pub_key), hex::encode(owner), write_version, deleted, data_hash, is_startup
-            );
-        }
-
-        lock_state.set_account(
-            slot,
-            pub_key,
-            data,
-            owner,
-            write_version,
-            deleted,
-            is_startup,
-            data_hash,
-            self.trace,
-        );
     }
 }
 
@@ -138,14 +74,45 @@ impl GeyserPlugin for Plugin {
         concat!(env!("CARGO_PKG_NAME"), "-", env!("CARGO_PKG_VERSION"))
     }
 
-    fn on_load(&mut self, _config_file: &str, _is_reload: bool) -> PluginResult<()> {
+    fn on_load(&mut self, config_file: &str, _is_reload: bool) -> PluginResult<()> {
         env_logger::Builder::new()
             .filter_level(LevelFilter::Debug)
             .format_timestamp_nanos()
             .target(Target::Stdout)
             .init();
 
-        debug!("on load, dumb-printer-mode");
+        let plugin_config = PluginConfig::load_from_file(config_file)?;
+
+        // Open output file for writing
+        debug!(
+            "Opening output file for writing: {}",
+            plugin_config.output_file
+        );
+        match OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&plugin_config.output_file)
+        {
+            Ok(f) => {
+                debug!(
+                    "Successfully opened output file: {}",
+                    plugin_config.output_file
+                );
+
+                self.state = Some(RwLock::new(State::new(f)));
+            }
+            Err(e) => return Err(e.into()),
+        }
+
+        self.print_startup = plugin_config.print_startup;
+        self.with_sampling = plugin_config.sampling_rate > 0;
+        self.sampling_rate = (255u32 * plugin_config.sampling_rate as u32 / 100u32) as u8;
+
+        debug!(
+            "on load, dumb-printer-mode, sampling: {}",
+            self.sampling_rate
+        );
 
         Ok(())
     }
@@ -161,33 +128,90 @@ impl GeyserPlugin for Plugin {
         if !self.with_account {
             return Ok(());
         }
+        if is_startup && !self.print_startup {
+            return Ok(());
+        }
+
+        let mut state_rw = self
+            .state
+            .as_ref()
+            .expect("cannot get RW lock for update_account (state is None)")
+            .write()
+            .expect("cannot get RW lock for update_account (poisoned)");
 
         match account {
             ReplicaAccountInfoVersions::V0_0_1(account) => {
-                debug!(
-                    "update_account {} on slot {}, is_startup {} (noop)",
-                    hex::encode(account.pubkey),
-                    slot,
-                    is_startup
-                );
+                if self.with_sampling {
+                    // Basic hash of the pubkey to help with sampling
+                    let hash_value: u8 = account
+                        .pubkey
+                        .iter()
+                        .fold(SEED as u8, |acc, &x| acc.wrapping_add(x));
+                    if hash_value > self.sampling_rate {
+                        return Ok(());
+                    }
+                }
+
+                let pubkey_as_base58 = bs58::encode(&account.pubkey).into_string();
+                state_rw
+                    .write(format!(
+                        "a:{}:{}:{}{}",
+                        slot,
+                        &pubkey_as_base58,
+                        if is_startup { ":s" } else { "" },
+                        account.data.len(),
+                    ))
+                    .unwrap();
             }
 
             ReplicaAccountInfoVersions::V0_0_2(account) => {
-                debug!(
-                    "update_account {} on slot {}, is_startup {} (noop)",
-                    hex::encode(account.pubkey),
-                    slot,
-                    is_startup
-                );
+                if self.with_sampling {
+                    // Basic hash of the pubkey to help with sampling
+                    let hash_value: u8 = account
+                        .pubkey
+                        .iter()
+                        .fold(SEED as u8, |acc, &x| acc.wrapping_add(x));
+                    if hash_value > self.sampling_rate {
+                        return Ok(());
+                    }
+                }
+
+                let pubkey_as_base58 = bs58::encode(&account.pubkey).into_string();
+
+                state_rw
+                    .write(format!(
+                        "a:{}:{}:{}{}",
+                        slot,
+                        &pubkey_as_base58,
+                        if is_startup { ":s" } else { "" },
+                        account.data.len(),
+                    ))
+                    .unwrap();
             }
 
             ReplicaAccountInfoVersions::V0_0_3(account) => {
-                debug!(
-                    "update_account {} on slot {}, is_startup {} (noop)",
-                    hex::encode(account.pubkey),
-                    slot,
-                    is_startup
-                );
+                if self.with_sampling {
+                    // Basic hash of the pubkey to help with sampling
+                    let hash_value: u8 = account
+                        .pubkey
+                        .iter()
+                        .fold(SEED as u8, |acc, &x| acc.wrapping_add(x));
+                    if hash_value > self.sampling_rate {
+                        return Ok(());
+                    }
+                }
+
+                let pubkey_as_base58 = bs58::encode(&account.pubkey).into_string();
+
+                state_rw
+                    .write(format!(
+                        "a:{}:{}:{}{}",
+                        slot,
+                        &pubkey_as_base58,
+                        if is_startup { ":s" } else { "" },
+                        account.data.len(),
+                    ))
+                    .unwrap();
             }
         }
 
@@ -202,29 +226,28 @@ impl GeyserPlugin for Plugin {
     fn update_slot_status(
         &self,
         slot: u64,
-        parent: Option<u64>,
+        _parent: Option<u64>,
         status: SlotStatus,
     ) -> PluginResult<()> {
+        let mut state_rw = self
+            .state
+            .as_ref()
+            .expect("cannot get RW lock for update_account (state is None)")
+            .write()
+            .expect("cannot get RW lock for update_account (poisoned)");
+
         match status {
             SlotStatus::Processed => {
-                debug!(
-                    "slot processed {} (parent: {})",
-                    slot,
-                    parent.unwrap_or_default()
-                )
+                state_rw.write(format!("s:{}:p", slot,)).unwrap();
             }
+
             SlotStatus::Rooted => {
-                debug!("slot rooted {}", slot);
+                state_rw.write(format!("s:{}:r", slot,)).unwrap();
             }
             SlotStatus::Confirmed => {
-                debug!(
-                    "slot confirmed {} (parent: {})",
-                    slot,
-                    parent.unwrap_or_default()
-                )
+                state_rw.write(format!("s:{}:c", slot,)).unwrap();
             }
         }
-
         Ok(())
     }
 
@@ -233,7 +256,15 @@ impl GeyserPlugin for Plugin {
         _transaction: ReplicaTransactionInfoVersions<'_>,
         slot: u64,
     ) -> PluginResult<()> {
-        debug!("transaction on slot {}", slot);
+        if self.with_block {
+            self.state
+                .as_ref()
+                .expect("cannot get RW lock for update_account (state is None)")
+                .write()
+                .expect("cannot get RW lock for update_account (poisoned)")
+                .write(format!("t:{}", slot))
+                .unwrap();
+        }
         Ok(())
     }
 
@@ -279,14 +310,29 @@ impl GeyserPlugin for Plugin {
                 transaction_count: blockinfo.executed_transaction_count,
             },
         };
-        debug!(
-            "block metadata: slot: {}, blockhash: {}, parent: {}, timestamp: {}, tx count: {}",
-            block_info.slot,
-            block_info.block_hash,
-            block_info.parent_hash,
-            block_info.timestamp,
-            block_info.transaction_count
-        );
+
+        self.state
+            .as_ref()
+            .expect("cannot get RW lock for update_account (state is None)")
+            .write()
+            .expect("cannot get RW lock for update_account (poisoned)")
+            .write(format!(
+                "b:{}:{}:{}:{}",
+                block_info.slot,
+                if block_info.block_hash.len() >= 8 {
+                    &block_info.block_hash[0..8]
+                } else {
+                    &block_info.block_hash
+                },
+                if block_info.parent_hash.len() >= 8 {
+                    &block_info.parent_hash[0..8]
+                } else {
+                    &block_info.parent_hash
+                },
+                block_info.transaction_count,
+            ))
+            .unwrap();
+
         Ok(())
     }
 
@@ -353,7 +399,7 @@ pub fn to_block_rewards(rewards: &Option<solana_transaction_status::Rewards>) ->
 ///
 /// This function returns the Plugin pointer as trait GeyserPlugin.
 pub unsafe extern "C" fn _create_plugin() -> *mut dyn GeyserPlugin {
-    let plugin = Plugin::new(false, false);
+    let plugin = Plugin::new();
     let plugin: Box<dyn GeyserPlugin> = Box::new(plugin);
     Box::into_raw(plugin)
 }
