@@ -227,7 +227,7 @@ impl GeyserPlugin for Plugin {
         &self,
         slot: u64,
         _parent: Option<u64>,
-        status: SlotStatus,
+        status: &SlotStatus,
     ) -> PluginResult<()> {
         let mut state_rw = self
             .state
@@ -246,6 +246,18 @@ impl GeyserPlugin for Plugin {
             }
             SlotStatus::Confirmed => {
                 state_rw.write(format!("s:{}:c", slot,)).unwrap();
+            }
+            SlotStatus::Completed => {
+                state_rw.write(format!("s:{}:d", slot,)).unwrap();
+            }
+            SlotStatus::FirstShredReceived => {
+                state_rw.write(format!("s:{}:f", slot,)).unwrap();
+            }
+            SlotStatus::Dead(_) => {
+                state_rw.write(format!("s:{}:x", slot,)).unwrap();
+            }
+            SlotStatus::CreatedBank => {
+                state_rw.write(format!("s:{}:b", slot,)).unwrap();
             }
         }
         Ok(())
