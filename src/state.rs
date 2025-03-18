@@ -71,6 +71,8 @@ pub struct State {
     block_infos: BlockInfoMap,
     confirmed_slots: ConfirmedSlotsMap,
 
+    with_block: bool,
+    //with_account: bool,
     transactions: Transactions,
     processed_slots: ProcessedSlot,
 
@@ -87,6 +89,7 @@ impl State {
         cursor: Option<u64>,
         cursor_path: String,
         block_printer: BlockPrinter,
+        with_block: bool,
     ) -> Self {
         State {
             cursor,
@@ -108,6 +111,7 @@ impl State {
             remote_rpc_client: Some(remote_rpc_client),
             cursor_path,
             block_printer,
+            with_block,
         }
     }
 
@@ -283,6 +287,9 @@ impl State {
         match self.block_infos.get(&slot) {
             None => return false,
             Some(blk) => {
+                if !self.with_block {
+                    return true; // if we only track account changes, we don't need to count the transactions
+                }
                 if let Some(trxs) = self.transactions.get(&slot) {
                     if blk.transaction_count == trxs.len() as u64 {
                         return true;
@@ -298,6 +305,9 @@ impl State {
                         }
                     };
                 } else {
+                    if blk.transaction_count == 0 {
+                        return true;
+                    }
                     debug!(
                         "slot {} has no transactions, but is confirmed, waiting for transactions",
                         slot
@@ -628,6 +638,7 @@ mod tests {
             None,
             "test_cursor_file".to_string(),
             BlockPrinter::new(None, None, false),
+            true,
         );
 
         // Test case 1: No lib set yet
@@ -645,6 +656,7 @@ mod tests {
             Some(110),
             "test_cursor_file".to_string(),
             BlockPrinter::new(None, None, false),
+            true,
         );
 
         state_with_cursor.set_block_info(block_info.clone());
@@ -659,6 +671,7 @@ mod tests {
             Some(90),
             "test_cursor_file".to_string(),
             BlockPrinter::new(None, None, false),
+            true,
         );
 
         state_with_cursor.set_block_info(block_info.clone());
@@ -682,6 +695,7 @@ mod tests {
             None,
             "test_cursor.txt".to_string(),
             BlockPrinter::new(None, None, false),
+            true,
         );
 
         // Setup initial state
