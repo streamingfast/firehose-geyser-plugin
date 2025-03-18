@@ -20,7 +20,7 @@ use crate::pb::sf::solana::r#type::v1::{
 use crate::state::{ACC_MUTEX, BLOCK_MUTEX};
 use crate::utils::convert_sol_timestamp;
 use env_logger::Target;
-use log::{debug, info, LevelFilter};
+use log::{debug, error, info, LevelFilter};
 use solana_rpc_client::rpc_client::RpcClient;
 
 use crate::block_printer::BlockPrinter;
@@ -168,12 +168,17 @@ impl GeyserPlugin for Plugin {
             }
             _ => {
                 self.with_block = true;
-                Some(
-                    OpenOptions::new()
-                        .write(true)
-                        .open(plugin_config.block_destination_file)
-                        .expect("Failed to open FIFO for blocks"),
-                )
+
+                match OpenOptions::new()
+                    .write(true)
+                    .open(plugin_config.block_destination_file)
+                {
+                    Ok(file) => Some(file),
+                    Err(err) => {
+                        error!("error opening block fifo: {}", err);
+                        return Err(err.into());
+                    }
+                }
             }
         };
 
@@ -184,14 +189,20 @@ impl GeyserPlugin for Plugin {
             }
             _ => {
                 self.with_account = true;
-                Some(
-                    OpenOptions::new()
-                        .write(true)
-                        .open(plugin_config.account_block_destination_file)
-                        .expect("Failed to open FIFO for account_blocks"),
-                )
+
+                match OpenOptions::new()
+                    .write(true)
+                    .open(plugin_config.account_block_destination_file)
+                {
+                    Ok(file) => Some(file),
+                    Err(err) => {
+                        error!("error opening account block fifo: {}", err);
+                        return Err(err.into());
+                    }
+                }
             }
         };
+
         if self.with_account && self.with_block {
             info!("processing blocks and accountBlocks...");
         } else if self.with_account {
@@ -203,9 +214,12 @@ impl GeyserPlugin for Plugin {
         }
 
         let mut printer = BlockPrinter::new(blk_file, acc_blk_file, plugin_config.noop);
-        printer
-            .print_init("sf.solana.type.v1.Block", "sf.solana.type.v1.AccountBlock")
-            .expect("Failed to print init");
+        if let Err(err) =
+            printer.print_init("sf.solana.type.v1.Block", "sf.solana.type.v1.AccountBlock")
+        {
+            error!("error printing block types to fifos: {}", err);
+            return Err(err.into());
+        }
 
         self.state = Some(RwLock::new(State::new(
             local_rpc_client,
@@ -213,6 +227,7 @@ impl GeyserPlugin for Plugin {
             cursor,
             plugin_config.cursor_file,
             printer,
+            self.with_block,
         )));
 
         info!("cursor: {:?}", cursor);

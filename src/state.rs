@@ -73,6 +73,8 @@ pub struct State {
     block_infos: BlockInfoMap,
     confirmed_slots: ConfirmedSlotsMap,
 
+    with_block: bool,
+    //with_account: bool,
     transactions: Transactions,
     processed_slots: ProcessedSlot,
 
@@ -89,6 +91,7 @@ impl State {
         cursor: Option<u64>,
         cursor_path: String,
         block_printer: BlockPrinter,
+        with_block: bool,
     ) -> Self {
         State {
             cursor,
@@ -111,6 +114,7 @@ impl State {
             remote_rpc_client: Some(remote_rpc_client),
             cursor_path,
             block_printer,
+            with_block,
         }
     }
 
@@ -286,6 +290,9 @@ impl State {
         match self.block_infos.get(&slot) {
             None => false,
             Some(blk) => {
+                if !self.with_block {
+                    return true; // if we only track account changes, we don't need to count the transactions
+                }
                 if let Some(trxs) = self.transactions.get(&slot) {
                     if blk.transaction_count == trxs.len() as u64 {
                         true
@@ -301,6 +308,9 @@ impl State {
                         }
                     }
                 } else {
+                    if blk.transaction_count == 0 {
+                        return true;
+                    }
                     debug!(
                         "slot {} has no transactions, but is confirmed, waiting for transactions",
                         slot
@@ -423,8 +433,7 @@ impl State {
             // is recreated will emit a account change with 'owner' set to system contract and `new_owner` to contract creating the account.
             // But in the case a account is recreated we want the owner to be set to the contract address creating the account.
             self.account_owners.remove(&address);
-        }
-        else {
+        } else {
             self.account_owners.insert(pub_key.to_vec(), owner.to_vec());
         }
 
@@ -652,7 +661,14 @@ mod tests {
 
         // Initialize state with no lib and no first_received_blockmeta
 
-        let mut state = test_state(test_url.clone(), test_url.clone(), None);
+        let mut state = State::new(
+            RpcClient::new(test_url.clone()),
+            RpcClient::new(test_url.clone()),
+            None,
+            "test_cursor_file".to_string(),
+            BlockPrinter::new(None, None, false),
+            true,
+        );
 
         // Test case 1: No lib set yet
         let block_info = test_block_info(100, 99);
@@ -663,7 +679,14 @@ mod tests {
         assert_eq!(state.first_block_to_process, Some(100));
 
         // Test case 2: With cursor set, lib is before cursor
-        let mut state_with_cursor = test_state(test_url.clone(), test_url.clone(), Some(110));
+        let mut state_with_cursor = State::new(
+            RpcClient::new(test_url.clone()),
+            RpcClient::new(test_url.clone()),
+            Some(110),
+            "test_cursor_file".to_string(),
+            BlockPrinter::new(None, None, false),
+            true,
+        );
 
         state_with_cursor.set_block_info(block_info.clone());
         assert_eq!(state_with_cursor.first_received_blockmeta, Some(100));
@@ -671,7 +694,14 @@ mod tests {
         assert_eq!(state_with_cursor.cursor, Some(110));
 
         // Test case 3: With cursor set, lib is greater than cursor which will get cancelled
-        let mut state_with_cursor = test_state(test_url.clone(), test_url.clone(), Some(90));
+        let mut state_with_cursor = State::new(
+            RpcClient::new(test_url.clone()),
+            RpcClient::new(test_url.clone()),
+            Some(90),
+            "test_cursor_file".to_string(),
+            BlockPrinter::new(None, None, false),
+            true,
+        );
 
         state_with_cursor.set_block_info(block_info.clone());
         assert_eq!(state_with_cursor.first_received_blockmeta, Some(100));
@@ -688,7 +718,14 @@ mod tests {
 
     #[test]
     fn test_add_missing_slots_to_confirmed_slots() {
-        let mut state = test_state_no_rpc(None);
+        let mut state = State::new(
+            RpcClient::new("http://test.local"),
+            RpcClient::new("http://test.remote"),
+            None,
+            "test_cursor.txt".to_string(),
+            BlockPrinter::new(None, None, false),
+            true,
+        );
 
         // Setup initial state
         state.initialized = true;
@@ -781,13 +818,16 @@ mod tests {
             .unwrap();
 
         // let system_address = std::str::from_utf8(SYSTEM_KEY).unwrap();
-        let new_owner = deleted_account_with_version.account.new_owner.as_ref().unwrap();
+        let new_owner = deleted_account_with_version
+            .account
+            .new_owner
+            .as_ref()
+            .unwrap();
         let owner = &deleted_account_with_version.account.owner;
 
         assert_eq!(SYSTEM_KEY, new_owner);
         assert_eq!(OWNER_KEY_1, owner);
         assert_eq!(true, deleted_account_with_version.account.deleted);
-
 
         let recreated_at_slot_num: u64 = 102;
 
@@ -805,7 +845,6 @@ mod tests {
         assert_eq!(None, new_owner);
         assert_eq!(OWNER_KEY_1, owner);
         assert_eq!(false, recreated_account_with_version.account.deleted);
-
     }
 
     #[test]
@@ -907,6 +946,7 @@ mod tests {
             cursor,
             "test_cursor.txt".to_string(),
             BlockPrinter::new(None, None, false),
+            true,
         )
     }
 }
