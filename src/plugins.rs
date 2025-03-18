@@ -290,7 +290,7 @@ impl GeyserPlugin for Plugin {
         &self,
         slot: u64,
         _parent: Option<u64>,
-        status: SlotStatus,
+        status: &SlotStatus,
     ) -> PluginResult<()> {
         if ACC_MUTEX.is_poisoned() || BLOCK_MUTEX.is_poisoned() {
             panic!("poisoned mutex")
@@ -333,6 +333,10 @@ impl GeyserPlugin for Plugin {
                     .expect("cannot get RW lock for set_lib (poisoned)")
                     .set_lib(slot);
             }
+            SlotStatus::Completed => {}
+            SlotStatus::FirstShredReceived => {}
+            SlotStatus::Dead(_) => {}
+            SlotStatus::CreatedBank => {}
             SlotStatus::Confirmed => match self.send_processed {
                 true => {
                     debug!(
