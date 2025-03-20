@@ -390,12 +390,13 @@ impl State {
                 }
                 return; // skipping older write_versions
             }
-            // skip if the data is the same and the account is not deleted
-            if !deleted {
-                if let Some(h) = self.account_data_hash.get(&owner_account_key) {
-                    if *h == data_hash {
-                        return; // skipping same data
-                    }
+        }
+
+        // skip if the data is the same and the account is not deleted
+        if !deleted {
+            if let Some(h) = self.account_data_hash.get(&owner_account_key) {
+                if *h == data_hash {
+                    return; // skipping same data
                 }
             }
         }
@@ -431,7 +432,7 @@ impl State {
             account: pb_account,
             write_version,
         };
-        self.account_data_hash.insert(pub_key.to_vec(), data_hash);
+        self.account_data_hash.insert(owner_account_key.to_vec(), data_hash);
 
         if deleted {
             // That account will end up being remove from the chain since there is no more lamport to pay the rent.
