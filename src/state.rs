@@ -373,15 +373,11 @@ impl State {
             .block_account_changes
             .entry(slot)
             .or_insert_with(HashMap::new);
-
-        let address = pub_key.to_vec();
-
-        let current_owner = match self.account_owners.get(&address) {
-            None => owner,
-            Some(known_owner) => known_owner,
-        };
-
-        if let Some(prev) = slot_entries.get(&address) {
+        
+        //create a unique key from owner and account addresses
+        let  owner_account_key = [owner, pub_key].concat();
+        
+        if let Some(prev) = slot_entries.get(&owner_account_key) {
             if prev.write_version > write_version {
                 if trace {
                     debug!(
@@ -393,7 +389,7 @@ impl State {
             }
             // skip if the data is the same and the account is not deleted
             if !deleted {
-                if let Some(h) = self.account_data_hash.get(&address) {
+                if let Some(h) = self.account_data_hash.get(&owner_account_key) {
                     if *h == data_hash {
                         return; // skipping same data
                     }
@@ -401,43 +397,47 @@ impl State {
             }
         }
 
-        let mut new_owner = None;
-        if current_owner != owner {
-            new_owner = Some(owner.to_vec());
+        //check for ownership change
+        if let Some(found_owner) = self.account_owners.get(pub_key).cloned() {
+            if found_owner != owner {
+                // this is an ownership change ... emitting a account change to the prev owner
+                self.handle_account_change(pub_key, data, owner, write_version, deleted, data_hash, slot, &found_owner);
+            }
         }
+
+        self.handle_account_change(pub_key, data, owner, write_version, deleted, data_hash, slot, &owner.to_vec());
+    }
+
+    fn handle_account_change(&mut self, pub_key: &[u8], data: &[u8], owner: &[u8], write_version: u64, deleted: bool, data_hash: u64, slot: u64, found_owner: &Vec<u8>) {
+        let slot_entries = self
+            .block_account_changes
+            .entry(slot)
+            .or_insert_with(HashMap::new);
 
         let pb_account = Account {
             address: pub_key.to_vec(),
             data: data.to_vec(),
-            owner: current_owner.to_vec(),
+            owner: found_owner.to_vec(),
             deleted,
-            new_owner,
         };
-
+        let owner_account_key = [found_owner, pub_key].concat();
         let awv = AccountWithWriteVersion {
             account: pb_account,
             write_version,
         };
-
-        if trace {
-            debug!(
-                "inserting slot: {}, pub_key: {:?}, owner: {:?}, write_version: {}, deleted: {}, data_hash: {}",
-                slot, hex::encode(pub_key), hex::encode(owner), write_version, deleted, data_hash
-            );
-        }
-
         self.account_data_hash.insert(pub_key.to_vec(), data_hash);
+
         if deleted {
             // That account will end up being remove from the chain since there is no more lamport to pay the rent.
             // Best practice is to change the owner of an account to the system contract. If we keep track of this change and the account
             // is recreated will emit a account change with 'owner' set to system contract and `new_owner` to contract creating the account.
             // But in the case a account is recreated we want the owner to be set to the contract address creating the account.
-            self.account_owners.remove(&address);
+            self.account_owners.remove(&owner_account_key);
         } else {
             self.account_owners.insert(pub_key.to_vec(), owner.to_vec());
         }
 
-        slot_entries.insert(address, awv);
+        slot_entries.insert(owner_account_key, awv);
     }
 
     pub fn set_transaction(&mut self, slot: u64, transaction: ConfirmTransactionWithIndex) {
@@ -556,7 +556,8 @@ impl State {
                 }
             }
 
-            let account_changes = self.get_account_changes(slot);
+            
+            let account_changes = self.block_account_changes.get(&slot);
             let acc_block = create_account_block(
                 account_changes.unwrap_or(&AccountChanges::default()),
                 &block_info,
@@ -745,142 +746,6 @@ mod tests {
         assert!(state.confirmed_slots.get(&2).is_some());
         assert!(state.confirmed_slots.get(&4).is_some());
         assert!(state.confirmed_slots.get(&6).is_some());
-    }
-
-    #[test]
-    fn test_set_account_delete_account() {
-        let mut state = test_state_no_rpc(None);
-
-        apply_account_changes(
-            &mut state,
-            vec![
-                SetAccountData {
-                    slot: 100,
-                    ..Default::default()
-                },
-                SetAccountData {
-                    slot: 101,
-                    owner: SYSTEM_KEY,
-                    deleted: true,
-                    ..Default::default()
-                },
-            ]
-            .as_ref(),
-        );
-
-        let slot_num: u64 = 101;
-
-        let account_with_version = state
-            .block_account_changes
-            .get(&slot_num)
-            .unwrap()
-            .get(PUB_KEY_1)
-            .unwrap();
-
-        // let system_address = std::str::from_utf8(SYSTEM_KEY).unwrap();
-        let new_owner = account_with_version.account.new_owner.as_ref().unwrap();
-
-        assert_eq!(SYSTEM_KEY, new_owner);
-        assert_eq!(true, account_with_version.account.deleted);
-    }
-    #[test]
-    fn test_set_account_delete_recreate_account() {
-        let mut state = test_state_no_rpc(None);
-
-        apply_account_changes(
-            &mut state,
-            vec![
-                SetAccountData {
-                    slot: 100,
-                    ..Default::default()
-                },
-                SetAccountData {
-                    slot: 101,
-                    owner: SYSTEM_KEY,
-                    deleted: true,
-                    ..Default::default()
-                },
-                SetAccountData {
-                    slot: 102,
-                    ..Default::default()
-                },
-            ]
-            .as_ref(),
-        );
-
-        let deleted_at_slot_num: u64 = 101;
-
-        let deleted_account_with_version = state
-            .block_account_changes
-            .get(&deleted_at_slot_num)
-            .unwrap()
-            .get(PUB_KEY_1)
-            .unwrap();
-
-        // let system_address = std::str::from_utf8(SYSTEM_KEY).unwrap();
-        let new_owner = deleted_account_with_version
-            .account
-            .new_owner
-            .as_ref()
-            .unwrap();
-        let owner = &deleted_account_with_version.account.owner;
-
-        assert_eq!(SYSTEM_KEY, new_owner);
-        assert_eq!(OWNER_KEY_1, owner);
-        assert_eq!(true, deleted_account_with_version.account.deleted);
-
-        let recreated_at_slot_num: u64 = 102;
-
-        let recreated_account_with_version = state
-            .block_account_changes
-            .get(&recreated_at_slot_num)
-            .unwrap()
-            .get(PUB_KEY_1)
-            .unwrap();
-
-        // let system_address = std::str::from_utf8(SYSTEM_KEY).unwrap();
-        let new_owner = recreated_account_with_version.account.new_owner.as_ref();
-        let owner = &recreated_account_with_version.account.owner;
-
-        assert_eq!(None, new_owner);
-        assert_eq!(OWNER_KEY_1, owner);
-        assert_eq!(false, recreated_account_with_version.account.deleted);
-    }
-
-    #[test]
-    fn test_set_account_owner_change() {
-        let mut state = test_state_no_rpc(None);
-
-        apply_account_changes(
-            &mut state,
-            vec![
-                SetAccountData {
-                    slot: 100,
-                    ..Default::default()
-                },
-                SetAccountData {
-                    slot: 101,
-                    owner: SYSTEM_KEY,
-                    ..Default::default()
-                },
-            ]
-            .as_ref(),
-        );
-
-        let slot_num: u64 = 101;
-
-        let account_with_version = state
-            .block_account_changes
-            .get(&slot_num)
-            .unwrap()
-            .get(PUB_KEY_1)
-            .unwrap();
-
-        // let system_address = std::str::from_utf8(SYSTEM_KEY).unwrap();
-        let new_owner = account_with_version.account.new_owner.as_ref().unwrap();
-
-        assert_eq!(SYSTEM_KEY, new_owner);
-        assert_eq!(false, account_with_version.account.deleted);
     }
 
     const PUB_KEY_1: &[u8] = b"pubkey.1".as_slice();
