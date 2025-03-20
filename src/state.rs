@@ -373,10 +373,10 @@ impl State {
             .block_account_changes
             .entry(slot)
             .or_insert_with(HashMap::new);
-        
+
         //create a unique key from owner and account addresses
         let  owner_account_key = [owner, pub_key].concat();
-        
+
         if let Some(prev) = slot_entries.get(&owner_account_key) {
             if prev.write_version > write_version {
                 if trace {
@@ -400,15 +400,16 @@ impl State {
         //check for ownership change
         if let Some(found_owner) = self.account_owners.get(pub_key).cloned() {
             if found_owner != owner {
-                // this is an ownership change ... emitting a account change to the prev owner
-                self.handle_account_change(pub_key, data, owner, write_version, deleted, data_hash, slot, &found_owner);
+                // this is an ownership change ... emitting an account change to the prev owner
+                self.handle_account_change(pub_key, data, &found_owner, write_version, deleted, data_hash, slot);
             }
         }
 
-        self.handle_account_change(pub_key, data, owner, write_version, deleted, data_hash, slot, &owner.to_vec());
+        self.handle_account_change(pub_key, data, owner, write_version, deleted, data_hash, slot);
     }
 
-    fn handle_account_change(&mut self, pub_key: &[u8], data: &[u8], owner: &[u8], write_version: u64, deleted: bool, data_hash: u64, slot: u64, found_owner: &Vec<u8>) {
+    fn handle_account_change(&mut self, pub_key: &[u8], data: &[u8], owner: &[u8], write_version: u64, deleted: bool, data_hash: u64, slot: u64) {
+        debug!("handle_account_change: account {:?} owner: {:?} delete: {:?} version: {:?}", pub_key, owner, deleted, write_version);
         let slot_entries = self
             .block_account_changes
             .entry(slot)
@@ -417,10 +418,10 @@ impl State {
         let pb_account = Account {
             address: pub_key.to_vec(),
             data: data.to_vec(),
-            owner: found_owner.to_vec(),
+            owner: owner.to_vec(),
             deleted,
         };
-        let owner_account_key = [found_owner, pub_key].concat();
+        let owner_account_key = [owner, pub_key].concat();
         let awv = AccountWithWriteVersion {
             account: pb_account,
             write_version,
@@ -556,7 +557,7 @@ impl State {
                 }
             }
 
-            
+
             let account_changes = self.block_account_changes.get(&slot);
             let acc_block = create_account_block(
                 account_changes.unwrap_or(&AccountChanges::default()),

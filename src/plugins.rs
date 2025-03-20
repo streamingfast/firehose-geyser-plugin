@@ -135,10 +135,15 @@ impl Plugin {
 
 impl GeyserPlugin for Plugin {
     fn name(&self) -> &'static str {
-        concat!(env!("CARGO_PKG_NAME"), "-", env!("CARGO_PKG_VERSION"))
+        println!("Grrrr: name called");
+        let n = concat!(env!("CARGO_PKG_NAME"), "-", env!("CARGO_PKG_VERSION"));
+        info!("name called: returning {}", n);
+        n
     }
 
     fn on_load(&mut self, config_file: &str, _is_reload: bool) -> PluginResult<()> {
+        println!("Grrrr: on_load called");
+        info!("on load called with config_file: {}", config_file);
         let plugin_config = PluginConfig::load_from_file(config_file)?;
 
         let filter_level =
@@ -560,8 +565,10 @@ pub fn to_block_rewards(rewards: &Option<solana_transaction_status::Rewards>) ->
 ///
 /// This function returns the Plugin pointer as trait GeyserPlugin.
 pub unsafe extern "C" fn _create_plugin() -> *mut dyn GeyserPlugin {
+    println!("creating plugin");
     let plugin = Plugin::new(false, false);
     let plugin: Box<dyn GeyserPlugin> = Box::new(plugin);
+    println!("plugin created");
     Box::into_raw(plugin)
 }
 
