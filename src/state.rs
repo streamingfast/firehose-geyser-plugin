@@ -20,8 +20,11 @@ type ConfirmedSlotsMap = HashMap<u64, bool>;
 use crate::pb::sf::solana::r#type::v1::{Block, BlockHeight, Reward, UnixTimestamp};
 use crate::plugins::{to_block_rewards, ConfirmTransactionWithIndex};
 use log::{debug, error, info, warn};
+use solana_program::pubkey;
 use solana_rpc_client_api::config::RpcBlockConfig;
+use solana_sdk::bs58;
 use solana_sdk::commitment_config::CommitmentConfig;
+use solana_sdk::pubkey::Pubkey;
 use solana_transaction_status::TransactionDetails;
 
 pub struct AccountWithWriteVersion {
@@ -409,7 +412,9 @@ impl State {
     }
 
     fn handle_account_change(&mut self, pub_key: &[u8], data: &[u8], owner: &[u8], write_version: u64, deleted: bool, data_hash: u64, slot: u64) {
-        debug!("handle_account_change: account {:?} owner: {:?} delete: {:?} version: {:?}", pub_key, owner, deleted, write_version);
+        let data_as_hex = hex::encode(&data[..10.min(data.len())]); // Ensure we handle cases where data has fewer than 10 bytes
+
+        debug!("handle_account_change@{}: account {:?} owner: {:?} delete: {:?} version: {:?} Data Size: {} Data: {}", slot, bs58::encode(pub_key).into_string(), bs58::encode(owner).into_string(), deleted, write_version, data.len(),data_as_hex);
         let slot_entries = self
             .block_account_changes
             .entry(slot)
