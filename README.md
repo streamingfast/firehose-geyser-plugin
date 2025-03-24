@@ -7,6 +7,8 @@ This plugin prints "blocks" and "account-blocks" into two different linux named 
 
 ## Build the plugin
 
+# MAKE SURE THAT BOTH BATTLEFIELD PROGRAM and VALIDATOR are compile using the same toolchain.
+
 * From the linux machine that will run agave-validator:
 
 ```
