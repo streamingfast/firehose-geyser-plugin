@@ -1,11 +1,11 @@
 use crate::block_printer::BlockPrinter;
 use crate::pb;
 use crate::utils::{convert_sol_timestamp, create_account_block};
+use hashbrown::HashMap;
 use lazy_static::lazy_static;
 use pb::sf::solana::r#type::v1::Account;
 use prost_types::Timestamp;
 use solana_rpc_client::rpc_client::RpcClient;
-use std::collections::HashMap;
 
 type BlockAccountChanges = HashMap<u64, AccountChanges>;
 pub type AccountChanges = HashMap<Vec<u8>, AccountWithWriteVersion>;
@@ -20,11 +20,9 @@ type ConfirmedSlotsMap = HashMap<u64, bool>;
 use crate::pb::sf::solana::r#type::v1::{Block, BlockHeight, Reward, UnixTimestamp};
 use crate::plugins::{to_block_rewards, ConfirmTransactionWithIndex};
 use log::{debug, error, info, warn};
-use solana_program::pubkey;
 use solana_rpc_client_api::config::RpcBlockConfig;
 use solana_sdk::bs58;
 use solana_sdk::commitment_config::CommitmentConfig;
-use solana_sdk::pubkey::Pubkey;
 use solana_transaction_status::TransactionDetails;
 
 pub struct AccountWithWriteVersion {
@@ -155,10 +153,6 @@ impl State {
 
     fn get_lib(&self) -> Option<u64> {
         self.lib
-    }
-
-    fn get_account_changes(&self, slot: u64) -> Option<&AccountChanges> {
-        self.block_account_changes.get(&slot)
     }
 
     pub fn cache_block_from_rpc(&mut self, slot: u64) {
@@ -378,7 +372,7 @@ impl State {
             .or_insert_with(HashMap::new);
 
         //create a unique key from owner and account addresses
-        let  owner_account_key = [owner, pub_key].concat();
+        let owner_account_key = [owner, pub_key].concat();
 
         if let Some(prev) = slot_entries.get(&owner_account_key) {
             if prev.write_version > write_version {
@@ -405,14 +399,39 @@ impl State {
         if let Some(found_owner) = self.account_owners.get(pub_key).cloned() {
             if found_owner != owner {
                 // this is an ownership change ... emitting an account change to the prev owner  (we emit TWO account changes)
-                self.handle_account_change(pub_key, data, &found_owner, write_version, deleted, data_hash, slot);
+                self.handle_account_change(
+                    pub_key,
+                    data,
+                    &found_owner,
+                    write_version,
+                    deleted,
+                    data_hash,
+                    slot,
+                );
             }
         }
 
-        self.handle_account_change(pub_key, data, owner, write_version, deleted, data_hash, slot);
+        self.handle_account_change(
+            pub_key,
+            data,
+            owner,
+            write_version,
+            deleted,
+            data_hash,
+            slot,
+        );
     }
 
-    fn handle_account_change(&mut self, pub_key: &[u8], data: &[u8], owner: &[u8], write_version: u64, deleted: bool, data_hash: u64, slot: u64) {
+    fn handle_account_change(
+        &mut self,
+        pub_key: &[u8],
+        data: &[u8],
+        owner: &[u8],
+        write_version: u64,
+        deleted: bool,
+        data_hash: u64,
+        slot: u64,
+    ) {
         let data_as_hex = hex::encode(&data[..10.min(data.len())]); // Ensure we handle cases where data has fewer than 10 bytes
 
         debug!("handle_account_change@{}: account {:?} owner: {:?} delete: {:?} version: {:?} Data Size: {} Data: {}", slot, bs58::encode(pub_key).into_string(), bs58::encode(owner).into_string(), deleted, write_version, data.len(),data_as_hex);
@@ -432,7 +451,8 @@ impl State {
             account: pb_account,
             write_version,
         };
-        self.account_data_hash.insert(owner_account_key.to_vec(), data_hash);
+        self.account_data_hash
+            .insert(owner_account_key.to_vec(), data_hash);
 
         if deleted {
             // That account will end up being remove from the chain since there is no more lamport to pay the rent.
@@ -562,7 +582,6 @@ impl State {
                     break; //
                 }
             }
-
 
             let account_changes = self.block_account_changes.get(&slot);
             let acc_block = create_account_block(
@@ -757,7 +776,6 @@ mod tests {
 
     const PUB_KEY_1: &[u8] = b"pubkey.1".as_slice();
     const OWNER_KEY_1: &[u8] = b"owner.1".as_slice();
-    const SYSTEM_KEY: &[u8] = b"111111111111".as_slice();
     const DATA_1: &[u8] = b"data.1";
 
     struct SetAccountData<'a> {

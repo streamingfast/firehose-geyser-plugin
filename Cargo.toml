@@ -7,6 +7,7 @@ edition = "2021"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+hashbrown = "0.15"
 agave-geyser-plugin-interface = "=2.1.15"
 lazy_static = "1.5.0"
 anyhow = "1.0.62"
@@ -38,7 +39,9 @@ hex = "0.4.3"
 [dev-dependencies]
 tempfile = "3.10.1"
 wiremock = "0.6.2"
-pretty_assertions = { version= "1.4.1", default-features = false, features = ["alloc"] }
+pretty_assertions = { version = "1.4.1", default-features = false, features = [
+    "alloc",
+] }
 
 [profile.release]
 lto = true
