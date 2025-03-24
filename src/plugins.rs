@@ -135,14 +135,12 @@ impl Plugin {
 
 impl GeyserPlugin for Plugin {
     fn name(&self) -> &'static str {
-        println!("Grrrr: name called");
         let n = concat!(env!("CARGO_PKG_NAME"), "-", env!("CARGO_PKG_VERSION"));
         info!("name called: returning {}", n);
         n
     }
 
     fn on_load(&mut self, config_file: &str, _is_reload: bool) -> PluginResult<()> {
-        println!("Grrrr: on_load called");
         info!("on load called with config_file: {}", config_file);
         let plugin_config = PluginConfig::load_from_file(config_file)?;
 

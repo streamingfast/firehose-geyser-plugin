@@ -404,7 +404,7 @@ impl State {
         //check for ownership change
         if let Some(found_owner) = self.account_owners.get(pub_key).cloned() {
             if found_owner != owner {
-                // this is an ownership change ... emitting an account change to the prev owner
+                // this is an ownership change ... emitting an account change to the prev owner  (we emit TWO account changes)
                 self.handle_account_change(pub_key, data, &found_owner, write_version, deleted, data_hash, slot);
             }
         }
