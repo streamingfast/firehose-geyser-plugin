@@ -30,6 +30,7 @@ firecore start reader-node-stdin \
     --reader-node-line-buffer-size=838860800 < /path/to/blocks.fifo
 ```
 
+-- OPTIONAL -- If you want to stream the account data, creating another type of blocks that contain only account changes --
 
 * `mkfifo /path/to/accounts.fifo`
 * Launch the 'account block' reader in a loop (it should be started BEFORE the agave validator).
@@ -62,7 +63,7 @@ firecore start reader-node-stdin \
         "endpoint": "https://api.mainnet-beta.solana.com"
     },
     "send_processed": false,
-    "account_block_destination_file": "/path/to/accounts.fifo",
+    "account_block_destination_file": "",
     "block_destination_file": "/path/to/blocks.fifo",
     "cursor_file": "/path/to/cursor.fh",
     "noop": false,
@@ -71,6 +72,8 @@ firecore start reader-node-stdin \
     }
 }
 ```
+
+* Optionally, you can set `account_block_destination_file` to `/path/to/accounts.fifo` if you have a reader producing account blocks
 
 Flags:
   * `libpath`: points to the `.so` file (under `target/release` when you build it yourself)
