@@ -351,8 +351,11 @@ impl State {
         data_hash: u64,
         trace: bool,
     ) {
+        //create a unique key from owner and account addresses
+        let owner_account_key = [owner, pub_key].concat();
+
         if is_startup {
-            self.account_data_hash.insert(pub_key.to_vec(), data_hash);
+            self.account_data_hash.insert(owner_account_key, data_hash);
             self.account_owners.insert(pub_key.to_vec(), owner.to_vec());
             return;
         }
@@ -370,9 +373,6 @@ impl State {
             .block_account_changes
             .entry(slot)
             .or_insert_with(HashMap::new);
-
-        //create a unique key from owner and account addresses
-        let owner_account_key = [owner, pub_key].concat();
 
         if let Some(prev) = slot_entries.get(&owner_account_key) {
             if prev.write_version > write_version {
@@ -804,21 +804,46 @@ mod tests {
         }
     }
 
-    fn apply_account_changes(state: &mut State, account_changes: &Vec<SetAccountData>) {
-        account_changes.iter().for_each(|ac| {
-            let data_hash = gxhash64(b"data.1", 76);
-            state.set_account(
-                ac.slot,
-                ac.pub_key,
-                ac.data,
-                ac.owner,
-                ac.write_version,
-                ac.deleted,
-                ac.is_startup,
-                data_hash,
-                ac.trace,
-            )
-        })
+    #[test]
+    fn test_set_account_startup_and_then_normal_will_not_repeat() {
+        let mut state = test_state_no_rpc(None);
+        let slot: u64 = 1;
+        let data_hash = gxhash64(b"data.1", 76);
+
+        state.first_block_to_process = Some(slot);
+        // First call with is_startup=true
+        state.set_account(
+            slot,
+            PUB_KEY_1,
+            DATA_1,
+            OWNER_KEY_1,
+            0,
+            false,
+            true,
+            data_hash,
+            false,
+        );
+
+        // Second call with is_startup=false and incremented slot
+        let next_slot = slot + 1;
+        state.set_account(
+            next_slot,
+            PUB_KEY_1,
+            DATA_1,
+            OWNER_KEY_1,
+            0,
+            false,
+            false,
+            data_hash,
+            false,
+        );
+
+        // Assert that self.block_account_entries(slot_number) is empty for the slot+1
+        assert!(state
+            .block_account_changes
+            .get(&next_slot)
+            .unwrap()
+            .is_empty());
     }
 
     fn test_state_no_rpc(cursor: Option<u64>) -> State {
