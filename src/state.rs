@@ -451,8 +451,6 @@ impl State {
             account: pb_account,
             write_version,
         };
-        self.account_data_hash
-            .insert(owner_account_key.to_vec(), data_hash);
 
         if deleted {
             // That account will end up being remove from the chain since there is no more lamport to pay the rent.
@@ -460,8 +458,11 @@ impl State {
             // is recreated will emit a account change with 'owner' set to system contract and `new_owner` to contract creating the account.
             // But in the case a account is recreated we want the owner to be set to the contract address creating the account.
             self.account_owners.remove(&pub_key.to_vec());
+            self.account_data_hash.remove(&owner_account_key.to_vec());
         } else {
             self.account_owners.insert(pub_key.to_vec(), owner.to_vec());
+            self.account_data_hash
+                .insert(owner_account_key.to_vec(), data_hash);
         }
 
         slot_entries.insert(owner_account_key, awv);
