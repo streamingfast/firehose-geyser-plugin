@@ -459,7 +459,7 @@ impl State {
             // Best practice is to change the owner of an account to the system contract. If we keep track of this change and the account
             // is recreated will emit a account change with 'owner' set to system contract and `new_owner` to contract creating the account.
             // But in the case a account is recreated we want the owner to be set to the contract address creating the account.
-            self.account_owners.remove(&owner_account_key);
+            self.account_owners.remove(&pub_key.to_vec());
         } else {
             self.account_owners.insert(pub_key.to_vec(), owner.to_vec());
         }
