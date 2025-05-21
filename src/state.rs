@@ -354,7 +354,7 @@ impl State {
         //create a unique key from owner and account addresses
         let owner_account_key = [owner, pub_key].concat();
 
-        if is_startup {
+        if is_startup && !deleted {
             self.account_data_hash.insert(owner_account_key, data_hash);
             self.account_owners.insert(pub_key.to_vec(), owner.to_vec());
             return;
