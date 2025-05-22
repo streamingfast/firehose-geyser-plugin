@@ -25,6 +25,7 @@ use solana_rpc_client::rpc_client::RpcClient;
 
 use crate::block_printer::BlockPrinter;
 
+use solana_sdk::bs58;
 use solana_sdk::hash::Hash;
 use solana_sdk::message::v0::LoadedAddresses;
 use solana_sdk::message::AccountKeys;
@@ -115,7 +116,7 @@ impl Plugin {
         if self.trace {
             debug!(
                 "slot: {}, pub_key: {:?}, owner: {:?}, write_version: {}, deleted: {}, data_hash: {}, is_startup: {}",
-                slot, hex::encode(pub_key), hex::encode(owner), write_version, deleted, data_hash, is_startup
+                slot, bs58::encode(pub_key).into_string(), bs58::encode(owner).into_string(), write_version, deleted, data_hash, is_startup
             );
         }
 

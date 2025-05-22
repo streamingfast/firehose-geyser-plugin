@@ -25,6 +25,7 @@ use solana_sdk::bs58;
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_transaction_status::TransactionDetails;
 
+#[derive(Debug)]
 pub struct AccountWithWriteVersion {
     pub account: Account,
     pub write_version: u64,
@@ -379,7 +380,7 @@ impl State {
                 if trace {
                     debug!(
                         "skipping slot because older version: {}, pub_key: {:?}, owner: {:?}, write_version: {}, prev_write_version: {}, deleted: {}, data_hash: {}",
-                        slot, hex::encode(pub_key), hex::encode(owner), write_version, prev.write_version, deleted, data_hash
+                        slot, bs58::encode(pub_key).into_string(), bs58::encode(owner).into_string(), write_version, prev.write_version, deleted, data_hash
                     );
                 }
                 return; // skipping older write_versions
@@ -390,6 +391,12 @@ impl State {
         if !deleted {
             if let Some(h) = self.account_data_hash.get(&owner_account_key) {
                 if *h == data_hash {
+                    if trace {
+                        debug!(
+                            "skipping slot because cached data hash is identical on slot {}, pub_key: {:?}, owner: {:?}, deleted: {}, data_hash: {}",
+                            slot, bs58::encode(pub_key).into_string(), bs58::encode(owner).into_string(), deleted, data_hash
+                        );
+                    }
                     return; // skipping same data
                 }
             }
@@ -407,6 +414,7 @@ impl State {
                     deleted,
                     data_hash,
                     slot,
+                    trace,
                 );
             }
         }
@@ -419,6 +427,7 @@ impl State {
             deleted,
             data_hash,
             slot,
+            trace,
         );
     }
 
@@ -431,10 +440,13 @@ impl State {
         deleted: bool,
         data_hash: u64,
         slot: u64,
+        trace: bool,
     ) {
         let data_as_hex = hex::encode(&data[..10.min(data.len())]); // Ensure we handle cases where data has fewer than 10 bytes
 
-        debug!("handle_account_change@{}: account {:?} owner: {:?} delete: {:?} version: {:?} Data Size: {} Data: {}", slot, bs58::encode(pub_key).into_string(), bs58::encode(owner).into_string(), deleted, write_version, data.len(),data_as_hex);
+        if trace {
+            debug!("handle_account_change@{}: account {:?} owner: {:?} delete: {:?} version: {:?} Data Size: {} Data: {}", slot, bs58::encode(pub_key).into_string(), bs58::encode(owner).into_string(), deleted, write_version, data.len(),data_as_hex);
+        }
         let slot_entries = self
             .block_account_changes
             .entry(slot)
@@ -778,32 +790,11 @@ mod tests {
     const PUB_KEY_1: &[u8] = b"pubkey.1".as_slice();
     const OWNER_KEY_1: &[u8] = b"owner.1".as_slice();
     const DATA_1: &[u8] = b"data.1";
-
-    struct SetAccountData<'a> {
-        slot: u64,
-        pub_key: &'a [u8],
-        data: &'a [u8],
-        owner: &'a [u8],
-        write_version: u64,
-        deleted: bool,
-        is_startup: bool,
-        trace: bool,
-    }
-
-    impl<'a> Default for SetAccountData<'a> {
-        fn default() -> SetAccountData<'a> {
-            SetAccountData {
-                slot: 0,
-                pub_key: PUB_KEY_1,
-                data: DATA_1,
-                owner: OWNER_KEY_1,
-                write_version: 0,
-                deleted: false,
-                is_startup: false,
-                trace: false,
-            }
-        }
-    }
+    const OWNER_KEY_11111111111111111111111111111111: &[u8] = [
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0,
+    ]
+    .as_slice();
 
     #[test]
     fn test_set_account_startup_and_then_normal_will_not_repeat() {
@@ -845,6 +836,167 @@ mod tests {
             .get(&next_slot)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn test_set_account_delete_two_owners_repeat() {
+        let mut state = test_state_no_rpc(None);
+        let slot: u64 = 1;
+        let data_hash = 0;
+
+        state.first_block_to_process = Some(slot);
+        // create account there
+        state.set_account(
+            slot,
+            PUB_KEY_1,
+            DATA_1,
+            OWNER_KEY_1,
+            0,
+            false, // deleted
+            false,
+            data_hash,
+            false,
+        );
+
+        // delete account here
+        state.set_account(
+            slot,
+            PUB_KEY_1,
+            DATA_1,
+            OWNER_KEY_11111111111111111111111111111111,
+            0,
+            true, // deleted
+            false,
+            data_hash,
+            false,
+        );
+
+        // Assert that self.block_account_entries(slot_number) is empty for the slot+1
+        let slot_changes = state.block_account_changes.get(&slot).unwrap();
+        assert!(!slot_changes.is_empty());
+        assert!(slot_changes.len() == 2);
+
+        let acc_owner_1 = [OWNER_KEY_1, PUB_KEY_1].concat();
+        let acc_owner_11111 = [OWNER_KEY_11111111111111111111111111111111, PUB_KEY_1].concat();
+
+        assert!(slot_changes.contains_key(&acc_owner_1));
+        assert!(slot_changes.contains_key(&acc_owner_11111));
+    }
+
+    #[test]
+    fn test_set_account_delete_before_ownerchange_repeat() {
+        let mut state = test_state_no_rpc(None);
+        let slot: u64 = 1;
+        let data_hash = 0;
+
+        state.first_block_to_process = Some(slot);
+        // create account there
+        state.set_account(
+            slot,
+            PUB_KEY_1,
+            DATA_1,
+            OWNER_KEY_1,
+            0,
+            false, // deleted
+            false,
+            data_hash,
+            false,
+        );
+
+        // delete account here
+        state.set_account(
+            slot,
+            PUB_KEY_1,
+            DATA_1,
+            OWNER_KEY_1,
+            0,
+            true, // deleted
+            false,
+            data_hash,
+            false,
+        );
+
+        // delete account here
+        state.set_account(
+            slot,
+            PUB_KEY_1,
+            DATA_1,
+            OWNER_KEY_11111111111111111111111111111111,
+            0,
+            true, // deleted
+            false,
+            data_hash,
+            false,
+        );
+
+        // Assert that self.block_account_entries(slot_number) is empty for the slot+1
+        let slot_changes = state.block_account_changes.get(&slot).unwrap();
+        assert!(!slot_changes.is_empty());
+        assert!(slot_changes.len() == 2);
+
+        let acc_owner_1 = [OWNER_KEY_1, PUB_KEY_1].concat();
+        let acc_owner_11111 = [OWNER_KEY_11111111111111111111111111111111, PUB_KEY_1].concat();
+
+        assert!(slot_changes.contains_key(&acc_owner_1));
+        assert!(slot_changes.contains_key(&acc_owner_11111));
+    }
+
+    #[test]
+    fn test_set_account_delete_after_ownerchange_repeat() {
+        let mut state = test_state_no_rpc(None);
+        let slot: u64 = 1;
+        let data_hash = 0;
+
+        state.first_block_to_process = Some(slot);
+        // create account there
+        state.set_account(
+            slot,
+            PUB_KEY_1,
+            DATA_1,
+            OWNER_KEY_1,
+            0,
+            false,
+            false,
+            data_hash,
+            false,
+        );
+
+        // delete account here
+        state.set_account(
+            slot,
+            PUB_KEY_1,
+            DATA_1,
+            OWNER_KEY_11111111111111111111111111111111,
+            0,
+            false,
+            false,
+            data_hash,
+            false,
+        );
+
+        // delete account here
+        state.set_account(
+            slot,
+            PUB_KEY_1,
+            DATA_1,
+            OWNER_KEY_11111111111111111111111111111111,
+            0,
+            true, // deleted
+            false,
+            data_hash,
+            false,
+        );
+
+        // Assert that self.block_account_entries(slot_number) is empty for the slot+1
+        let slot_changes = state.block_account_changes.get(&slot).unwrap();
+        assert!(!slot_changes.is_empty());
+        assert!(slot_changes.len() == 2);
+
+        let acc_owner_1 = [OWNER_KEY_1, PUB_KEY_1].concat();
+        let acc_owner_11111 = [OWNER_KEY_11111111111111111111111111111111, PUB_KEY_1].concat();
+
+        assert!(slot_changes.contains_key(&acc_owner_1));
+        assert!(slot_changes.contains_key(&acc_owner_11111));
     }
 
     fn test_state_no_rpc(cursor: Option<u64>) -> State {
