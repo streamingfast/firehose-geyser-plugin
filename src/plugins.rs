@@ -113,7 +113,7 @@ impl Plugin {
             gxhash64(data, SEED)
         };
 
-        if self.trace {
+        if !is_startup && self.trace {
             debug!(
                 "slot: {}, pub_key: {:?}, owner: {:?}, write_version: {}, deleted: {}, data_hash: {}, is_startup: {}",
                 slot, bs58::encode(pub_key).into_string(), bs58::encode(owner).into_string(), write_version, deleted, data_hash, is_startup
