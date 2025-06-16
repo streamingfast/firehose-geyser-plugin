@@ -1,29 +1,29 @@
 use crate::block_printer::BlockPrinter;
-use crate::pb;
+use crate::pb::sf::solana::r#type::v1::{Account, Block, BlockHeight, Reward, UnixTimestamp};
+use crate::plugins::{to_block_rewards, ConfirmTransactionWithIndex};
+use crate::state_cache::{AccountDataHash, AccountOwners};
 use crate::utils::{convert_sol_timestamp, create_account_block};
+use gxhash::gxhash64;
 use hashbrown::HashMap;
 use lazy_static::lazy_static;
-use pb::sf::solana::r#type::v1::Account;
+use log::{debug, error, info, warn};
 use prost_types::Timestamp;
 use solana_rpc_client::rpc_client::RpcClient;
+use solana_rpc_client_api::config::RpcBlockConfig;
+use solana_sdk::bs58;
+use solana_sdk::commitment_config::CommitmentConfig;
+use solana_transaction_status::TransactionDetails;
 
 type BlockAccountChanges = HashMap<u64, AccountChanges>;
 pub type AccountChanges = HashMap<Vec<u8>, AccountWithWriteVersion>;
-pub type AccountDataHash = HashMap<Vec<u8>, u64>;
-pub type AccountOwners = HashMap<Vec<u8>, Vec<u8>>;
 
 pub type Transactions = HashMap<u64, Vec<ConfirmTransactionWithIndex>>;
 type ProcessedSlot = HashMap<u64, bool>;
 
 type BlockInfoMap = HashMap<u64, BlockInfo>;
 type ConfirmedSlotsMap = HashMap<u64, bool>;
-use crate::pb::sf::solana::r#type::v1::{Block, BlockHeight, Reward, UnixTimestamp};
-use crate::plugins::{to_block_rewards, ConfirmTransactionWithIndex};
-use log::{debug, error, info, warn};
-use solana_rpc_client_api::config::RpcBlockConfig;
-use solana_sdk::bs58;
-use solana_sdk::commitment_config::CommitmentConfig;
-use solana_transaction_status::TransactionDetails;
+
+const SEED: i64 = 76;
 
 #[derive(Debug)]
 pub struct AccountWithWriteVersion {
@@ -103,8 +103,8 @@ impl State {
             initialized: false,
 
             block_account_changes: HashMap::new(),
-            account_data_hash: HashMap::new(),
-            account_owners: HashMap::new(),
+            account_data_hash: AccountDataHash::new(),
+            account_owners: AccountOwners::new(),
             block_infos: HashMap::new(),
             confirmed_slots: HashMap::new(),
             last_sent_block: None,
@@ -405,7 +405,7 @@ impl State {
         }
 
         //check for ownership change
-        if let Some(found_owner) = self.account_owners.get(pub_key).cloned() {
+        if let Some(found_owner) = self.account_owners.get(&pub_key.to_vec()).cloned() {
             if found_owner != owner {
                 // this is an ownership change ... emitting an account change to the prev owner  (we emit TWO account changes)
                 self.handle_account_change(
@@ -471,12 +471,14 @@ impl State {
             // Best practice is to change the owner of an account to the system contract. If we keep track of this change and the account
             // is recreated will emit a account change with 'owner' set to system contract and `new_owner` to contract creating the account.
             // But in the case a account is recreated we want the owner to be set to the contract address creating the account.
-            self.account_owners.remove(&pub_key.to_vec());
-            self.account_data_hash.remove(&owner_account_key.to_vec());
-        } else {
-            self.account_owners.insert(pub_key.to_vec(), owner.to_vec());
+            self.account_owners.delete_for_block(slot, pub_key.to_vec());
             self.account_data_hash
-                .insert(owner_account_key.to_vec(), data_hash);
+                .delete_for_block(slot, owner_account_key.to_vec());
+        } else {
+            self.account_owners
+                .insert_for_block(slot, pub_key.to_vec(), owner.to_vec());
+            self.account_data_hash
+                .insert_for_block(slot, owner_account_key.to_vec(), data_hash);
         }
 
         slot_entries.insert(owner_account_key, awv);
@@ -595,6 +597,41 @@ impl State {
                         warn!("Failed to add all missing slots to 'confirmed_slots' between {} and {}", last_sent_block, slot);
                     }
                     break; //
+                }
+            }
+
+            // If we have processed blocks before, clean up any blocks between the last one we sent and the current one, they must have been dropped.
+            if let Some(last_sent_block) = self.last_sent_block {
+                let mut slot_to_drop = last_sent_block + 1;
+                while slot_to_drop < slot {
+                    self.account_data_hash.drop_block(slot_to_drop);
+                    self.account_owners.drop_block(slot_to_drop);
+                    slot_to_drop += 1;
+                }
+            }
+            self.account_data_hash.merge_blocks_up_to(slot);
+            self.account_owners.merge_blocks_up_to(slot);
+
+            // since we merged data into our cache, we need to check in the next slots for changes that would actually not be a change and remove them
+            for (change_slot, change_data) in self.block_account_changes.iter_mut() {
+                if *change_slot < slot {
+                    continue;
+                }
+                let mut keys_to_remove = Vec::new();
+                for (k, v) in change_data.iter() {
+                    if let Some(cached) = self.account_data_hash.get(k) {
+                        if *cached == gxhash64(&v.account.data, SEED) {
+                            keys_to_remove.push(k.clone());
+                            continue;
+                        }
+                    } else if v.account.deleted {
+                        keys_to_remove.push(k.clone());
+                        continue;
+                    }
+                }
+                // TODO: remove useless changes regarding owner in self.account_owners
+                for key in keys_to_remove {
+                    change_data.remove(&key);
                 }
             }
 

@@ -31,7 +31,6 @@ solana-transaction-status = "=2.2.7"
 serde_json = "1.0.132"
 serde = { version = "1.0.215", features = ["derive"] }
 solana-sdk = "=2.2.2"
-sleep = "1.0.2"
 env_logger = "0.9.3"
 gxhash = "3.4.1"
 hex = "0.4.3"
