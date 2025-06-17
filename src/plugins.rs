@@ -96,6 +96,10 @@ impl Plugin {
             return;
         }
 
+        if is_startup && deleted {
+            return;
+        }
+
         let mut lock_state = self
             .state
             .as_ref()

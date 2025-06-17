@@ -85,6 +85,7 @@ pub struct BlockAwareHashMap<K, V>
 where
     K: Clone + std::hash::Hash + Eq,
     V: Clone,
+    for<'a> &'a K: IntoIterator<Item = &'a u8>,
 {
     /// Main hashmap for storing data
     pub main: HashMap<K, V>,
@@ -96,6 +97,7 @@ impl<K, V> BlockAwareHashMap<K, V>
 where
     K: Clone + std::hash::Hash + Eq,
     V: Clone,
+    for<'a> &'a K: IntoIterator<Item = &'a u8>,
 {
     pub fn new() -> Self {
         Self {
@@ -316,6 +318,7 @@ impl<K, V> Default for BlockAwareHashMap<K, V>
 where
     K: Clone + std::hash::Hash + Eq,
     V: Clone,
+    for<'a> &'a K: IntoIterator<Item = &'a u8>,
 {
     fn default() -> Self {
         Self::new()

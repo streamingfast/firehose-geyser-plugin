@@ -668,6 +668,12 @@ impl State {
     pub fn get_hash_count(&self) -> usize {
         self.account_data_hash.len()
     }
+
+    #[allow(dead_code)]
+    pub fn merge_state_caches_up_to(&mut self, up_to_block: u64) {
+        self.account_data_hash.merge_blocks_up_to(up_to_block);
+        self.account_owners.merge_blocks_up_to(up_to_block);
+    }
 }
 
 fn compose_and_purge_block(
@@ -1055,5 +1061,69 @@ mod tests {
             BlockPrinter::new(None, None, false),
             true,
         )
+    }
+
+    #[test]
+    fn test_set_account_merge_state_caches_then_change_owner() {
+        let mut state = test_state_no_rpc(None);
+        let slot: u64 = 100;
+        let slot2: u64 = 101;
+        let owner_key_2: &[u8] = b"owner.2".as_slice();
+        let data_hash = gxhash64(DATA_1, SEED);
+        let owner_account_key_1 = [OWNER_KEY_1, PUB_KEY_1].concat();
+        let owner_account_key_2 = [owner_key_2, PUB_KEY_1].concat();
+
+        state.first_block_to_process = Some(slot);
+
+        // First call: set account with initial owner
+        state.set_account(
+            slot,
+            PUB_KEY_1,
+            DATA_1,
+            OWNER_KEY_1,
+            0,
+            false,
+            false,
+            data_hash,
+            false,
+        );
+
+        // Verify initial account change is recorded
+        assert!(state.block_account_changes.get(&slot).is_some());
+        let initial_changes = state.block_account_changes.get(&slot).unwrap();
+        assert_eq!(initial_changes.len(), 1);
+        assert!(initial_changes.contains_key(&owner_account_key_1));
+
+        // Merge state caches up to this block
+        state.merge_state_caches_up_to(slot);
+        state.purge_blocks_up_to(slot);
+
+        // Second call: set same account with different owner
+        state.set_account(
+            slot2,
+            PUB_KEY_1,
+            DATA_1,
+            owner_key_2,
+            1,
+            false,
+            false,
+            data_hash,
+            false,
+        );
+
+        // Verify that account changes are recorded for both owners due to owner change
+        let final_changes = state.block_account_changes.get(&slot2).unwrap();
+        assert_eq!(final_changes.len(), 2); // Should have entries for both old and new owner
+        assert!(final_changes.contains_key(&owner_account_key_1)); // Old owner entry
+        assert!(final_changes.contains_key(&owner_account_key_2)); // New owner entry
+
+        // Verify the new account change reflects the new owner
+        let new_account_change = final_changes.get(&owner_account_key_2).unwrap();
+        assert_eq!(new_account_change.account.owner, owner_key_2);
+        assert_eq!(new_account_change.write_version, 1);
+
+        // Verify the old owner entry still exists (for ownership change tracking)
+        let old_account_change = final_changes.get(&owner_account_key_1).unwrap();
+        assert_eq!(old_account_change.account.owner, OWNER_KEY_1);
     }
 }
