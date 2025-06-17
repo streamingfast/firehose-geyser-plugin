@@ -614,7 +614,7 @@ impl State {
 
             // since we merged data into our cache, we need to check in the next slots for changes that would actually not be a change and remove them
             for (change_slot, change_data) in self.block_account_changes.iter_mut() {
-                if *change_slot < slot {
+                if *change_slot <= slot {
                     continue;
                 }
                 let mut keys_to_remove = Vec::new();
