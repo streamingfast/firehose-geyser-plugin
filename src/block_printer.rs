@@ -125,7 +125,6 @@ impl BlockPrinter {
 // This would be less damageful that moving the cursor while one of the two blocks wasn't correctly written.
 fn write_cursor(cursor_file: &str, cursor: u64) {
     let mut last = CURSOR_MUTEX.lock().expect("cursor_mutex lock poisoned");
-    println!("Cursor: {}, last: {}", cursor, last);
     if *last < cursor {
         *last = cursor;
         return;
@@ -221,7 +220,7 @@ mod tests {
         let account_block = create_test_account_block();
 
         printer
-            .print(&block_info, 100, block, account_block, cursor_path)
+            .print(&block_info, 100, block.clone(), account_block, cursor_path)
             .unwrap();
 
         // Wait for threads to complete
@@ -242,7 +241,14 @@ mod tests {
         assert_eq!(parts[5], "test_parent_hash"); // parent_hash
         assert_eq!(parts[6], "100"); // lib
         assert_eq!(parts[7], "1640995200000000000"); // timestamp_nano
-                                                     // parts[8] is the base64 encoded payload
+
+        let payload = parts[8];
+        // Decode the base64 payload and verify it matches our original block
+        let decoded_bytes = rbase64::decode(payload).unwrap();
+        let decoded_block = Block::decode(&decoded_bytes[..]).unwrap();
+        assert_eq!(decoded_block.slot, block.slot);
+        assert_eq!(decoded_block.blockhash, block.blockhash);
+        assert_eq!(decoded_block.transactions.len(), block.transactions.len());
 
         // Check cursor file content (should be written twice - once for each call)
         let cursor_content = std::fs::read_to_string(cursor_path).unwrap();
@@ -270,7 +276,7 @@ mod tests {
         let account_block = create_test_account_block();
 
         printer
-            .print(&block_info, 100, block, account_block, cursor_path)
+            .print(&block_info, 100, block, account_block.clone(), cursor_path)
             .unwrap();
 
         // Wait for threads to complete
@@ -291,7 +297,14 @@ mod tests {
         assert_eq!(parts[5], "test_parent_hash"); // parent_hash
         assert_eq!(parts[6], "100"); // lib
         assert_eq!(parts[7], "1640995200000000000"); // timestamp_nano
-                                                     // parts[8] is the base64 encoded payload
+
+        let payload = parts[8];
+        // Decode the base64 payload and verify it matches our original block
+        let decoded_bytes = rbase64::decode(payload).unwrap();
+        let decoded_block = AccountBlock::decode(&decoded_bytes[..]).unwrap();
+        assert_eq!(decoded_block.slot, account_block.slot);
+        assert_eq!(decoded_block.hash, account_block.hash);
+        assert_eq!(decoded_block.accounts.len(), account_block.accounts.len());
 
         // Check cursor file content
         let cursor_content = std::fs::read_to_string(cursor_path).unwrap();
@@ -341,7 +354,6 @@ mod tests {
         assert_eq!(block_parts[0], "FIRE");
         assert_eq!(block_parts[1], "BLOCK");
         assert_eq!(block_parts[2], "12345");
-
         // Check account file content
         let account_content = std::fs::read_to_string(account_path).unwrap();
         let account_lines: Vec<&str> = account_content.trim().split('\n').collect();
@@ -481,55 +493,14 @@ mod tests {
             "Cursor behavior should be identical regardless of noop mode"
         );
     }
-
     #[test]
-    fn test_print_payload_encoding() {
+    fn test_write_cursor() {
         // Reset cursor state
         {
             let mut last = CURSOR_MUTEX.lock().expect("cursor_mutex lock poisoned");
             *last = 0;
         }
 
-        let block_file = NamedTempFile::new().unwrap();
-        let cursor_file = NamedTempFile::new().unwrap();
-
-        let block_path = block_file.path().to_str().unwrap();
-        let cursor_path = cursor_file.path().to_str().unwrap();
-
-        let mut printer = BlockPrinter::new(Some(File::create(block_path).unwrap()), None, false);
-
-        let block_info = create_test_block_info();
-        let block = create_test_block();
-        let account_block = create_test_account_block();
-
-        printer
-            .print(&block_info, 100, block.clone(), account_block, cursor_path)
-            .unwrap();
-
-        // Wait for threads to complete
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
-        // Read the output and decode the payload
-        let block_content = std::fs::read_to_string(block_path).unwrap();
-        let line = block_content.trim();
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        let payload = parts[8];
-
-        // Decode the base64 payload and verify it matches our original block
-        let decoded_bytes = rbase64::decode(payload).unwrap();
-        let decoded_block = Block::decode(&decoded_bytes[..]).unwrap();
-
-        assert_eq!(decoded_block.slot, block.slot);
-        assert_eq!(decoded_block.blockhash, block.blockhash);
-        assert_eq!(decoded_block.transactions.len(), block.transactions.len());
-    }
-
-    #[test]
-    fn test_write_cursor() {
-        {
-            let mut last = CURSOR_MUTEX.lock().expect("cursor_mutex lock poisoned");
-            *last = 0;
-        }
         let temp_file = NamedTempFile::new().unwrap();
         let path = temp_file.path().to_str().unwrap().to_string();
 
@@ -545,6 +516,7 @@ mod tests {
         write_cursor(&path, 2);
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(content, "1");
+
         write_cursor(&path, 3);
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(content, "1");
