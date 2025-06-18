@@ -95,6 +95,9 @@ impl Plugin {
         if owner == Self::VOTE111111111111111111111111111111111111111 {
             return;
         }
+        if is_startup && deleted {
+            return;
+        }
 
         let mut lock_state = self
             .state

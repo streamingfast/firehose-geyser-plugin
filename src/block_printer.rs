@@ -82,8 +82,8 @@ impl BlockPrinter {
                 } else {
                     let _lock = BLOCK_MUTEX.lock().expect("block_mutex lock poisoned");
                     writeln!(out_block, "FIRE BLOCK {slot} {block_hash} {parent_slot} {parent_hash} {lib} {timestamp_nano} {payload}").expect("cannot write to out_block");
-                    write_cursor(&cursor_path, slot);
                 }
+                write_cursor(&cursor_path, slot);
             });
         } else {
             write_cursor(cursor_path, slot); // must still be called twice
@@ -104,8 +104,8 @@ impl BlockPrinter {
                 } else {
                     let _lock = ACC_MUTEX.lock().expect("acc_mutex lock poisoned");
                     writeln!(out_account, "FIRE BLOCK {slot} {block_hash} {parent_slot} {parent_hash} {lib} {timestamp_nano} {payload}").expect("cannot write to out_account");
-                    write_cursor(&cursor_path, slot);
                 }
+                write_cursor(&cursor_path, slot);
             });
         } else {
             write_cursor(cursor_path, slot); // must still be called twice
