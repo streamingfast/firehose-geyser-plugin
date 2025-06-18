@@ -82,6 +82,12 @@ impl Plugin {
         0x00, 0x00,
     ];
 
+    // set_account:
+    // * skips vote accounts
+    // * skips deleted accounts on startup
+    // * skips based on state.should_skip_slot()
+    // * computes data hash
+    // * calls state.set_account()
     fn set_account(
         &self,
         slot: u64,
@@ -116,24 +122,27 @@ impl Plugin {
             gxhash64(data, SEED)
         };
 
-        if !is_startup && self.trace {
-            debug!(
+        if is_startup {
+            lock_state.set_account_on_startup(pub_key, owner, data_hash);
+        } else {
+            lock_state.set_account(
+                slot,
+                pub_key,
+                data,
+                owner,
+                write_version,
+                deleted,
+                data_hash,
+                self.trace,
+            );
+
+            if self.trace {
+                debug!(
                 "slot: {}, pub_key: {:?}, owner: {:?}, write_version: {}, deleted: {}, data_hash: {}, is_startup: {}",
                 slot, bs58::encode(pub_key).into_string(), bs58::encode(owner).into_string(), write_version, deleted, data_hash, is_startup
             );
+            }
         }
-
-        lock_state.set_account(
-            slot,
-            pub_key,
-            data,
-            owner,
-            write_version,
-            deleted,
-            is_startup,
-            data_hash,
-            self.trace,
-        );
     }
 }
 
@@ -242,8 +251,12 @@ impl GeyserPlugin for Plugin {
         Ok(())
     }
 
+    // NOOP
     fn on_unload(&mut self) {}
 
+    // update_account
+    // * decodes the ReplicaAccountInfoVersions
+    // * calls self.set_account()
     fn update_account(
         &self,
         account: ReplicaAccountInfoVersions,
@@ -294,6 +307,7 @@ impl GeyserPlugin for Plugin {
         Ok(())
     }
 
+    // NOOP
     fn notify_end_of_startup(&self) -> PluginResult<()> {
         info!(
             "preloaded account data hash count: {}",
@@ -308,6 +322,10 @@ impl GeyserPlugin for Plugin {
         Ok(())
     }
 
+    // update_slot_status:
+    // * calls set_confirmed_slot() (for Processed/Confirmed depending on config send_processed)
+    // * calls process_upto() if state.is_ready()
+    // * Calls set_lib() for Rooted state
     fn update_slot_status(
         &self,
         slot: u64,
@@ -392,6 +410,11 @@ impl GeyserPlugin for Plugin {
         Ok(())
     }
 
+    // notify_transaction:
+    // * gates if we are with_block
+    // * decodes the transaction version
+    // * calls state.set_transaction
+    // * calls process_upto if state.is_ready()
     fn notify_transaction(
         &self,
         transaction: ReplicaTransactionInfoVersions<'_>,
@@ -431,10 +454,16 @@ impl GeyserPlugin for Plugin {
         Ok(())
     }
 
+    // NOOP
     fn notify_entry(&self, _entry: ReplicaEntryInfoVersions) -> PluginResult<()> {
         Ok(())
     }
 
+    // notify_block_metadata:
+    // * decodes the blockinfo version
+    // * calls state.set_block_info
+    // * fills in missing block info from confirmed_slots from RPC
+    // * calls process_upto if state.is_ready()
     fn notify_block_metadata(&self, block_info: ReplicaBlockInfoVersions<'_>) -> PluginResult<()> {
         if ACC_MUTEX.is_poisoned() || BLOCK_MUTEX.is_poisoned() {
             panic!("poisoned mutex")

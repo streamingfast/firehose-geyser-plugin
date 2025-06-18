@@ -8,22 +8,13 @@ pub fn convert_sol_timestamp(sol_timestamp: UnixTimestamp) -> ProstTimestamp {
     ProstTimestamp { seconds, nanos: 0 }
 }
 
-pub fn create_account_block(
-    account_changes: &AccountChanges,
-    block_info: &BlockInfo,
-) -> AccountBlock {
-    let mut accounts: Vec<Account> = account_changes
-        .into_iter()
-        .map(|(_account_key, account)| account.account.clone())
-        .collect();
-
-    accounts.sort_by(|a, b| a.address.cmp(&b.address));
+pub fn create_account_block(account_changes: Vec<Account>, block_info: &BlockInfo) -> AccountBlock {
     AccountBlock {
         slot: block_info.slot,
         hash: block_info.block_hash.clone(),
         parent_hash: block_info.parent_hash.clone(),
         parent_slot: block_info.parent_slot,
-        accounts,
+        accounts: account_changes,
         timestamp: Some(block_info.timestamp.clone()),
     }
 }

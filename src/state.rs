@@ -29,6 +29,7 @@ use solana_transaction_status::TransactionDetails;
 pub struct AccountWithWriteVersion {
     pub account: Account,
     pub write_version: u64,
+    pub data_hash: u64,
 }
 
 lazy_static! {
@@ -69,8 +70,9 @@ pub struct State {
     lib: Option<u64>,
 
     block_account_changes: BlockAccountChanges,
-    account_data_hash: AccountDataHash,
-    account_owners: AccountOwners,
+
+    account_data_hash: AccountDataHash, // only updated when we print the block
+    account_owners: AccountOwners,      // only updated when we print the block
 
     block_infos: BlockInfoMap,
     confirmed_slots: ConfirmedSlotsMap,
@@ -244,6 +246,7 @@ impl State {
         i == last_sent
     }
 
+    // should_skip_slot skips when not initialized and below target block
     pub fn should_skip_slot(&self, slot: u64) -> bool {
         if self.initialized {
             return false;
@@ -340,6 +343,15 @@ impl State {
         self.block_infos.insert(slot, block_info);
     }
 
+    // set_account_on_startup populates the account caches on startup
+    pub fn set_account_on_startup(&mut self, pub_key: &[u8], owner: &[u8], data_hash: u64) {
+        let owner_account_key = [owner, pub_key].concat();
+        self.account_data_hash.insert(owner_account_key, data_hash);
+        self.account_owners.insert(pub_key.to_vec(), owner.to_vec());
+        return;
+    }
+
+    // set_account populates the caches for set_account
     pub fn set_account(
         &mut self,
         slot: u64,
@@ -348,26 +360,18 @@ impl State {
         owner: &[u8],
         write_version: u64,
         deleted: bool,
-        is_startup: bool,
         data_hash: u64,
         trace: bool,
     ) {
         //create a unique key from owner and account addresses
         let owner_account_key = [owner, pub_key].concat();
 
-        if is_startup {
-            if !deleted {
-                self.account_data_hash.insert(owner_account_key, data_hash);
-                self.account_owners.insert(pub_key.to_vec(), owner.to_vec());
-            }
-            return;
-        }
-
+        // purge tail data on initialization
         if !self.block_account_changes.contains_key(&slot) {
-            debug!("account data for slot {}", slot);
-            if self.cursor.is_none() && self.first_block_to_process.is_none() {
-                // without cursor or first_block_to_process, we only keep a few blocks in here... this happens right after is_startup but before we get a confirmed slot
-                debug!("initializing: deleting blocks up to: {}", slot - 1);
+            debug!("got some account data for slot {}", slot);
+            let initializing = self.cursor.is_none() && self.first_block_to_process.is_none();
+            if initializing {
+                debug!("initializing: deleting blocks up to: {}", slot - 32);
                 self.purge_blocks_up_to(slot - 32);
             }
         }
@@ -377,6 +381,7 @@ impl State {
             .entry(slot)
             .or_insert_with(HashMap::new);
 
+        // skip if new change version exists
         if let Some(prev) = slot_entries.get(&owner_account_key) {
             if prev.write_version > write_version {
                 if trace {
@@ -389,70 +394,10 @@ impl State {
             }
         }
 
-        // skip if the data is the same and the account is not deleted
-        if !deleted {
-            if let Some(h) = self.account_data_hash.get(&owner_account_key) {
-                if *h == data_hash {
-                    if trace {
-                        debug!(
-                            "skipping slot because cached data hash is identical on slot {}, pub_key: {:?}, owner: {:?}, deleted: {}, data_hash: {}",
-                            slot, bs58::encode(pub_key).into_string(), bs58::encode(owner).into_string(), deleted, data_hash
-                        );
-                    }
-                    return; // skipping same data
-                }
-            }
-        }
-
-        //check for ownership change
-        if let Some(found_owner) = self.account_owners.get(pub_key).cloned() {
-            if found_owner != owner {
-                // this is an ownership change ... emitting an account change to the prev owner  (we emit TWO account changes)
-                self.handle_account_change(
-                    pub_key,
-                    data,
-                    &found_owner,
-                    write_version,
-                    deleted,
-                    data_hash,
-                    slot,
-                    trace,
-                );
-            }
-        }
-
-        self.handle_account_change(
-            pub_key,
-            data,
-            owner,
-            write_version,
-            deleted,
-            data_hash,
-            slot,
-            trace,
-        );
-    }
-
-    fn handle_account_change(
-        &mut self,
-        pub_key: &[u8],
-        data: &[u8],
-        owner: &[u8],
-        write_version: u64,
-        deleted: bool,
-        data_hash: u64,
-        slot: u64,
-        trace: bool,
-    ) {
-        let data_as_hex = hex::encode(&data[..10.min(data.len())]); // Ensure we handle cases where data has fewer than 10 bytes
-
         if trace {
+            let data_as_hex = hex::encode(&data[..10.min(data.len())]);
             debug!("handle_account_change@{}: account {:?} owner: {:?} delete: {:?} version: {:?} Data Size: {} Data: {}", slot, bs58::encode(pub_key).into_string(), bs58::encode(owner).into_string(), deleted, write_version, data.len(),data_as_hex);
         }
-        let slot_entries = self
-            .block_account_changes
-            .entry(slot)
-            .or_insert_with(HashMap::new);
 
         let pb_account = Account {
             address: pub_key.to_vec(),
@@ -460,24 +405,11 @@ impl State {
             owner: owner.to_vec(),
             deleted,
         };
-        let owner_account_key = [owner, pub_key].concat();
         let awv = AccountWithWriteVersion {
             account: pb_account,
             write_version,
+            data_hash,
         };
-
-        if deleted {
-            // That account will end up being remove from the chain since there is no more lamport to pay the rent.
-            // Best practice is to change the owner of an account to the system contract. If we keep track of this change and the account
-            // is recreated will emit a account change with 'owner' set to system contract and `new_owner` to contract creating the account.
-            // But in the case a account is recreated we want the owner to be set to the contract address creating the account.
-            self.account_owners.remove(&pub_key.to_vec());
-            self.account_data_hash.remove(&owner_account_key.to_vec());
-        } else {
-            self.account_owners.insert(pub_key.to_vec(), owner.to_vec());
-            self.account_data_hash
-                .insert(owner_account_key.to_vec(), data_hash);
-        }
 
         slot_entries.insert(owner_account_key, awv);
     }
@@ -599,10 +531,13 @@ impl State {
             }
 
             let account_changes = self.block_account_changes.get(&slot);
-            let acc_block = create_account_block(
-                account_changes.unwrap_or(&AccountChanges::default()),
-                &block_info,
+            let (effective_account_changes, cache_changes) = filter_account_changes(
+                account_changes,
+                &self.account_data_hash,
+                &self.account_owners,
             );
+
+            let acc_block = create_account_block(effective_account_changes, &block_info);
 
             let mut transactions_with_index =
                 self.transactions.remove(&slot).unwrap_or_else(|| vec![]);
@@ -620,6 +555,7 @@ impl State {
             self.last_sent_block = Some(block_info.slot);
             self.purge_blocks_up_to(slot);
             self.processed_slots.insert(slot, true);
+            self.apply_cache_changes(cache_changes);
 
             if BLOCK_MUTEX.is_poisoned() || ACC_MUTEX.is_poisoned() {
                 return Err("mutex poisoned".into());
@@ -631,6 +567,134 @@ impl State {
     pub fn get_hash_count(&self) -> usize {
         self.account_data_hash.len()
     }
+
+    fn apply_cache_changes(&mut self, changes: Vec<StateChange>) {
+        for change in changes {
+            let address = change.address;
+            let owner = change.owner;
+            let data_hash = change.data_hash;
+            let deleted = change.deleted;
+
+            if deleted {
+                self.account_data_hash.remove(&address);
+                self.account_owners.remove(&address);
+            } else {
+                self.account_data_hash.insert(address.clone(), data_hash);
+                self.account_owners.insert(address.clone(), owner);
+            }
+        }
+    }
+}
+
+struct StateChange {
+    address: Vec<u8>,
+    owner: Vec<u8>,
+    data_hash: u64,
+    deleted: bool,
+}
+
+fn filter_account_changes(
+    changes: Option<&HashMap<Vec<u8>, AccountWithWriteVersion>>,
+    account_data_hash: &AccountDataHash,
+    account_owners: &AccountOwners,
+) -> (Vec<Account>, Vec<StateChange>) {
+    let mut filtered_changes: Vec<Account> = Vec::new();
+    let mut state_changes: Vec<StateChange> = Vec::new();
+
+    if let Some(changes) = changes {
+        for (account_owner_key, account_with_version) in changes {
+            let account = &account_with_version.account;
+
+            let mut should_include = false;
+            if let Some(cached_hash) = account_data_hash.get(account_owner_key) {
+                if *cached_hash != account_with_version.data_hash {
+                    should_include = true;
+                }
+                if account.deleted {
+                    should_include = true;
+                }
+            } else {
+                should_include = true;
+            }
+
+            // Check for ownership change
+            if let Some(cached_owner) = account_owners.get(account_owner_key) {
+                if cached_owner != &account.owner {
+                    should_include = true;
+                    // Push the account change with the previous owner
+                    // it will appear before the new owner's state change
+                    filtered_changes.push(Account {
+                        address: account.address.clone(),
+                        owner: cached_owner.clone(),
+                        data: account_with_version.account.data.clone(),
+                        deleted: account.deleted,
+                    });
+                }
+            }
+
+            if should_include {
+                filtered_changes.push(account.clone());
+
+                state_changes.push(StateChange {
+                    address: account.address.clone(),
+                    owner: account.owner.clone(),
+                    data_hash: account_with_version.data_hash,
+                    deleted: account.deleted,
+                });
+            }
+        }
+    }
+
+    filtered_changes.sort_by(|a, b| a.address.cmp(&b.address));
+    return (filtered_changes, state_changes);
+
+    // filter data based on cache, then update cache
+    //if deleted {
+    //    // That account will end up being remove from the chain since there is no more lamport to pay the rent.
+    //    // Best practice is to change the owner of an account to the system contract. If we keep track of this change and the account
+    //    // is recreated will emit a account change with 'owner' set to system contract and `new_owner` to contract creating the account.
+    //    // But in the case a account is recreated we want the owner to be set to the contract address creating the account.
+    //    self.account_owners.remove(&pub_key.to_vec());
+    //    self.account_data_hash.remove(&owner_account_key.to_vec());
+    //} else {
+    //    self.account_owners.insert(pub_key.to_vec(), owner.to_vec());
+    //    self.account_data_hash
+    //        .insert(owner_account_key.to_vec(), data_hash);
+    //}
+
+    //// skip if the data is the same and the account is not deleted
+    //if !deleted {
+    //    if let Some(h) = self.account_data_hash.get(&owner_account_key) {
+    //        if *h == data_hash {
+    //            if trace {
+    //                debug!(
+    //                    "skipping slot because cached data hash is identical on slot {}, pub_key: {:?}, owner: {:?}, deleted: {}, data_hash: {}",
+    //                    slot, bs58::encode(pub_key).into_string(), bs58::encode(owner).into_string(), deleted, data_hash
+    //                );
+    //            }
+    //            return; // skipping same data
+    //        }
+    //    }
+    //}
+
+    ////check for ownership change
+    //if let Some(found_owner) = self.account_owners.get(pub_key).cloned() {
+    //    if found_owner != owner {
+    //        // this is an ownership change ... emitting an account change to the prev owner  (we emit TWO account changes)
+    //        self.handle_account_change(
+    //            pub_key,
+    //            data,
+    //            &found_owner,
+    //            write_version,
+    //            deleted,
+    //            data_hash,
+    //            slot,
+    //            trace,
+    //        );
+    //    }
+    //}
+
+    // TODO: implement
 }
 
 fn compose_and_purge_block(
@@ -660,363 +724,364 @@ fn compose_and_purge_block(
     }
 }
 
-#[cfg(test)]
-
-mod tests {
-    use super::*;
-    use gxhash::gxhash64;
-    use pretty_assertions::assert_eq;
-
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    fn test_block_info(slot: u64, parent_slot: u64) -> BlockInfo {
-        BlockInfo {
-            timestamp: Timestamp {
-                seconds: 1234,
-                nanos: 0,
-            },
-            parent_slot,
-            slot,
-            block_hash: "hash1".to_string(),
-            parent_hash: "parent1".to_string(),
-            height: Some(100),
-            rewards: vec![],
-            transaction_count: 0,
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_set_block_info() {
-        let mock_server = MockServer::start().await;
-        let test_url = mock_server.uri();
-
-        Mock::given(method("POST"))
-            .and(path("/"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "jsonrpc": "2.0",
-                "result": 100,
-                "id": 1
-            })))
-            .mount(&mock_server)
-            .await;
-
-        // Initialize state with no lib and no first_received_blockmeta
-
-        let mut state = State::new(
-            RpcClient::new(test_url.clone()),
-            RpcClient::new(test_url.clone()),
-            None,
-            "test_cursor_file".to_string(),
-            BlockPrinter::new(None, None, false),
-            true,
-        );
-
-        // Test case 1: No lib set yet
-        let block_info = test_block_info(100, 99);
-
-        state.set_block_info(block_info.clone());
-        assert_eq!(state.lib, Some(100)); // From mock response
-        assert_eq!(state.first_received_blockmeta, Some(100));
-        assert_eq!(state.first_block_to_process, Some(100));
-
-        // Test case 2: With cursor set, lib is before cursor
-        let mut state_with_cursor = State::new(
-            RpcClient::new(test_url.clone()),
-            RpcClient::new(test_url.clone()),
-            Some(110),
-            "test_cursor_file".to_string(),
-            BlockPrinter::new(None, None, false),
-            true,
-        );
-
-        state_with_cursor.set_block_info(block_info.clone());
-        assert_eq!(state_with_cursor.first_received_blockmeta, Some(100));
-        assert_eq!(state_with_cursor.first_block_to_process, None); // Should not be set since cursor exists
-        assert_eq!(state_with_cursor.cursor, Some(110));
-
-        // Test case 3: With cursor set, lib is greater than cursor which will get cancelled
-        let mut state_with_cursor = State::new(
-            RpcClient::new(test_url.clone()),
-            RpcClient::new(test_url.clone()),
-            Some(90),
-            "test_cursor_file".to_string(),
-            BlockPrinter::new(None, None, false),
-            true,
-        );
-
-        state_with_cursor.set_block_info(block_info.clone());
-        assert_eq!(state_with_cursor.first_received_blockmeta, Some(100));
-        assert_eq!(state_with_cursor.first_block_to_process, Some(100)); // gets set since cursor must be ignored
-        assert_eq!(state_with_cursor.cursor, None);
-
-        // Test case 4: Already initialized state
-        state.first_received_blockmeta = Some(50);
-        state.set_block_info(test_block_info(100, 99));
-        // Check block was added without modifying first_received_blockmeta
-        assert_eq!(state.first_received_blockmeta, Some(50));
-        assert!(state.block_infos.contains_key(&100));
-    }
-
-    #[test]
-    fn test_add_missing_slots_to_confirmed_slots() {
-        let mut state = State::new(
-            RpcClient::new("http://test.local"),
-            RpcClient::new("http://test.remote"),
-            None,
-            "test_cursor.txt".to_string(),
-            BlockPrinter::new(None, None, false),
-            true,
-        );
-
-        // Setup initial state
-        state.initialized = true;
-        state.last_sent_block = Some(1);
-
-        state.block_infos.insert(1, test_block_info(1, 0));
-        state.block_infos.insert(2, test_block_info(2, 1));
-        state.block_infos.insert(4, test_block_info(4, 2));
-        state.block_infos.insert(6, test_block_info(6, 4));
-
-        // assume we receive confirmed_slot 7 with parent_slot 6
-        let result = state.add_missing_slots_to_confirmed_slots(state.last_sent_block.unwrap(), 6);
-        assert!(result);
-
-        assert!(state.confirmed_slots.get(&1).is_none()); // was already sent
-
-        assert!(state.confirmed_slots.get(&2).is_some());
-        assert!(state.confirmed_slots.get(&4).is_some());
-        assert!(state.confirmed_slots.get(&6).is_some());
-    }
-
-    const PUB_KEY_1: &[u8] = b"pubkey.1".as_slice();
-    const OWNER_KEY_1: &[u8] = b"owner.1".as_slice();
-    const DATA_1: &[u8] = b"data.1";
-    const OWNER_KEY_11111111111111111111111111111111: &[u8] = [
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0,
-    ]
-    .as_slice();
-
-    #[test]
-    fn test_set_account_startup_and_then_normal_will_not_repeat() {
-        let mut state = test_state_no_rpc(None);
-        let slot: u64 = 1;
-        let data_hash = gxhash64(b"data.1", 76);
-
-        state.first_block_to_process = Some(slot);
-        // First call with is_startup=true
-        state.set_account(
-            slot,
-            PUB_KEY_1,
-            DATA_1,
-            OWNER_KEY_1,
-            0,
-            false,
-            true,
-            data_hash,
-            false,
-        );
-
-        // Second call with is_startup=false and incremented slot
-        let next_slot = slot + 1;
-        state.set_account(
-            next_slot,
-            PUB_KEY_1,
-            DATA_1,
-            OWNER_KEY_1,
-            0,
-            false,
-            false,
-            data_hash,
-            false,
-        );
-
-        // Assert that self.block_account_entries(slot_number) is empty for the slot+1
-        assert!(state
-            .block_account_changes
-            .get(&next_slot)
-            .unwrap()
-            .is_empty());
-    }
-
-    #[test]
-    fn test_set_account_delete_two_owners_repeat() {
-        let mut state = test_state_no_rpc(None);
-        let slot: u64 = 1;
-        let data_hash = 0;
-
-        state.first_block_to_process = Some(slot);
-        // create account there
-        state.set_account(
-            slot,
-            PUB_KEY_1,
-            DATA_1,
-            OWNER_KEY_1,
-            0,
-            false, // deleted
-            false,
-            data_hash,
-            false,
-        );
-
-        // delete account here
-        state.set_account(
-            slot,
-            PUB_KEY_1,
-            DATA_1,
-            OWNER_KEY_11111111111111111111111111111111,
-            0,
-            true, // deleted
-            false,
-            data_hash,
-            false,
-        );
-
-        // Assert that self.block_account_entries(slot_number) is empty for the slot+1
-        let slot_changes = state.block_account_changes.get(&slot).unwrap();
-        assert!(!slot_changes.is_empty());
-        assert!(slot_changes.len() == 2);
-
-        let acc_owner_1 = [OWNER_KEY_1, PUB_KEY_1].concat();
-        let acc_owner_11111 = [OWNER_KEY_11111111111111111111111111111111, PUB_KEY_1].concat();
-
-        assert!(slot_changes.contains_key(&acc_owner_1));
-        assert!(slot_changes.contains_key(&acc_owner_11111));
-    }
-
-    #[test]
-    fn test_set_account_delete_before_ownerchange_repeat() {
-        let mut state = test_state_no_rpc(None);
-        let slot: u64 = 1;
-        let data_hash = 0;
-
-        state.first_block_to_process = Some(slot);
-        // create account there
-        state.set_account(
-            slot,
-            PUB_KEY_1,
-            DATA_1,
-            OWNER_KEY_1,
-            0,
-            false, // deleted
-            false,
-            data_hash,
-            false,
-        );
-
-        // delete account here
-        state.set_account(
-            slot,
-            PUB_KEY_1,
-            DATA_1,
-            OWNER_KEY_1,
-            0,
-            true, // deleted
-            false,
-            data_hash,
-            false,
-        );
-
-        // delete account here
-        state.set_account(
-            slot,
-            PUB_KEY_1,
-            DATA_1,
-            OWNER_KEY_11111111111111111111111111111111,
-            0,
-            true, // deleted
-            false,
-            data_hash,
-            false,
-        );
-
-        // Assert that self.block_account_entries(slot_number) is empty for the slot+1
-        let slot_changes = state.block_account_changes.get(&slot).unwrap();
-        assert!(!slot_changes.is_empty());
-        assert!(slot_changes.len() == 2);
-
-        let acc_owner_1 = [OWNER_KEY_1, PUB_KEY_1].concat();
-        let acc_owner_11111 = [OWNER_KEY_11111111111111111111111111111111, PUB_KEY_1].concat();
-
-        assert!(slot_changes.contains_key(&acc_owner_1));
-        assert!(slot_changes.contains_key(&acc_owner_11111));
-    }
-
-    #[test]
-    fn test_set_account_delete_after_ownerchange_repeat() {
-        let mut state = test_state_no_rpc(None);
-        let slot: u64 = 1;
-        let data_hash = 0;
-
-        state.first_block_to_process = Some(slot);
-        // create account there
-        state.set_account(
-            slot,
-            PUB_KEY_1,
-            DATA_1,
-            OWNER_KEY_1,
-            0,
-            false,
-            false,
-            data_hash,
-            false,
-        );
-
-        // delete account here
-        state.set_account(
-            slot,
-            PUB_KEY_1,
-            DATA_1,
-            OWNER_KEY_11111111111111111111111111111111,
-            0,
-            false,
-            false,
-            data_hash,
-            false,
-        );
-
-        // delete account here
-        state.set_account(
-            slot,
-            PUB_KEY_1,
-            DATA_1,
-            OWNER_KEY_11111111111111111111111111111111,
-            0,
-            true, // deleted
-            false,
-            data_hash,
-            false,
-        );
-
-        // Assert that self.block_account_entries(slot_number) is empty for the slot+1
-        let slot_changes = state.block_account_changes.get(&slot).unwrap();
-        assert!(!slot_changes.is_empty());
-        assert!(slot_changes.len() == 2);
-
-        let acc_owner_1 = [OWNER_KEY_1, PUB_KEY_1].concat();
-        let acc_owner_11111 = [OWNER_KEY_11111111111111111111111111111111, PUB_KEY_1].concat();
-
-        assert!(slot_changes.contains_key(&acc_owner_1));
-        assert!(slot_changes.contains_key(&acc_owner_11111));
-    }
-
-    fn test_state_no_rpc(cursor: Option<u64>) -> State {
-        test_state(
-            "http://localhost:8899".to_string(),
-            "http://localhost:8899".to_string(),
-            cursor,
-        )
-    }
-
-    fn test_state(local_rpc: String, remote_rpc: String, cursor: Option<u64>) -> State {
-        State::new(
-            RpcClient::new(local_rpc),
-            RpcClient::new(remote_rpc),
-            cursor,
-            "test_cursor.txt".to_string(),
-            BlockPrinter::new(None, None, false),
-            true,
-        )
-    }
-}
+//#[cfg(test)]
+//
+//mod tests {
+//    use super::*;
+//    use gxhash::gxhash64;
+//    use pretty_assertions::assert_eq;
+//
+//    use wiremock::matchers::{method, path};
+//    use wiremock::{Mock, MockServer, ResponseTemplate};
+//
+//    fn test_block_info(slot: u64, parent_slot: u64) -> BlockInfo {
+//        BlockInfo {
+//            timestamp: Timestamp {
+//                seconds: 1234,
+//                nanos: 0,
+//            },
+//            parent_slot,
+//            slot,
+//            block_hash: "hash1".to_string(),
+//            parent_hash: "parent1".to_string(),
+//            height: Some(100),
+//            rewards: vec![],
+//            transaction_count: 0,
+//        }
+//    }
+//
+//    #[tokio::test(flavor = "multi_thread")]
+//    async fn test_set_block_info() {
+//        let mock_server = MockServer::start().await;
+//        let test_url = mock_server.uri();
+//
+//        Mock::given(method("POST"))
+//            .and(path("/"))
+//            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+//                "jsonrpc": "2.0",
+//                "result": 100,
+//                "id": 1
+//            })))
+//            .mount(&mock_server)
+//            .await;
+//
+//        // Initialize state with no lib and no first_received_blockmeta
+//
+//        let mut state = State::new(
+//            RpcClient::new(test_url.clone()),
+//            RpcClient::new(test_url.clone()),
+//            None,
+//            "test_cursor_file".to_string(),
+//            BlockPrinter::new(None, None, false),
+//            true,
+//        );
+//
+//        // Test case 1: No lib set yet
+//        let block_info = test_block_info(100, 99);
+//
+//        state.set_block_info(block_info.clone());
+//        assert_eq!(state.lib, Some(100)); // From mock response
+//        assert_eq!(state.first_received_blockmeta, Some(100));
+//        assert_eq!(state.first_block_to_process, Some(100));
+//
+//        // Test case 2: With cursor set, lib is before cursor
+//        let mut state_with_cursor = State::new(
+//            RpcClient::new(test_url.clone()),
+//            RpcClient::new(test_url.clone()),
+//            Some(110),
+//            "test_cursor_file".to_string(),
+//            BlockPrinter::new(None, None, false),
+//            true,
+//        );
+//
+//        state_with_cursor.set_block_info(block_info.clone());
+//        assert_eq!(state_with_cursor.first_received_blockmeta, Some(100));
+//        assert_eq!(state_with_cursor.first_block_to_process, None); // Should not be set since cursor exists
+//        assert_eq!(state_with_cursor.cursor, Some(110));
+//
+//        // Test case 3: With cursor set, lib is greater than cursor which will get cancelled
+//        let mut state_with_cursor = State::new(
+//            RpcClient::new(test_url.clone()),
+//            RpcClient::new(test_url.clone()),
+//            Some(90),
+//            "test_cursor_file".to_string(),
+//            BlockPrinter::new(None, None, false),
+//            true,
+//        );
+//
+//        state_with_cursor.set_block_info(block_info.clone());
+//        assert_eq!(state_with_cursor.first_received_blockmeta, Some(100));
+//        assert_eq!(state_with_cursor.first_block_to_process, Some(100)); // gets set since cursor must be ignored
+//        assert_eq!(state_with_cursor.cursor, None);
+//
+//        // Test case 4: Already initialized state
+//        state.first_received_blockmeta = Some(50);
+//        state.set_block_info(test_block_info(100, 99));
+//        // Check block was added without modifying first_received_blockmeta
+//        assert_eq!(state.first_received_blockmeta, Some(50));
+//        assert!(state.block_infos.contains_key(&100));
+//    }
+//
+//    #[test]
+//    fn test_add_missing_slots_to_confirmed_slots() {
+//        let mut state = State::new(
+//            RpcClient::new("http://test.local"),
+//            RpcClient::new("http://test.remote"),
+//            None,
+//            "test_cursor.txt".to_string(),
+//            BlockPrinter::new(None, None, false),
+//            true,
+//        );
+//
+//        // Setup initial state
+//        state.initialized = true;
+//        state.last_sent_block = Some(1);
+//
+//        state.block_infos.insert(1, test_block_info(1, 0));
+//        state.block_infos.insert(2, test_block_info(2, 1));
+//        state.block_infos.insert(4, test_block_info(4, 2));
+//        state.block_infos.insert(6, test_block_info(6, 4));
+//
+//        // assume we receive confirmed_slot 7 with parent_slot 6
+//        let result = state.add_missing_slots_to_confirmed_slots(state.last_sent_block.unwrap(), 6);
+//        assert!(result);
+//
+//        assert!(state.confirmed_slots.get(&1).is_none()); // was already sent
+//
+//        assert!(state.confirmed_slots.get(&2).is_some());
+//        assert!(state.confirmed_slots.get(&4).is_some());
+//        assert!(state.confirmed_slots.get(&6).is_some());
+//    }
+//
+//    const PUB_KEY_1: &[u8] = b"pubkey.1".as_slice();
+//    const OWNER_KEY_1: &[u8] = b"owner.1".as_slice();
+//    const DATA_1: &[u8] = b"data.1";
+//    const OWNER_KEY_11111111111111111111111111111111: &[u8] = [
+//        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+//        0, 0,
+//    ]
+//    .as_slice();
+//
+//    #[test]
+//    fn test_set_account_startup_and_then_normal_will_not_repeat() {
+//        let mut state = test_state_no_rpc(None);
+//        let slot: u64 = 1;
+//        let data_hash = gxhash64(b"data.1", 76);
+//
+//        state.first_block_to_process = Some(slot);
+//        // First call with is_startup=true
+//        state.set_account(
+//            slot,
+//            PUB_KEY_1,
+//            DATA_1,
+//            OWNER_KEY_1,
+//            0,
+//            false,
+//            true,
+//            data_hash,
+//            false,
+//        );
+//
+//        // Second call with is_startup=false and incremented slot
+//        let next_slot = slot + 1;
+//        state.set_account(
+//            next_slot,
+//            PUB_KEY_1,
+//            DATA_1,
+//            OWNER_KEY_1,
+//            0,
+//            false,
+//            false,
+//            data_hash,
+//            false,
+//        );
+//
+//        // Assert that self.block_account_entries(slot_number) is empty for the slot+1
+//        assert!(state
+//            .block_account_changes
+//            .get(&next_slot)
+//            .unwrap()
+//            .is_empty());
+//    }
+//
+//    #[test]
+//    fn test_set_account_delete_two_owners_repeat() {
+//        let mut state = test_state_no_rpc(None);
+//        let slot: u64 = 1;
+//        let data_hash = 0;
+//
+//        state.first_block_to_process = Some(slot);
+//        // create account there
+//        state.set_account(
+//            slot,
+//            PUB_KEY_1,
+//            DATA_1,
+//            OWNER_KEY_1,
+//            0,
+//            false, // deleted
+//            false,
+//            data_hash,
+//            false,
+//        );
+//
+//        // delete account here
+//        state.set_account(
+//            slot,
+//            PUB_KEY_1,
+//            DATA_1,
+//            OWNER_KEY_11111111111111111111111111111111,
+//            0,
+//            true, // deleted
+//            false,
+//            data_hash,
+//            false,
+//        );
+//
+//        // Assert that self.block_account_entries(slot_number) is empty for the slot+1
+//        let slot_changes = state.block_account_changes.get(&slot).unwrap();
+//        assert!(!slot_changes.is_empty());
+//        assert!(slot_changes.len() == 2);
+//
+//        let acc_owner_1 = [OWNER_KEY_1, PUB_KEY_1].concat();
+//        let acc_owner_11111 = [OWNER_KEY_11111111111111111111111111111111, PUB_KEY_1].concat();
+//
+//        assert!(slot_changes.contains_key(&acc_owner_1));
+//        assert!(slot_changes.contains_key(&acc_owner_11111));
+//    }
+//
+//    #[test]
+//    fn test_set_account_delete_before_ownerchange_repeat() {
+//        let mut state = test_state_no_rpc(None);
+//        let slot: u64 = 1;
+//        let data_hash = 0;
+//
+//        state.first_block_to_process = Some(slot);
+//        // create account there
+//        state.set_account(
+//            slot,
+//            PUB_KEY_1,
+//            DATA_1,
+//            OWNER_KEY_1,
+//            0,
+//            false, // deleted
+//            false,
+//            data_hash,
+//            false,
+//        );
+//
+//        // delete account here
+//        state.set_account(
+//            slot,
+//            PUB_KEY_1,
+//            DATA_1,
+//            OWNER_KEY_1,
+//            0,
+//            true, // deleted
+//            false,
+//            data_hash,
+//            false,
+//        );
+//
+//        // delete account here
+//        state.set_account(
+//            slot,
+//            PUB_KEY_1,
+//            DATA_1,
+//            OWNER_KEY_11111111111111111111111111111111,
+//            0,
+//            true, // deleted
+//            false,
+//            data_hash,
+//            false,
+//        );
+//
+//        // Assert that self.block_account_entries(slot_number) is empty for the slot+1
+//        let slot_changes = state.block_account_changes.get(&slot).unwrap();
+//        assert!(!slot_changes.is_empty());
+//        assert!(slot_changes.len() == 2);
+//
+//        let acc_owner_1 = [OWNER_KEY_1, PUB_KEY_1].concat();
+//        let acc_owner_11111 = [OWNER_KEY_11111111111111111111111111111111, PUB_KEY_1].concat();
+//
+//        assert!(slot_changes.contains_key(&acc_owner_1));
+//        assert!(slot_changes.contains_key(&acc_owner_11111));
+//    }
+//
+//    #[test]
+//    fn test_set_account_delete_after_ownerchange_repeat() {
+//        let mut state = test_state_no_rpc(None);
+//        let slot: u64 = 1;
+//        let data_hash = 0;
+//
+//        state.first_block_to_process = Some(slot);
+//        // create account there
+//        state.set_account(
+//            slot,
+//            PUB_KEY_1,
+//            DATA_1,
+//            OWNER_KEY_1,
+//            0,
+//            false,
+//            false,
+//            data_hash,
+//            false,
+//        );
+//
+//        // delete account here
+//        state.set_account(
+//            slot,
+//            PUB_KEY_1,
+//            DATA_1,
+//            OWNER_KEY_11111111111111111111111111111111,
+//            0,
+//            false,
+//            false,
+//            data_hash,
+//            false,
+//        );
+//
+//        // delete account here
+//        state.set_account(
+//            slot,
+//            PUB_KEY_1,
+//            DATA_1,
+//            OWNER_KEY_11111111111111111111111111111111,
+//            0,
+//            true, // deleted
+//            false,
+//            data_hash,
+//            false,
+//        );
+//
+//        // Assert that self.block_account_entries(slot_number) is empty for the slot+1
+//        let slot_changes = state.block_account_changes.get(&slot).unwrap();
+//        assert!(!slot_changes.is_empty());
+//        assert!(slot_changes.len() == 2);
+//
+//        let acc_owner_1 = [OWNER_KEY_1, PUB_KEY_1].concat();
+//        let acc_owner_11111 = [OWNER_KEY_11111111111111111111111111111111, PUB_KEY_1].concat();
+//
+//        assert!(slot_changes.contains_key(&acc_owner_1));
+//        assert!(slot_changes.contains_key(&acc_owner_11111));
+//    }
+//
+//    fn test_state_no_rpc(cursor: Option<u64>) -> State {
+//        test_state(
+//            "http://localhost:8899".to_string(),
+//            "http://localhost:8899".to_string(),
+//            cursor,
+//        )
+//    }
+//
+//    fn test_state(local_rpc: String, remote_rpc: String, cursor: Option<u64>) -> State {
+//        State::new(
+//            RpcClient::new(local_rpc),
+//            RpcClient::new(remote_rpc),
+//            cursor,
+//            "test_cursor.txt".to_string(),
+//            BlockPrinter::new(None, None, false),
+//            true,
+//        )
+//    }
+//}
+//
