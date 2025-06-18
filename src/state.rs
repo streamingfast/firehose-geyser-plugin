@@ -576,6 +576,13 @@ impl State {
             let deleted = change.deleted;
 
             let owner_account_key = [owner.clone(), address.clone()].concat();
+            if let Some(prev_owner) = self.account_owners.get(&address) {
+                if &owner != prev_owner {
+                    let prev_owner_account_key = [prev_owner.clone(), address.clone()].concat();
+                    self.account_data_hash.remove(&prev_owner_account_key);
+                }
+            }
+
             if deleted {
                 self.account_data_hash.remove(&owner_account_key);
                 self.account_owners.remove(&address);
@@ -1169,8 +1176,8 @@ mod tests {
         // Check that account_owners is updated to new owner
         assert_eq!(state.account_owners.get(&address), Some(&new_owner));
 
-        // Check that old key is still there (apply_cache_changes doesn't remove old keys)
-        assert!(state.account_data_hash.contains_key(&old_key));
+        // Check that old key is removed
+        assert!(!state.account_data_hash.contains_key(&old_key));
 
         // Check that new key is added
         let new_key = [new_owner.clone(), address.clone()].concat();
@@ -1208,11 +1215,11 @@ mod tests {
         // The last change should win for account_owners
         assert_eq!(state.account_owners.get(&address), Some(&owner2));
 
-        // Both data hashes should be stored with their respective keys
+        // The previous owner should be removed
         let key1 = [owner1.clone(), address.clone()].concat();
         let key2 = [owner2.clone(), address.clone()].concat();
 
-        assert_eq!(state.account_data_hash.get(&key1), Some(&data_hash1));
+        assert_eq!(state.account_data_hash.get(&key1), None);
         assert_eq!(state.account_data_hash.get(&key2), Some(&data_hash2));
     }
 
