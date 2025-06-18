@@ -363,6 +363,12 @@ impl State {
         data_hash: u64,
         trace: bool,
     ) {
+        if let Some(last_sent) = self.last_sent_block {
+            if last_sent >= slot {
+                error!("Received account data for slot {} which is older than the last sent block {} (owner: {:?}, account: {:?})", slot, last_sent,  bs58::encode(pub_key).into_string(), bs58::encode(owner).into_string());
+            }
+        }
+
         //create a unique key from owner and account addresses
         let owner_account_key = [owner, pub_key].concat();
 
@@ -527,6 +533,8 @@ impl State {
                         warn!("Failed to add all missing slots to 'confirmed_slots' between {} and {}", last_sent_block, slot);
                     }
                     break; //
+                } else if last_sent_block != slot - 1 {
+                    warn!("dropped slots from {} to {}", last_sent_block + 1, slot - 1);
                 }
             }
 
