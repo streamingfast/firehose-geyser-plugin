@@ -575,12 +575,13 @@ impl State {
             let data_hash = change.data_hash;
             let deleted = change.deleted;
 
+            let owner_account_key = [owner.clone(), address.clone()].concat();
             if deleted {
-                self.account_data_hash.remove(&address);
+                self.account_data_hash.remove(&owner_account_key);
                 self.account_owners.remove(&address);
             } else {
-                self.account_data_hash.insert(address.clone(), data_hash);
-                self.account_owners.insert(address.clone(), owner);
+                self.account_data_hash.insert(owner_account_key, data_hash);
+                self.account_owners.insert(address.clone(), owner); // last one wins
             }
         }
     }
@@ -602,11 +603,11 @@ fn filter_account_changes(
     let mut state_changes: Vec<StateChange> = Vec::new();
 
     if let Some(changes) = changes {
-        for (account_owner_key, account_with_version) in changes {
+        for (owner_account_key, account_with_version) in changes {
             let account = &account_with_version.account;
 
             let mut should_include = false;
-            if let Some(cached_hash) = account_data_hash.get(account_owner_key) {
+            if let Some(cached_hash) = account_data_hash.get(owner_account_key) {
                 if *cached_hash != account_with_version.data_hash {
                     should_include = true;
                 }
@@ -618,7 +619,7 @@ fn filter_account_changes(
             }
 
             // Check for ownership change
-            if let Some(cached_owner) = account_owners.get(account_owner_key) {
+            if let Some(cached_owner) = account_owners.get(&account.address) {
                 if cached_owner != &account.owner {
                     should_include = true;
                     // Push the account change with the previous owner
@@ -647,54 +648,594 @@ fn filter_account_changes(
 
     filtered_changes.sort_by(|a, b| a.address.cmp(&b.address));
     return (filtered_changes, state_changes);
+}
 
-    // filter data based on cache, then update cache
-    //if deleted {
-    //    // That account will end up being remove from the chain since there is no more lamport to pay the rent.
-    //    // Best practice is to change the owner of an account to the system contract. If we keep track of this change and the account
-    //    // is recreated will emit a account change with 'owner' set to system contract and `new_owner` to contract creating the account.
-    //    // But in the case a account is recreated we want the owner to be set to the contract address creating the account.
-    //    self.account_owners.remove(&pub_key.to_vec());
-    //    self.account_data_hash.remove(&owner_account_key.to_vec());
-    //} else {
-    //    self.account_owners.insert(pub_key.to_vec(), owner.to_vec());
-    //    self.account_data_hash
-    //        .insert(owner_account_key.to_vec(), data_hash);
-    //}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hashbrown::HashMap;
+    use pb::sf::solana::r#type::v1::Account;
 
-    //// skip if the data is the same and the account is not deleted
-    //if !deleted {
-    //    if let Some(h) = self.account_data_hash.get(&owner_account_key) {
-    //        if *h == data_hash {
-    //            if trace {
-    //                debug!(
-    //                    "skipping slot because cached data hash is identical on slot {}, pub_key: {:?}, owner: {:?}, deleted: {}, data_hash: {}",
-    //                    slot, bs58::encode(pub_key).into_string(), bs58::encode(owner).into_string(), deleted, data_hash
-    //                );
-    //            }
-    //            return; // skipping same data
-    //        }
-    //    }
-    //}
+    fn create_test_account(
+        address: Vec<u8>,
+        owner: Vec<u8>,
+        data: Vec<u8>,
+        deleted: bool,
+    ) -> Account {
+        Account {
+            address,
+            owner,
+            data,
+            deleted,
+        }
+    }
 
-    ////check for ownership change
-    //if let Some(found_owner) = self.account_owners.get(pub_key).cloned() {
-    //    if found_owner != owner {
-    //        // this is an ownership change ... emitting an account change to the prev owner  (we emit TWO account changes)
-    //        self.handle_account_change(
-    //            pub_key,
-    //            data,
-    //            &found_owner,
-    //            write_version,
-    //            deleted,
-    //            data_hash,
-    //            slot,
-    //            trace,
-    //        );
-    //    }
-    //}
+    fn create_test_account_with_version(
+        account: Account,
+        write_version: u64,
+        data_hash: u64,
+    ) -> AccountWithWriteVersion {
+        AccountWithWriteVersion {
+            account,
+            write_version,
+            data_hash,
+        }
+    }
 
-    // TODO: implement
+    #[test]
+    fn test_filter_account_changes_empty_changes() {
+        let account_data_hash = HashMap::new();
+        let account_owners = HashMap::new();
+
+        let (filtered_changes, state_changes) =
+            filter_account_changes(None, &account_data_hash, &account_owners);
+
+        assert!(filtered_changes.is_empty());
+        assert!(state_changes.is_empty());
+    }
+
+    #[test]
+    fn test_filter_account_changes_new_account() {
+        let mut changes = HashMap::new();
+        let account_data_hash = HashMap::new();
+        let account_owners = HashMap::new();
+
+        let address = vec![1, 2, 3];
+        let owner = vec![4, 5, 6];
+        let data = vec![7, 8, 9];
+        let account = create_test_account(address.clone(), owner.clone(), data.clone(), false);
+        let account_with_version = create_test_account_with_version(account, 1, 123);
+
+        changes.insert(vec![1, 2, 3], account_with_version);
+
+        let (filtered_changes, state_changes) =
+            filter_account_changes(Some(&changes), &account_data_hash, &account_owners);
+
+        assert_eq!(filtered_changes.len(), 1);
+        assert_eq!(state_changes.len(), 1);
+
+        let filtered_account = &filtered_changes[0];
+        assert_eq!(filtered_account.address, address);
+        assert_eq!(filtered_account.owner, owner);
+        assert_eq!(filtered_account.data, data);
+        assert_eq!(filtered_account.deleted, false);
+
+        let state_change = &state_changes[0];
+        assert_eq!(state_change.address, address);
+        assert_eq!(state_change.owner, owner);
+        assert_eq!(state_change.data_hash, 123);
+        assert_eq!(state_change.deleted, false);
+    }
+
+    #[test]
+    fn test_filter_account_changes_same_data_hash_not_deleted() {
+        let mut changes = HashMap::new();
+        let mut account_data_hash = HashMap::new();
+        let account_owners = HashMap::new();
+
+        let address = vec![1, 2, 3];
+        let owner = vec![4, 5, 6];
+        let data = vec![7, 8, 9];
+        let account = create_test_account(address.clone(), owner.clone(), data.clone(), false);
+        let account_with_version = create_test_account_with_version(account, 1, 123);
+
+        changes.insert(address.clone(), account_with_version);
+        account_data_hash.insert(address.clone(), 123); // Same hash
+
+        let (filtered_changes, state_changes) =
+            filter_account_changes(Some(&changes), &account_data_hash, &account_owners);
+
+        // Should be filtered out since data hash is the same and account is not deleted
+        assert!(filtered_changes.is_empty());
+        assert!(state_changes.is_empty());
+    }
+
+    #[test]
+    fn test_filter_account_changes_different_data_hash() {
+        let mut changes = HashMap::new();
+        let mut account_data_hash = HashMap::new();
+        let account_owners = HashMap::new();
+
+        let address = vec![1, 2, 3];
+        let owner = vec![4, 5, 6];
+        let data = vec![7, 8, 9];
+        let account = create_test_account(address.clone(), owner.clone(), data.clone(), false);
+        let account_with_version = create_test_account_with_version(account, 1, 123);
+
+        changes.insert(address.clone(), account_with_version);
+        account_data_hash.insert(address.clone(), 456); // Different hash
+
+        let (filtered_changes, state_changes) =
+            filter_account_changes(Some(&changes), &account_data_hash, &account_owners);
+
+        assert_eq!(filtered_changes.len(), 1);
+        assert_eq!(state_changes.len(), 1);
+
+        let filtered_account = &filtered_changes[0];
+        assert_eq!(filtered_account.address, address);
+        assert_eq!(filtered_account.owner, owner);
+        assert_eq!(filtered_account.data, data);
+
+        let state_change = &state_changes[0];
+        assert_eq!(state_change.data_hash, 123);
+    }
+
+    #[test]
+    fn test_filter_account_changes_deleted_account() {
+        let mut changes = HashMap::new();
+        let mut account_data_hash = HashMap::new();
+        let account_owners = HashMap::new();
+
+        let address = vec![1, 2, 3];
+        let owner = vec![4, 5, 6];
+        let data = vec![7, 8, 9];
+        let account = create_test_account(address.clone(), owner.clone(), data.clone(), true);
+        let account_with_version = create_test_account_with_version(account, 1, 123);
+
+        changes.insert(address.clone(), account_with_version);
+        account_data_hash.insert(address.clone(), 123); // Same hash but account is deleted
+
+        let (filtered_changes, state_changes) =
+            filter_account_changes(Some(&changes), &account_data_hash, &account_owners);
+
+        // Should be included since account is deleted
+        assert_eq!(filtered_changes.len(), 1);
+        assert_eq!(state_changes.len(), 1);
+
+        let filtered_account = &filtered_changes[0];
+        assert_eq!(filtered_account.deleted, true);
+
+        let state_change = &state_changes[0];
+        assert_eq!(state_change.deleted, true);
+    }
+
+    #[test]
+    fn test_filter_account_changes_ownership_change() {
+        let mut changes = HashMap::new();
+        let account_data_hash = HashMap::new();
+        let mut account_owners = HashMap::new();
+
+        let address = vec![1, 2, 3];
+        let old_owner = vec![4, 5, 6];
+        let new_owner = vec![7, 8, 9];
+        let data = vec![10, 11, 12];
+        let account = create_test_account(address.clone(), new_owner.clone(), data.clone(), false);
+        let account_with_version = create_test_account_with_version(account, 1, 123);
+
+        changes.insert(address.clone(), account_with_version);
+        account_owners.insert(address.clone(), old_owner.clone()); // Different owner
+
+        let (filtered_changes, state_changes) =
+            filter_account_changes(Some(&changes), &account_data_hash, &account_owners);
+
+        // Should have 2 accounts: one with old owner, one with new owner
+        assert_eq!(filtered_changes.len(), 2);
+        assert_eq!(state_changes.len(), 1);
+
+        // First account should have the old owner
+        let first_account = &filtered_changes[0];
+        assert_eq!(first_account.address, address);
+        assert_eq!(first_account.owner, old_owner);
+        assert_eq!(first_account.data, data);
+
+        // Second account should have the new owner
+        let second_account = &filtered_changes[1];
+        assert_eq!(second_account.address, address);
+        assert_eq!(second_account.owner, new_owner);
+        assert_eq!(second_account.data, data);
+
+        // State change should reflect the new owner
+        let state_change = &state_changes[0];
+        assert_eq!(state_change.address, address);
+        assert_eq!(state_change.owner, new_owner);
+    }
+
+    #[test]
+    fn test_filter_account_changes_multiple_accounts_sorted() {
+        let mut changes = HashMap::new();
+        let account_data_hash = HashMap::new();
+        let account_owners = HashMap::new();
+
+        // Create accounts with addresses that will test sorting
+        let address1 = vec![3, 0, 0]; // Higher value
+        let address2 = vec![1, 0, 0]; // Lower value
+        let address3 = vec![2, 0, 0]; // Middle value
+
+        let owner = vec![4, 5, 6];
+        let data = vec![7, 8, 9];
+
+        let account1 = create_test_account(address1.clone(), owner.clone(), data.clone(), false);
+        let account2 = create_test_account(address2.clone(), owner.clone(), data.clone(), false);
+        let account3 = create_test_account(address3.clone(), owner.clone(), data.clone(), false);
+
+        let account_with_version1 = create_test_account_with_version(account1, 1, 123);
+        let account_with_version2 = create_test_account_with_version(account2, 2, 456);
+        let account_with_version3 = create_test_account_with_version(account3, 3, 789);
+
+        changes.insert(address1.clone(), account_with_version1);
+        changes.insert(address2.clone(), account_with_version2);
+        changes.insert(address3.clone(), account_with_version3);
+
+        let (filtered_changes, state_changes) =
+            filter_account_changes(Some(&changes), &account_data_hash, &account_owners);
+
+        assert_eq!(filtered_changes.len(), 3);
+        assert_eq!(state_changes.len(), 3);
+
+        // Results should be sorted by address
+        assert_eq!(filtered_changes[0].address, address2); // [1, 0, 0]
+        assert_eq!(filtered_changes[1].address, address3); // [2, 0, 0]
+        assert_eq!(filtered_changes[2].address, address1); // [3, 0, 0]
+    }
+
+    #[test]
+    fn test_filter_account_changes_complex_scenario() {
+        let mut changes = HashMap::new();
+        let mut account_data_hash = HashMap::new();
+        let mut account_owners = HashMap::new();
+
+        // Account 1: New account (should be included)
+        let address1 = vec![1, 0, 0];
+        let owner1 = vec![10, 0, 0];
+        let data1 = vec![100, 0, 0];
+        let account1 = create_test_account(address1.clone(), owner1.clone(), data1.clone(), false);
+        let account_with_version1 = create_test_account_with_version(account1, 1, 111);
+        changes.insert(address1.clone(), account_with_version1);
+
+        // Account 2: Same data hash, not deleted (should be filtered out)
+        let address2 = vec![2, 0, 0];
+        let owner2 = vec![20, 0, 0];
+        let data2 = vec![200, 0, 0];
+        let account2 = create_test_account(address2.clone(), owner2.clone(), data2.clone(), false);
+        let account_with_version2 = create_test_account_with_version(account2, 2, 222);
+        changes.insert(address2.clone(), account_with_version2);
+        account_data_hash.insert(address2.clone(), 222); // Same hash
+
+        // Account 3: Ownership change (should include both old and new owner versions)
+        let address3 = vec![3, 0, 0];
+        let old_owner3 = vec![30, 0, 0];
+        let new_owner3 = vec![31, 0, 0];
+        let data3 = vec![255, 0, 0];
+        let account3 =
+            create_test_account(address3.clone(), new_owner3.clone(), data3.clone(), false);
+        let account_with_version3 = create_test_account_with_version(account3, 3, 333);
+        changes.insert(address3.clone(), account_with_version3);
+        account_owners.insert(address3.clone(), old_owner3.clone());
+
+        // Account 4: Deleted account with same hash (should be included)
+        let address4 = vec![4, 0, 0];
+        let owner4 = vec![40, 0, 0];
+        let data4 = vec![200, 0, 0];
+        let account4 = create_test_account(address4.clone(), owner4.clone(), data4.clone(), true);
+        let account_with_version4 = create_test_account_with_version(account4, 4, 444);
+        changes.insert(address4.clone(), account_with_version4);
+        account_data_hash.insert(address4.clone(), 444); // Same hash but deleted
+
+        let (filtered_changes, state_changes) =
+            filter_account_changes(Some(&changes), &account_data_hash, &account_owners);
+
+        // Should have: Account1, Account3 (old owner), Account3 (new owner), Account4
+        assert_eq!(filtered_changes.len(), 4);
+        // Should have state changes for: Account1, Account3, Account4
+        assert_eq!(state_changes.len(), 3);
+
+        // Verify the accounts are sorted by address
+        assert_eq!(filtered_changes[0].address, address1); // Account 1
+        assert_eq!(filtered_changes[1].address, address3); // Account 3 (old owner)
+        assert_eq!(filtered_changes[1].owner, old_owner3);
+        assert_eq!(filtered_changes[2].address, address3); // Account 3 (new owner)
+        assert_eq!(filtered_changes[2].owner, new_owner3);
+        assert_eq!(filtered_changes[3].address, address4); // Account 4 (deleted)
+        assert_eq!(filtered_changes[3].deleted, true);
+    }
+
+    #[test]
+    fn test_apply_cache_changes_empty_changes() {
+        let mut state = create_test_state();
+        let changes = Vec::new();
+
+        state.apply_cache_changes(changes);
+
+        assert!(state.account_data_hash.is_empty());
+        assert!(state.account_owners.is_empty());
+    }
+
+    #[test]
+    fn test_apply_cache_changes_single_non_deleted_account() {
+        let mut state = create_test_state();
+        let address = vec![1, 2, 3];
+        let owner = vec![4, 5, 6];
+        let data_hash = 123u64;
+
+        let change = StateChange {
+            address: address.clone(),
+            owner: owner.clone(),
+            data_hash,
+            deleted: false,
+        };
+
+        state.apply_cache_changes(vec![change]);
+
+        // Check that account_owners is updated
+        assert_eq!(state.account_owners.get(&address), Some(&owner));
+
+        // Check that account_data_hash is updated with the combined key
+        let expected_key = [owner.clone(), address.clone()].concat();
+        assert_eq!(state.account_data_hash.get(&expected_key), Some(&data_hash));
+    }
+
+    #[test]
+    fn test_apply_cache_changes_single_deleted_account() {
+        let mut state = create_test_state();
+        let address = vec![1, 2, 3];
+        let owner = vec![4, 5, 6];
+        let data_hash = 123u64;
+
+        // First add an account
+        let owner_account_key = [owner.clone(), address.clone()].concat();
+        state.account_owners.insert(address.clone(), owner.clone());
+        state
+            .account_data_hash
+            .insert(owner_account_key.clone(), data_hash);
+
+        // Verify it's there
+        assert!(state.account_owners.contains_key(&address));
+        assert!(state.account_data_hash.contains_key(&owner_account_key));
+
+        // Now delete it
+        let change = StateChange {
+            address: address.clone(),
+            owner: owner.clone(),
+            data_hash,
+            deleted: true,
+        };
+
+        state.apply_cache_changes(vec![change]);
+
+        // Check that both are removed
+        assert!(!state.account_owners.contains_key(&address));
+        assert!(!state.account_data_hash.contains_key(&owner_account_key));
+    }
+
+    #[test]
+    fn test_apply_cache_changes_multiple_accounts() {
+        let mut state = create_test_state();
+
+        let address1 = vec![1, 0, 0];
+        let owner1 = vec![10, 0, 0];
+        let data_hash1 = 111u64;
+
+        let address2 = vec![2, 0, 0];
+        let owner2 = vec![20, 0, 0];
+        let data_hash2 = 222u64;
+
+        let address3 = vec![3, 0, 0];
+        let owner3 = vec![30, 0, 0];
+        let data_hash3 = 333u64;
+
+        let changes = vec![
+            StateChange {
+                address: address1.clone(),
+                owner: owner1.clone(),
+                data_hash: data_hash1,
+                deleted: false,
+            },
+            StateChange {
+                address: address2.clone(),
+                owner: owner2.clone(),
+                data_hash: data_hash2,
+                deleted: false,
+            },
+            StateChange {
+                address: address3.clone(),
+                owner: owner3.clone(),
+                data_hash: data_hash3,
+                deleted: false,
+            },
+        ];
+
+        state.apply_cache_changes(changes);
+
+        // Check all accounts are added
+        assert_eq!(state.account_owners.get(&address1), Some(&owner1));
+        assert_eq!(state.account_owners.get(&address2), Some(&owner2));
+        assert_eq!(state.account_owners.get(&address3), Some(&owner3));
+
+        // Check all data hashes are added
+        let key1 = [owner1.clone(), address1.clone()].concat();
+        let key2 = [owner2.clone(), address2.clone()].concat();
+        let key3 = [owner3.clone(), address3.clone()].concat();
+
+        assert_eq!(state.account_data_hash.get(&key1), Some(&data_hash1));
+        assert_eq!(state.account_data_hash.get(&key2), Some(&data_hash2));
+        assert_eq!(state.account_data_hash.get(&key3), Some(&data_hash3));
+    }
+
+    #[test]
+    fn test_apply_cache_changes_mixed_operations() {
+        let mut state = create_test_state();
+
+        // Pre-populate with some data
+        let address1 = vec![1, 0, 0];
+        let owner1 = vec![10, 0, 0];
+        let data_hash1 = 111u64;
+        let key1 = [owner1.clone(), address1.clone()].concat();
+
+        let address2 = vec![2, 0, 0];
+        let owner2 = vec![20, 0, 0];
+        let data_hash2 = 222u64;
+        let key2 = [owner2.clone(), address2.clone()].concat();
+
+        state
+            .account_owners
+            .insert(address1.clone(), owner1.clone());
+        state.account_data_hash.insert(key1.clone(), data_hash1);
+        state
+            .account_owners
+            .insert(address2.clone(), owner2.clone());
+        state.account_data_hash.insert(key2.clone(), data_hash2);
+
+        // Now apply mixed changes: delete one, add one, update one
+        let address3 = vec![3, 0, 0];
+        let owner3 = vec![30, 0, 0];
+        let data_hash3 = 333u64;
+
+        let changes = vec![
+            // Delete address1
+            StateChange {
+                address: address1.clone(),
+                owner: owner1.clone(),
+                data_hash: data_hash1,
+                deleted: true,
+            },
+            // Add new address3
+            StateChange {
+                address: address3.clone(),
+                owner: owner3.clone(),
+                data_hash: data_hash3,
+                deleted: false,
+            },
+            // Update address2 with new data hash
+            StateChange {
+                address: address2.clone(),
+                owner: owner2.clone(),
+                data_hash: 999u64,
+                deleted: false,
+            },
+        ];
+
+        state.apply_cache_changes(changes);
+
+        // Check address1 is deleted
+        assert!(!state.account_owners.contains_key(&address1));
+        assert!(!state.account_data_hash.contains_key(&key1));
+
+        // Check address2 is updated
+        assert_eq!(state.account_owners.get(&address2), Some(&owner2));
+        assert_eq!(state.account_data_hash.get(&key2), Some(&999u64));
+
+        // Check address3 is added
+        assert_eq!(state.account_owners.get(&address3), Some(&owner3));
+        let key3 = [owner3.clone(), address3.clone()].concat();
+        assert_eq!(state.account_data_hash.get(&key3), Some(&data_hash3));
+    }
+
+    #[test]
+    fn test_apply_cache_changes_ownership_change() {
+        let mut state = create_test_state();
+
+        let address = vec![1, 2, 3];
+        let old_owner = vec![4, 5, 6];
+        let new_owner = vec![7, 8, 9];
+        let data_hash = 123u64;
+
+        // Set up initial state with old owner
+        let old_key = [old_owner.clone(), address.clone()].concat();
+        state
+            .account_owners
+            .insert(address.clone(), old_owner.clone());
+        state.account_data_hash.insert(old_key.clone(), data_hash);
+
+        // Apply ownership change
+        let change = StateChange {
+            address: address.clone(),
+            owner: new_owner.clone(),
+            data_hash,
+            deleted: false,
+        };
+
+        state.apply_cache_changes(vec![change]);
+
+        // Check that account_owners is updated to new owner
+        assert_eq!(state.account_owners.get(&address), Some(&new_owner));
+
+        // Check that old key is still there (apply_cache_changes doesn't remove old keys)
+        assert!(state.account_data_hash.contains_key(&old_key));
+
+        // Check that new key is added
+        let new_key = [new_owner.clone(), address.clone()].concat();
+        assert_eq!(state.account_data_hash.get(&new_key), Some(&data_hash));
+    }
+
+    #[test]
+    fn test_apply_cache_changes_same_address_different_owners() {
+        let mut state = create_test_state();
+
+        let address = vec![1, 2, 3];
+        let owner1 = vec![4, 5, 6];
+        let owner2 = vec![7, 8, 9];
+        let data_hash1 = 111u64;
+        let data_hash2 = 222u64;
+
+        // Apply changes for the same address but different owners
+        let changes = vec![
+            StateChange {
+                address: address.clone(),
+                owner: owner1.clone(),
+                data_hash: data_hash1,
+                deleted: false,
+            },
+            StateChange {
+                address: address.clone(),
+                owner: owner2.clone(),
+                data_hash: data_hash2,
+                deleted: false,
+            },
+        ];
+
+        state.apply_cache_changes(changes);
+
+        // The last change should win for account_owners
+        assert_eq!(state.account_owners.get(&address), Some(&owner2));
+
+        // Both data hashes should be stored with their respective keys
+        let key1 = [owner1.clone(), address.clone()].concat();
+        let key2 = [owner2.clone(), address.clone()].concat();
+
+        assert_eq!(state.account_data_hash.get(&key1), Some(&data_hash1));
+        assert_eq!(state.account_data_hash.get(&key2), Some(&data_hash2));
+    }
+
+    // Helper function to create a test State instance
+    fn create_test_state() -> State {
+        use crate::block_printer::BlockPrinter;
+
+        // Create temporary RPC clients (these won't be used in cache tests)
+        let local_client = RpcClient::new("http://localhost:8899".to_string());
+        let remote_client = RpcClient::new("http://localhost:8899".to_string());
+
+        // Create a noop BlockPrinter
+        let block_printer = BlockPrinter::new(None, None, true);
+
+        State::new(
+            local_client,
+            remote_client,
+            None,
+            "/tmp/test_cursor".to_string(),
+            block_printer,
+            false,
+        )
+    }
 }
 
 fn compose_and_purge_block(
