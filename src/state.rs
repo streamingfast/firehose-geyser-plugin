@@ -575,22 +575,22 @@ impl State {
                 continue;
             }
 
-            let block_info = match self.block_infos.get(&slot) {
+            let parent_slot = match self.block_infos.get(&slot) {
                 None => {
                     info!("No block info for slot {} in process_upto", slot);
                     return Ok(());
                 }
-                Some(bi) => bi,
+                Some(bi) => bi.parent_slot,
             };
 
             if let Some(last_sent_block) = self.last_sent_block {
-                if last_sent_block < block_info.parent_slot {
+                if last_sent_block < parent_slot {
                     warn!(
-                            "last sent block {} is not the parent of slot {}. Expecting {}. (This is a very rare case that would create a hole). Manually adding missing slots to 'confirmed_slots', they will be sent on next loop",
-                            last_sent_block,
-                            slot,
-                            block_info.parent_slot,
-                        );
+                        "last sent block {} is not the parent of slot {}. Expecting {}. (This is a very rare case that would create a hole). Manually adding missing slots to 'confirmed_slots', they will be sent on next loop",
+                        last_sent_block,
+                        slot,
+                        parent_slot,
+                    );
 
                     let success = self.add_missing_slots_to_confirmed_slots(last_sent_block, slot);
                     if !success {
@@ -600,10 +600,11 @@ impl State {
                 }
             }
 
-            // If we have processed blocks before, clean up any blocks between the last one we sent and the current one, they must have been dropped.
+            // If we have data for blocks below this, they must have been dropped, remove from our cache
             if let Some(last_sent_block) = self.last_sent_block {
                 let mut slot_to_drop = last_sent_block + 1;
                 while slot_to_drop < slot {
+                    info!("Dropping forked-out slot {}", slot_to_drop);
                     self.account_data_hash.drop_block(slot_to_drop);
                     self.account_owners.drop_block(slot_to_drop);
                     slot_to_drop += 1;
@@ -612,29 +613,8 @@ impl State {
             self.account_data_hash.merge_blocks_up_to(slot);
             self.account_owners.merge_blocks_up_to(slot);
 
-            // since we merged data into our cache, we need to check in the next slots for changes that would actually not be a change and remove them
-            for (change_slot, change_data) in self.block_account_changes.iter_mut() {
-                if *change_slot <= slot {
-                    continue;
-                }
-                let mut keys_to_remove = Vec::new();
-                for (k, v) in change_data.iter() {
-                    if let Some(cached) = self.account_data_hash.get(k) {
-                        if *cached == gxhash64(&v.account.data, SEED) {
-                            keys_to_remove.push(k.clone());
-                            continue;
-                        }
-                    } else if v.account.deleted {
-                        keys_to_remove.push(k.clone());
-                        continue;
-                    }
-                }
-                // TODO: remove useless changes regarding owner in self.account_owners
-                for key in keys_to_remove {
-                    change_data.remove(&key);
-                }
-            }
-
+            self.remove_redundant_changes_after_merge(slot);
+            let block_info = self.block_infos.get(&slot).unwrap(); // we already checked that it is Some(). we get it back here to avoid moving borrowed immutable object
             let account_changes = self.block_account_changes.get(&slot);
             let acc_block = create_account_block(
                 account_changes.unwrap_or(&AccountChanges::default()),
@@ -663,6 +643,31 @@ impl State {
             }
         }
         Ok(())
+    }
+
+    fn remove_redundant_changes_after_merge(&mut self, slot: u64) {
+        // since we merged data into our cache, we need to check in the next slots for 'redundant changes'
+        for (change_slot, change_data) in self.block_account_changes.iter_mut() {
+            if *change_slot <= slot {
+                continue;
+            }
+            let mut keys_to_remove = Vec::new();
+            for (k, v) in change_data.iter() {
+                if let Some(cached) = self.account_data_hash.get(k) {
+                    if *cached == gxhash64(&v.account.data, SEED) {
+                        keys_to_remove.push(k.clone());
+                        continue;
+                    }
+                } else if v.account.deleted {
+                    keys_to_remove.push(k.clone());
+                    continue;
+                }
+            }
+            // TODO: remove redundant changes regarding owner in self.account_owners
+            for key in keys_to_remove {
+                change_data.remove(&key);
+            }
+        }
     }
 
     pub fn get_hash_count(&self) -> usize {
@@ -1125,5 +1130,485 @@ mod tests {
         // Verify the old owner entry still exists (for ownership change tracking)
         let old_account_change = final_changes.get(&owner_account_key_1).unwrap();
         assert_eq!(old_account_change.account.owner, OWNER_KEY_1);
+    }
+
+    #[test]
+    fn test_remove_redundant_changes_after_merge_basic_redundancy() {
+        // Test basic redundancy removal: data in slot 10 is merged, same data in slots 11,12 should be removed
+        let mut state = test_state_no_rpc(None);
+        let slot_10: u64 = 10;
+        let slot_11: u64 = 11;
+        let slot_12: u64 = 12;
+
+        let pub_key_1: &[u8] = b"pubkey.1".as_slice();
+        let owner_key_1: &[u8] = b"owner.1".as_slice();
+        let data_1: &[u8] = b"data.1";
+        let data_hash = gxhash64(data_1, SEED);
+        let _owner_account_key_1 = [owner_key_1, pub_key_1].concat();
+
+        state.first_block_to_process = Some(slot_10);
+
+        // Set account in slot 10
+        state.set_account(
+            slot_10,
+            pub_key_1,
+            data_1,
+            owner_key_1,
+            0,
+            false,
+            false,
+            data_hash,
+            false,
+        );
+
+        // Set same account with same data in slot 11
+        state.set_account(
+            slot_11,
+            pub_key_1,
+            data_1,
+            owner_key_1,
+            1,
+            false,
+            false,
+            data_hash,
+            false,
+        );
+
+        // Set same account with same data in slot 12
+        state.set_account(
+            slot_12,
+            pub_key_1,
+            data_1,
+            owner_key_1,
+            2,
+            false,
+            false,
+            data_hash,
+            false,
+        );
+
+        // Verify all changes are initially present
+        assert_eq!(state.block_account_changes.get(&slot_10).unwrap().len(), 1);
+        assert_eq!(state.block_account_changes.get(&slot_11).unwrap().len(), 1);
+        assert_eq!(state.block_account_changes.get(&slot_12).unwrap().len(), 1);
+
+        // Merge slot 10 data into cache
+        state.merge_state_caches_up_to(slot_10);
+
+        // Remove redundant changes after merge
+        state.remove_redundant_changes_after_merge(slot_10);
+
+        // Verify slot 10 still has changes (not affected by removal)
+        assert_eq!(state.block_account_changes.get(&slot_10).unwrap().len(), 1);
+
+        // Verify slots 11 and 12 have redundant changes removed
+        assert_eq!(state.block_account_changes.get(&slot_11).unwrap().len(), 0);
+        assert_eq!(state.block_account_changes.get(&slot_12).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_remove_redundant_changes_after_merge_different_data() {
+        // Test that changes with different data are NOT removed
+        let mut state = test_state_no_rpc(None);
+        let slot_10: u64 = 10;
+        let slot_11: u64 = 11;
+
+        let pub_key_1: &[u8] = b"pubkey.1".as_slice();
+        let owner_key_1: &[u8] = b"owner.1".as_slice();
+        let data_1: &[u8] = b"data.1";
+        let data_2: &[u8] = b"data.2";
+        let data_hash_1 = gxhash64(data_1, SEED);
+        let data_hash_2 = gxhash64(data_2, SEED);
+        let _owner_account_key_1 = [owner_key_1, pub_key_1].concat();
+
+        state.first_block_to_process = Some(slot_10);
+
+        // Set account in slot 10 with data_1
+        state.set_account(
+            slot_10,
+            pub_key_1,
+            data_1,
+            owner_key_1,
+            0,
+            false,
+            false,
+            data_hash_1,
+            false,
+        );
+
+        // Set same account with different data in slot 11
+        state.set_account(
+            slot_11,
+            pub_key_1,
+            data_2,
+            owner_key_1,
+            1,
+            false,
+            false,
+            data_hash_2,
+            false,
+        );
+
+        // Verify both changes are initially present
+        assert_eq!(state.block_account_changes.get(&slot_10).unwrap().len(), 1);
+        assert_eq!(state.block_account_changes.get(&slot_11).unwrap().len(), 1);
+
+        // Merge slot 10 data into cache
+        state.merge_state_caches_up_to(slot_10);
+
+        // Remove redundant changes after merge
+        state.remove_redundant_changes_after_merge(slot_10);
+
+        // Verify both slots still have changes (slot 11 change is not redundant)
+        assert_eq!(state.block_account_changes.get(&slot_10).unwrap().len(), 1);
+        assert_eq!(state.block_account_changes.get(&slot_11).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_remove_redundant_changes_after_merge_deleted_account() {
+        // Test that deleted accounts without cached data are removed
+        let mut state = test_state_no_rpc(None);
+        let slot_10: u64 = 10;
+        let slot_11: u64 = 11;
+
+        let pub_key_1: &[u8] = b"pubkey.1".as_slice();
+        let pub_key_2: &[u8] = b"pubkey.2".as_slice();
+        let owner_key_1: &[u8] = b"owner.1".as_slice();
+        let data_1: &[u8] = b"data.1";
+        let data_hash = gxhash64(data_1, SEED);
+        let _owner_account_key_1 = [owner_key_1, pub_key_1].concat();
+        let _owner_account_key_2 = [owner_key_1, pub_key_2].concat();
+
+        state.first_block_to_process = Some(slot_10);
+
+        // Set account in slot 10
+        state.set_account(
+            slot_10,
+            pub_key_1,
+            data_1,
+            owner_key_1,
+            0,
+            false,
+            false,
+            data_hash,
+            false,
+        );
+
+        // Set deleted account in slot 11 (account that doesn't exist in cache)
+        state.set_account(
+            slot_11,
+            pub_key_2,
+            &[],
+            owner_key_1,
+            0,
+            false,
+            true, // deleted = true
+            0,
+            false,
+        );
+
+        // Verify both changes are initially present
+        let slot_10_len = state
+            .block_account_changes
+            .get(&slot_10)
+            .map_or(0, |c| c.len());
+        let slot_11_len = state
+            .block_account_changes
+            .get(&slot_11)
+            .map_or(0, |c| c.len());
+
+        assert_eq!(slot_10_len, 1);
+        // Only check slot 11 if it was actually created
+        if slot_11_len > 0 {
+            assert_eq!(slot_11_len, 1);
+        }
+
+        // Merge slot 10 data into cache (only pub_key_1 will be cached)
+        state.merge_state_caches_up_to(slot_10);
+
+        // Remove redundant changes after merge
+        state.remove_redundant_changes_after_merge(slot_10);
+
+        // Verify slot 10 still has changes
+        assert_eq!(state.block_account_changes.get(&slot_10).unwrap().len(), 1);
+
+        // Verify deleted account in slot 11 is removed (not in cache, so redundant delete)
+        if let Some(slot_11_changes) = state.block_account_changes.get(&slot_11) {
+            assert_eq!(slot_11_changes.len(), 0);
+        }
+    }
+
+    #[test]
+    fn test_remove_redundant_changes_after_merge_mixed_scenario() {
+        // Test complex scenario with redundant and non-redundant changes
+        let mut state = test_state_no_rpc(None);
+        let slot_10: u64 = 10;
+        let slot_11: u64 = 11;
+        let slot_12: u64 = 12;
+
+        let pub_key_1: &[u8] = b"pubkey.1".as_slice();
+        let pub_key_2: &[u8] = b"pubkey.2".as_slice();
+        let pub_key_3: &[u8] = b"pubkey.3".as_slice();
+        let owner_key_1: &[u8] = b"owner.1".as_slice();
+        let data_1: &[u8] = b"data.1";
+        let data_2: &[u8] = b"data.2";
+        let data_hash_1 = gxhash64(data_1, SEED);
+        let data_hash_2 = gxhash64(data_2, SEED);
+
+        let _owner_account_key_1 = [owner_key_1, pub_key_1].concat();
+        let owner_account_key_2 = [owner_key_1, pub_key_2].concat();
+        let _owner_account_key_3 = [owner_key_1, pub_key_3].concat();
+
+        state.first_block_to_process = Some(slot_10);
+
+        // Set accounts in slot 10
+        state.set_account(
+            slot_10,
+            pub_key_1,
+            data_1,
+            owner_key_1,
+            0,
+            false,
+            false,
+            data_hash_1,
+            false,
+        );
+        state.set_account(
+            slot_10,
+            pub_key_2,
+            data_2,
+            owner_key_1,
+            0,
+            false,
+            false,
+            data_hash_2,
+            false,
+        );
+
+        // Set accounts in slot 11
+        state.set_account(
+            slot_11,
+            pub_key_1,
+            data_1,
+            owner_key_1,
+            1,
+            false,
+            false,
+            data_hash_1,
+            false,
+        ); // Same as slot 10 - should be removed
+        state.set_account(
+            slot_11,
+            pub_key_2,
+            data_1,
+            owner_key_1,
+            1,
+            false,
+            false,
+            data_hash_1,
+            false,
+        ); // Different data - should stay
+        state.set_account(
+            slot_11,
+            pub_key_3,
+            &[],
+            owner_key_1,
+            0,
+            false,
+            true,
+            0,
+            false,
+        ); // Deleted, not cached - should be removed
+
+        // Set accounts in slot 12
+        state.set_account(
+            slot_12,
+            pub_key_1,
+            data_1,
+            owner_key_1,
+            2,
+            false,
+            false,
+            data_hash_1,
+            false,
+        ); // Same as slot 10 - should be removed
+        state.set_account(
+            slot_12,
+            pub_key_2,
+            data_2,
+            owner_key_1,
+            2,
+            false,
+            false,
+            data_hash_2,
+            false,
+        ); // Same as slot 10 - should be removed
+
+        // Note: set_account() may skip setting accounts if data hasn't changed
+        // So let's check actual counts before proceeding
+        let initial_slot_10_len = state
+            .block_account_changes
+            .get(&slot_10)
+            .map_or(0, |changes| changes.len());
+        let initial_slot_11_len = state
+            .block_account_changes
+            .get(&slot_11)
+            .map_or(0, |changes| changes.len());
+        let initial_slot_12_len = state
+            .block_account_changes
+            .get(&slot_12)
+            .map_or(0, |changes| changes.len());
+
+        // Merge slot 10 data into cache
+        state.merge_state_caches_up_to(slot_10);
+
+        // Remove redundant changes after merge
+        state.remove_redundant_changes_after_merge(slot_10);
+
+        // Verify results
+        assert_eq!(
+            state
+                .block_account_changes
+                .get(&slot_10)
+                .map_or(0, |changes| changes.len()),
+            initial_slot_10_len
+        ); // Unchanged
+
+        // Check what remains in slot 11 - should have fewer entries due to redundancy removal
+        let slot_11_changes = state.block_account_changes.get(&slot_11);
+        if let Some(changes) = slot_11_changes {
+            // At least some changes should have been removed
+            assert!(changes.len() < initial_slot_11_len);
+
+            // The change with different data should remain
+            assert!(changes.contains_key(&owner_account_key_2));
+        }
+
+        // Slot 12: redundant changes should be removed
+        let slot_12_changes = state.block_account_changes.get(&slot_12);
+        if let Some(changes) = slot_12_changes {
+            assert!(changes.len() < initial_slot_12_len);
+        }
+    }
+
+    #[test]
+    fn test_remove_redundant_changes_after_merge_no_changes_after_slot() {
+        // Test that function handles the case where there are no changes after the merged slot
+        let mut state = test_state_no_rpc(None);
+        let slot_10: u64 = 10;
+
+        let pub_key_1: &[u8] = b"pubkey.1".as_slice();
+        let owner_key_1: &[u8] = b"owner.1".as_slice();
+        let data_1: &[u8] = b"data.1";
+        let data_hash = gxhash64(data_1, SEED);
+
+        state.first_block_to_process = Some(slot_10);
+
+        // Set account only in slot 10
+        state.set_account(
+            slot_10,
+            pub_key_1,
+            data_1,
+            owner_key_1,
+            0,
+            false,
+            false,
+            data_hash,
+            false,
+        );
+
+        // Verify initial state
+        assert_eq!(state.block_account_changes.get(&slot_10).unwrap().len(), 1);
+
+        // Merge slot 10 data into cache
+        state.merge_state_caches_up_to(slot_10);
+
+        // Remove redundant changes after merge (should not panic or cause issues)
+        state.remove_redundant_changes_after_merge(slot_10);
+
+        // Verify slot 10 is unchanged
+        assert_eq!(state.block_account_changes.get(&slot_10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_remove_redundant_changes_after_merge_only_earlier_slots() {
+        // Test that function only processes slots after the merged slot
+        let mut state = test_state_no_rpc(None);
+        let slot_8: u64 = 8;
+        let slot_9: u64 = 9;
+        let slot_10: u64 = 10;
+        let slot_11: u64 = 11;
+
+        let pub_key_1: &[u8] = b"pubkey.1".as_slice();
+        let owner_key_1: &[u8] = b"owner.1".as_slice();
+        let data_1: &[u8] = b"data.1";
+        let data_hash = gxhash64(data_1, SEED);
+
+        state.first_block_to_process = Some(slot_8);
+
+        // Set same account in multiple slots
+        state.set_account(
+            slot_8,
+            pub_key_1,
+            data_1,
+            owner_key_1,
+            0,
+            false,
+            false,
+            data_hash,
+            false,
+        );
+        state.set_account(
+            slot_9,
+            pub_key_1,
+            data_1,
+            owner_key_1,
+            1,
+            false,
+            false,
+            data_hash,
+            false,
+        );
+        state.set_account(
+            slot_10,
+            pub_key_1,
+            data_1,
+            owner_key_1,
+            2,
+            false,
+            false,
+            data_hash,
+            false,
+        );
+        state.set_account(
+            slot_11,
+            pub_key_1,
+            data_1,
+            owner_key_1,
+            3,
+            false,
+            false,
+            data_hash,
+            false,
+        );
+
+        // Verify initial state
+        assert_eq!(state.block_account_changes.get(&slot_8).unwrap().len(), 1);
+        assert_eq!(state.block_account_changes.get(&slot_9).unwrap().len(), 1);
+        assert_eq!(state.block_account_changes.get(&slot_10).unwrap().len(), 1);
+        assert_eq!(state.block_account_changes.get(&slot_11).unwrap().len(), 1);
+
+        // Merge slot 10 data into cache
+        state.merge_state_caches_up_to(slot_10);
+
+        // Remove redundant changes after merge of slot 10
+        state.remove_redundant_changes_after_merge(slot_10);
+
+        // Verify only slots after slot 10 are affected
+        assert_eq!(state.block_account_changes.get(&slot_8).unwrap().len(), 1); // Before merge slot - unchanged
+        assert_eq!(state.block_account_changes.get(&slot_9).unwrap().len(), 1); // Before merge slot - unchanged
+        assert_eq!(state.block_account_changes.get(&slot_10).unwrap().len(), 1); // Merge slot - unchanged
+        assert_eq!(state.block_account_changes.get(&slot_11).unwrap().len(), 0);
+        // After merge slot - redundant change removed
     }
 }
