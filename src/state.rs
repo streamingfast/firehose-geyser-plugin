@@ -540,9 +540,8 @@ impl State {
                 }
             }
 
-            let account_changes = self.block_account_changes.get(&slot);
             let (effective_account_changes, cache_changes) = filter_account_changes(
-                account_changes,
+                self.block_account_changes.get(&slot),
                 &self.account_data_hash,
                 &self.account_owners,
             );
