@@ -784,7 +784,7 @@ mod tests {
         let account = create_test_account(address.clone(), owner.clone(), data.clone(), false);
         let account_with_version = create_test_account_with_version(account, 1, 123);
 
-        changes.insert(vec![1, 2, 3], account_with_version);
+        changes.insert(vec![4, 5, 6, 1, 2, 3], account_with_version);
 
         let (filtered_changes, state_changes) =
             filter_account_changes(Some(&changes), &account_data_hash, &account_owners);
@@ -817,8 +817,9 @@ mod tests {
         let account = create_test_account(address.clone(), owner.clone(), data.clone(), false);
         let account_with_version = create_test_account_with_version(account, 1, 123);
 
-        changes.insert(address.clone(), account_with_version);
-        account_data_hash.insert(address.clone(), 123); // Same hash
+        let owner_account_key = [owner.clone(), address.clone()].concat();
+        changes.insert(owner_account_key.clone(), account_with_version);
+        account_data_hash.insert(owner_account_key, 123); // Same hash
 
         let (filtered_changes, state_changes) =
             filter_account_changes(Some(&changes), &account_data_hash, &account_owners);
@@ -840,8 +841,9 @@ mod tests {
         let account = create_test_account(address.clone(), owner.clone(), data.clone(), false);
         let account_with_version = create_test_account_with_version(account, 1, 123);
 
-        changes.insert(address.clone(), account_with_version);
-        account_data_hash.insert(address.clone(), 456); // Different hash
+        let owner_account_key = [owner.clone(), address.clone()].concat();
+        changes.insert(owner_account_key.clone(), account_with_version);
+        account_data_hash.insert(owner_account_key, 456); // Different hash
 
         let (filtered_changes, state_changes) =
             filter_account_changes(Some(&changes), &account_data_hash, &account_owners);
@@ -870,8 +872,9 @@ mod tests {
         let account = create_test_account(address.clone(), owner.clone(), data.clone(), true);
         let account_with_version = create_test_account_with_version(account, 1, 123);
 
-        changes.insert(address.clone(), account_with_version);
-        account_data_hash.insert(address.clone(), 123); // Same hash but account is deleted
+        let owner_account_key = [owner.clone(), address.clone()].concat();
+        changes.insert(owner_account_key.clone(), account_with_version);
+        account_data_hash.insert(owner_account_key, 123); // Same hash but account is deleted
 
         let (filtered_changes, state_changes) =
             filter_account_changes(Some(&changes), &account_data_hash, &account_owners);
@@ -900,7 +903,10 @@ mod tests {
         let account = create_test_account(address.clone(), new_owner.clone(), data.clone(), false);
         let account_with_version = create_test_account_with_version(account, 1, 123);
 
-        changes.insert(address.clone(), account_with_version);
+        changes.insert(
+            [new_owner.clone(), address.clone()].concat(),
+            account_with_version,
+        );
         account_owners.insert(address.clone(), old_owner.clone()); // Different owner
 
         let (filtered_changes, state_changes) =
@@ -1017,9 +1023,18 @@ mod tests {
         let account_with_version2 = create_test_account_with_version(account2, 2, 456);
         let account_with_version3 = create_test_account_with_version(account3, 3, 789);
 
-        changes.insert(address1.clone(), account_with_version1);
-        changes.insert(address2.clone(), account_with_version2);
-        changes.insert(address3.clone(), account_with_version3);
+        changes.insert(
+            [owner.clone(), address1.clone()].concat(),
+            account_with_version1,
+        );
+        changes.insert(
+            [owner.clone(), address2.clone()].concat(),
+            account_with_version2,
+        );
+        changes.insert(
+            [owner.clone(), address3.clone()].concat(),
+            account_with_version3,
+        );
 
         let (filtered_changes, state_changes) =
             filter_account_changes(Some(&changes), &account_data_hash, &account_owners);
@@ -1045,7 +1060,8 @@ mod tests {
         let data1 = vec![100, 0, 0];
         let account1 = create_test_account(address1.clone(), owner1.clone(), data1.clone(), false);
         let account_with_version1 = create_test_account_with_version(account1, 1, 111);
-        changes.insert(address1.clone(), account_with_version1);
+        let owner_account_key1 = [owner1, address1.clone()].concat();
+        changes.insert(owner_account_key1.clone(), account_with_version1);
 
         // Account 2: Same data hash, not deleted (should be filtered out)
         let address2 = vec![2, 0, 0];
@@ -1053,8 +1069,9 @@ mod tests {
         let data2 = vec![200, 0, 0];
         let account2 = create_test_account(address2.clone(), owner2.clone(), data2.clone(), false);
         let account_with_version2 = create_test_account_with_version(account2, 2, 222);
-        changes.insert(address2.clone(), account_with_version2);
-        account_data_hash.insert(address2.clone(), 222); // Same hash
+        let owner_account_key2 = [owner2, address2].concat();
+        changes.insert(owner_account_key2.clone(), account_with_version2);
+        account_data_hash.insert(owner_account_key2, 222); // Same hash
 
         // Account 3: Ownership change (should include both old and new owner versions)
         let address3 = vec![3, 0, 0];
@@ -1064,7 +1081,8 @@ mod tests {
         let account3 =
             create_test_account(address3.clone(), new_owner3.clone(), data3.clone(), false);
         let account_with_version3 = create_test_account_with_version(account3, 3, 333);
-        changes.insert(address3.clone(), account_with_version3);
+        let owner_account_key3 = [new_owner3.clone(), address3.clone()].concat();
+        changes.insert(owner_account_key3, account_with_version3);
         account_owners.insert(address3.clone(), old_owner3.clone());
 
         // Account 4: Deleted account with same hash (should be included)
@@ -1073,8 +1091,9 @@ mod tests {
         let data4 = vec![200, 0, 0];
         let account4 = create_test_account(address4.clone(), owner4.clone(), data4.clone(), true);
         let account_with_version4 = create_test_account_with_version(account4, 4, 444);
-        changes.insert(address4.clone(), account_with_version4);
-        account_data_hash.insert(address4.clone(), 444); // Same hash but deleted
+        let owner_account_key4 = [owner4.clone(), address4.clone()].concat();
+        changes.insert(owner_account_key4.clone(), account_with_version4);
+        account_data_hash.insert(owner_account_key4, 444); // Same hash but deleted
 
         let (filtered_changes, state_changes) =
             filter_account_changes(Some(&changes), &account_data_hash, &account_owners);
