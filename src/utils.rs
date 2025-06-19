@@ -1,5 +1,5 @@
 use crate::pb::sf::solana::r#type::v1::{Account, AccountBlock};
-use crate::state::{AccountChanges, BlockInfo};
+use crate::state::BlockInfo;
 use prost_types::Timestamp as ProstTimestamp;
 use solana_program::clock::UnixTimestamp;
 

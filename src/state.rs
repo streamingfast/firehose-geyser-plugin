@@ -30,6 +30,7 @@ pub struct AccountWithWriteVersion {
     pub account: Account,
     pub write_version: u64,
     pub data_hash: u64,
+    pub owner_account_key: Option<Vec<u8>>,
 }
 
 lazy_static! {
@@ -415,6 +416,7 @@ impl State {
             account: pb_account,
             write_version,
             data_hash,
+            owner_account_key: None,
         };
 
         slot_entries.insert(owner_account_key, awv);
@@ -584,16 +586,13 @@ impl State {
             let deleted = change.deleted;
 
             let owner_account_key = [owner.clone(), address.clone()].concat();
-            if let Some(prev_owner) = self.account_owners.get(&address) {
-                if &owner != prev_owner {
-                    let prev_owner_account_key = [prev_owner.clone(), address.clone()].concat();
-                    self.account_data_hash.remove(&prev_owner_account_key);
-                }
-            }
-
             if deleted {
                 self.account_data_hash.remove(&owner_account_key);
-                self.account_owners.remove(&address);
+                if let Some(cached) = self.account_owners.get(&address) {
+                    if cached == &owner {
+                        self.account_owners.remove(&address);
+                    }
+                }
             } else {
                 self.account_data_hash.insert(owner_account_key, data_hash);
                 self.account_owners.insert(address.clone(), owner); // last one wins
@@ -617,51 +616,109 @@ fn filter_account_changes(
     let mut filtered_changes: Vec<Account> = Vec::new();
     let mut state_changes: Vec<StateChange> = Vec::new();
 
+    let mut in_block_owners = AccountOwners::new();
+    let mut ordered_changes: Vec<AccountWithWriteVersion> = Vec::new();
+
     if let Some(changes) = changes {
         for (owner_account_key, account_with_version) in changes {
-            let account = &account_with_version.account;
+            let with_key = AccountWithWriteVersion {
+                account: account_with_version.account.clone(),
+                write_version: account_with_version.write_version,
+                data_hash: account_with_version.data_hash,
+                owner_account_key: Some(owner_account_key.clone()),
+            };
+            ordered_changes.push(with_key);
+        }
+    }
+    ordered_changes.sort_by(|a, b| {
+        a.account
+            .address
+            .cmp(&b.account.address)
+            .then_with(|| a.write_version.cmp(&b.write_version))
+    });
 
-            let mut should_include = false;
-            if let Some(cached_hash) = account_data_hash.get(owner_account_key) {
-                if *cached_hash != account_with_version.data_hash {
-                    should_include = true;
-                }
-                if account.deleted {
-                    should_include = true;
-                }
-            } else {
+    for account_with_version in ordered_changes.into_iter() {
+        let owner_account_key = &account_with_version.owner_account_key.unwrap();
+        let account = &account_with_version.account;
+        account_with_version.write_version;
+
+        let mut should_include = false;
+        if let Some(cached_hash) = account_data_hash.get(owner_account_key) {
+            if *cached_hash != account_with_version.data_hash {
                 should_include = true;
             }
+            if account.deleted {
+                should_include = true;
+            }
+        } else {
+            should_include = true;
+        }
 
-            // Check for ownership change
-            if let Some(cached_owner) = account_owners.get(&account.address) {
-                if cached_owner != &account.owner {
-                    should_include = true;
-                    // Push the account change with the previous owner
-                    // it will appear before the new owner's state change
-                    filtered_changes.push(Account {
-                        address: account.address.clone(),
-                        owner: cached_owner.clone(),
-                        data: account_with_version.account.data.clone(),
-                        deleted: account.deleted,
-                    });
+        let different_previous_owner = match in_block_owners
+            .get(&account.address)
+            .or_else(|| account_owners.get(&account.address))
+        {
+            None => None,
+            Some(owner) => {
+                if owner != &account.owner {
+                    Some(owner.clone())
+                } else {
+                    None
                 }
             }
+        };
 
-            if should_include {
-                filtered_changes.push(account.clone());
+        // Check for ownership change
+        if let Some(cached_owner) = different_previous_owner.clone() {
+            should_include = true;
 
-                state_changes.push(StateChange {
+            let prev_already_pushed = filtered_changes
+                .iter()
+                .any(|change| change.address == account.address && change.owner == *cached_owner);
+
+            if !prev_already_pushed {
+                // Push the account change with the previous owner
+                // it will appear before the new owner's state change
+                filtered_changes.push(Account {
                     address: account.address.clone(),
-                    owner: account.owner.clone(),
-                    data_hash: account_with_version.data_hash,
+                    owner: cached_owner.clone(),
+                    data: account_with_version.account.data.clone(),
                     deleted: account.deleted,
                 });
             }
+
+            for change in filtered_changes.iter_mut() {
+                if change.address == account.address {
+                    change.deleted = account.deleted;
+                    change.data = account.data.clone();
+                }
+            }
+        }
+
+        if should_include {
+            filtered_changes.push(account.clone());
+
+            if let Some(cached_owner) = different_previous_owner {
+                state_changes.push(StateChange {
+                    address: account.address.clone(),
+                    owner: cached_owner.clone(),
+                    data_hash: 0,
+                    deleted: true, // we delete the version with the old owner from the cache
+                });
+            }
+
+            state_changes.push(StateChange {
+                address: account.address.clone(),
+                owner: account.owner.clone(),
+                data_hash: account_with_version.data_hash,
+                deleted: account.deleted,
+            });
+
+            // save owner in case it gets changed in same slot
+            in_block_owners.insert(account.address.clone(), account.owner.clone());
         }
     }
 
-    filtered_changes.sort_by(|a, b| a.address.cmp(&b.address));
     return (filtered_changes, state_changes);
 }
 
@@ -694,6 +751,7 @@ mod tests {
             account,
             write_version,
             data_hash,
+            owner_account_key: None,
         }
     }
 
@@ -845,7 +903,7 @@ mod tests {
 
         // Should have 2 accounts: one with old owner, one with new owner
         assert_eq!(filtered_changes.len(), 2);
-        assert_eq!(state_changes.len(), 1);
+        assert_eq!(state_changes.len(), 2);
 
         // First account should have the old owner
         let first_account = &filtered_changes[0];
@@ -859,8 +917,75 @@ mod tests {
         assert_eq!(second_account.owner, new_owner);
         assert_eq!(second_account.data, data);
 
-        // State change should reflect the new owner
+        // State change should delete the old owner
         let state_change = &state_changes[0];
+        assert_eq!(state_change.address, address);
+        assert_eq!(state_change.owner, old_owner);
+        assert_eq!(state_change.deleted, true);
+
+        // State change should reflect the new owner
+        let state_change = &state_changes[1];
+        assert_eq!(state_change.address, address);
+        assert_eq!(state_change.owner, new_owner);
+    }
+
+    #[test]
+    fn test_filter_account_changes_create_changeowner_delete() {
+        let mut changes = HashMap::new();
+        let account_data_hash = HashMap::new();
+        let account_owners = HashMap::new();
+
+        let address = vec![1, 2, 3];
+        let old_owner = vec![4, 5, 6];
+        let new_owner = vec![7, 8, 9];
+        let data = vec![10, 11, 12];
+
+        let account = create_test_account(address.clone(), old_owner.clone(), data.clone(), false);
+        let account_with_version = create_test_account_with_version(account, 1, 123);
+        let key1 = [old_owner.clone(), address.clone()].concat();
+        changes.insert(key1, account_with_version);
+
+        let account2 = create_test_account(address.clone(), new_owner.clone(), vec![], true);
+        let account2_with_version = create_test_account_with_version(account2, 2, 0);
+        let key2 = [new_owner.clone(), address.clone()].concat();
+        changes.insert(key2, account2_with_version);
+
+        let (mut filtered_changes, state_changes) =
+            filter_account_changes(Some(&changes), &account_data_hash, &account_owners);
+
+        // Should have 2 accounts: one with old owner, one with new owner
+        assert_eq!(filtered_changes.len(), 2);
+        // state_changes are not deduped when we add a deletion after owner change, so we get 3
+        assert_eq!(state_changes.len(), 3);
+
+        // we sort because them hashes are unordered and we want deterministic tests
+        filtered_changes.sort_by(|a, b| a.owner.cmp(&b.owner));
+
+        // First account should have the new owner
+        let first_account = &filtered_changes[0];
+        assert_eq!(first_account.address, address);
+        assert_eq!(first_account.owner, old_owner);
+        assert_eq!(first_account.data.len(), 0);
+        assert_eq!(first_account.deleted, true);
+
+        // Second account should have the old owner
+        let second_account = &filtered_changes[1];
+        assert_eq!(second_account.address, address);
+        assert_eq!(second_account.owner, new_owner);
+        assert_eq!(second_account.deleted, true);
+        assert_eq!(second_account.data.len(), 0);
+
+        // State change should reflect the creation+deletion, then new owner
+        let state_change = &state_changes[0];
+        assert_eq!(state_change.address, address);
+        assert_eq!(state_change.owner, old_owner);
+
+        let state_change = &state_changes[1];
+        assert_eq!(state_change.address, address);
+        assert_eq!(state_change.owner, old_owner);
+        assert_eq!(state_change.deleted, true);
+
+        let state_change = &state_changes[2];
         assert_eq!(state_change.address, address);
         assert_eq!(state_change.owner, new_owner);
     }
@@ -951,8 +1076,8 @@ mod tests {
 
         // Should have: Account1, Account3 (old owner), Account3 (new owner), Account4
         assert_eq!(filtered_changes.len(), 4);
-        // Should have state changes for: Account1, Account3, Account4
-        assert_eq!(state_changes.len(), 3);
+        // Should have state changes for: Account1, Account3, (account3: delete), Account4
+        assert_eq!(state_changes.len(), 4);
 
         // Verify the accounts are sorted by address
         assert_eq!(filtered_changes[0].address, address1); // Account 1
@@ -1184,12 +1309,11 @@ mod tests {
         // Check that account_owners is updated to new owner
         assert_eq!(state.account_owners.get(&address), Some(&new_owner));
 
-        // Check that old key is removed
-        assert!(!state.account_data_hash.contains_key(&old_key));
-
         // Check that new key is added
         let new_key = [new_owner.clone(), address.clone()].concat();
         assert_eq!(state.account_data_hash.get(&new_key), Some(&data_hash));
+
+        // Note: the apply_cache should be called with a 'deleted: true' on the old state. we're testing an incomplete scenario
     }
 
     #[test]
@@ -1208,7 +1332,7 @@ mod tests {
                 address: address.clone(),
                 owner: owner1.clone(),
                 data_hash: data_hash1,
-                deleted: false,
+                deleted: true, // data for old owner should always be deleted there
             },
             StateChange {
                 address: address.clone(),
