@@ -403,7 +403,7 @@ impl State {
 
         if trace {
             let data_as_hex = hex::encode(&data[..10.min(data.len())]);
-            debug!("handle_account_change@{}: account {:?} owner: {:?} delete: {:?} version: {:?} Data Size: {} Data: {}", slot, bs58::encode(pub_key).into_string(), bs58::encode(owner).into_string(), deleted, write_version, data.len(),data_as_hex);
+            debug!("handle_account_change@{}: account {:?} owner: {:?} delete: {:?} version: {:?} Data Size: {} Data Hash: {} Data Preview: {}", slot, bs58::encode(pub_key).into_string(), bs58::encode(owner).into_string(), deleted, write_version, data.len(), data_hash, data_as_hex);
         }
 
         let pb_account = Account {
@@ -467,7 +467,11 @@ impl State {
         }
     }
 
-    pub fn process_upto(&mut self, slot: u64) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn process_upto(
+        &mut self,
+        trace: bool,
+        slot: u64,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         debug!("processing upto slot {}", slot);
         let first_block_to_process = match self.first_block_to_process {
             Some(slot) => slot,
@@ -544,6 +548,8 @@ impl State {
                 self.block_account_changes.get(&slot),
                 &self.account_data_hash,
                 &self.account_owners,
+                slot,
+                trace,
             );
 
             let acc_block = create_account_block(effective_account_changes, &block_info);
@@ -611,6 +617,8 @@ fn filter_account_changes(
     changes: Option<&HashMap<Vec<u8>, AccountWithWriteVersion>>,
     account_data_hash: &AccountDataHash,
     account_owners: &AccountOwners,
+    slot: u64,
+    trace: bool,
 ) -> (Vec<Account>, Vec<StateChange>) {
     let mut filtered_changes: Vec<Account> = Vec::new();
     let mut state_changes: Vec<StateChange> = Vec::new();
@@ -695,6 +703,9 @@ fn filter_account_changes(
         }
 
         if should_include {
+            if trace {
+                debug!("include_change@{}: account {:?} owner: {:?} delete: {:?} version: {:?} Data hash: {}", slot, bs58::encode(&account.address).into_string(), bs58::encode(&account.owner).into_string(), &account.deleted, account_with_version.write_version, account_with_version.data_hash);
+            }
             filtered_changes.push(account.clone());
 
             if let Some(cached_owner) = different_previous_owner {
@@ -715,6 +726,10 @@ fn filter_account_changes(
 
             // save owner in case it gets changed in same slot
             in_block_owners.insert(account.address.clone(), account.owner.clone());
+        } else {
+            if trace {
+                debug!("exclude_change@{}: account {:?} owner: {:?} delete: {:?} version: {:?} Data hash: {}", slot, bs58::encode(&account.address).into_string(), bs58::encode(&account.owner).into_string(), &account.deleted, account_with_version.write_version, account_with_version.data_hash);
+            }
         }
     }
 
@@ -765,7 +780,7 @@ mod tests {
         let account_owners = HashMap::new();
 
         let (filtered_changes, state_changes) =
-            filter_account_changes(None, &account_data_hash, &account_owners);
+            filter_account_changes(None, &account_data_hash, &account_owners, 0, false);
 
         assert!(filtered_changes.is_empty());
         assert!(state_changes.is_empty());
@@ -785,8 +800,13 @@ mod tests {
 
         changes.insert(vec![4, 5, 6, 1, 2, 3], account_with_version);
 
-        let (filtered_changes, state_changes) =
-            filter_account_changes(Some(&changes), &account_data_hash, &account_owners);
+        let (filtered_changes, state_changes) = filter_account_changes(
+            Some(&changes),
+            &account_data_hash,
+            &account_owners,
+            0,
+            false,
+        );
 
         assert_eq!(filtered_changes.len(), 1);
         assert_eq!(state_changes.len(), 1);
@@ -820,8 +840,13 @@ mod tests {
         changes.insert(owner_account_key.clone(), account_with_version);
         account_data_hash.insert(owner_account_key, 123); // Same hash
 
-        let (filtered_changes, state_changes) =
-            filter_account_changes(Some(&changes), &account_data_hash, &account_owners);
+        let (filtered_changes, state_changes) = filter_account_changes(
+            Some(&changes),
+            &account_data_hash,
+            &account_owners,
+            0,
+            false,
+        );
 
         // Should be filtered out since data hash is the same and account is not deleted
         assert!(filtered_changes.is_empty());
@@ -844,8 +869,13 @@ mod tests {
         changes.insert(owner_account_key.clone(), account_with_version);
         account_data_hash.insert(owner_account_key, 456); // Different hash
 
-        let (filtered_changes, state_changes) =
-            filter_account_changes(Some(&changes), &account_data_hash, &account_owners);
+        let (filtered_changes, state_changes) = filter_account_changes(
+            Some(&changes),
+            &account_data_hash,
+            &account_owners,
+            0,
+            false,
+        );
 
         assert_eq!(filtered_changes.len(), 1);
         assert_eq!(state_changes.len(), 1);
@@ -875,8 +905,13 @@ mod tests {
         changes.insert(owner_account_key.clone(), account_with_version);
         account_data_hash.insert(owner_account_key, 123); // Same hash but account is deleted
 
-        let (filtered_changes, state_changes) =
-            filter_account_changes(Some(&changes), &account_data_hash, &account_owners);
+        let (filtered_changes, state_changes) = filter_account_changes(
+            Some(&changes),
+            &account_data_hash,
+            &account_owners,
+            0,
+            false,
+        );
 
         // Should be included since account is deleted
         assert_eq!(filtered_changes.len(), 1);
@@ -908,8 +943,13 @@ mod tests {
         );
         account_owners.insert(address.clone(), old_owner.clone()); // Different owner
 
-        let (filtered_changes, state_changes) =
-            filter_account_changes(Some(&changes), &account_data_hash, &account_owners);
+        let (filtered_changes, state_changes) = filter_account_changes(
+            Some(&changes),
+            &account_data_hash,
+            &account_owners,
+            0,
+            false,
+        );
 
         // Should have 2 accounts: one with old owner, one with new owner
         assert_eq!(filtered_changes.len(), 2);
@@ -960,8 +1000,13 @@ mod tests {
         let key2 = [new_owner.clone(), address.clone()].concat();
         changes.insert(key2, account2_with_version);
 
-        let (mut filtered_changes, state_changes) =
-            filter_account_changes(Some(&changes), &account_data_hash, &account_owners);
+        let (mut filtered_changes, state_changes) = filter_account_changes(
+            Some(&changes),
+            &account_data_hash,
+            &account_owners,
+            0,
+            false,
+        );
 
         // Should have 2 accounts: one with old owner, one with new owner
         assert_eq!(filtered_changes.len(), 2);
@@ -1035,8 +1080,13 @@ mod tests {
             account_with_version3,
         );
 
-        let (filtered_changes, state_changes) =
-            filter_account_changes(Some(&changes), &account_data_hash, &account_owners);
+        let (filtered_changes, state_changes) = filter_account_changes(
+            Some(&changes),
+            &account_data_hash,
+            &account_owners,
+            0,
+            false,
+        );
 
         assert_eq!(filtered_changes.len(), 3);
         assert_eq!(state_changes.len(), 3);
@@ -1094,8 +1144,13 @@ mod tests {
         changes.insert(owner_account_key4.clone(), account_with_version4);
         account_data_hash.insert(owner_account_key4, 444); // Same hash but deleted
 
-        let (filtered_changes, state_changes) =
-            filter_account_changes(Some(&changes), &account_data_hash, &account_owners);
+        let (filtered_changes, state_changes) = filter_account_changes(
+            Some(&changes),
+            &account_data_hash,
+            &account_owners,
+            0,
+            false,
+        );
 
         // Should have: Account1, Account3 (old owner), Account3 (new owner), Account4
         assert_eq!(filtered_changes.len(), 4);

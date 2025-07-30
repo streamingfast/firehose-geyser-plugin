@@ -135,13 +135,13 @@ impl Plugin {
                 data_hash,
                 self.trace,
             );
+        }
 
-            if self.trace {
-                debug!(
+        if self.trace {
+            debug!(
                 "slot: {}, pub_key: {:?}, owner: {:?}, write_version: {}, deleted: {}, data_hash: {}, is_startup: {}",
                 slot, bs58::encode(pub_key).into_string(), bs58::encode(owner).into_string(), write_version, deleted, data_hash, is_startup
             );
-            }
         }
     }
 }
@@ -351,7 +351,7 @@ impl GeyserPlugin for Plugin {
                         .expect("cannot get RW lock for update_slot_status (poisoned)");
                     lock_state.set_confirmed_slot(slot);
                     if lock_state.is_ready(slot) {
-                        if lock_state.process_upto(slot).is_err() {
+                        if lock_state.process_upto(self.trace, slot).is_err() {
                             panic!("poisoned mutex")
                         }
                     }
@@ -399,7 +399,7 @@ impl GeyserPlugin for Plugin {
                         .expect("cannot get RW lock for set_confirmed_slot (poisoned)");
                     lock_state.set_confirmed_slot(slot);
                     if lock_state.is_ready(slot) {
-                        if lock_state.process_upto(slot).is_err() {
+                        if lock_state.process_upto(self.trace, slot).is_err() {
                             panic!("poisoned mutex")
                         }
                     }
@@ -446,7 +446,7 @@ impl GeyserPlugin for Plugin {
 
         lock_state.set_transaction(slot, tx);
         if lock_state.is_ready(slot) {
-            if lock_state.process_upto(slot).is_err() {
+            if lock_state.process_upto(self.trace, slot).is_err() {
                 panic!("poisoned mutex")
             }
         }
@@ -525,7 +525,7 @@ impl GeyserPlugin for Plugin {
         }
 
         if lock_state.is_ready(slot) {
-            if lock_state.process_upto(slot).is_err() {
+            if lock_state.process_upto(self.trace, slot).is_err() {
                 panic!("poisoned mutex")
             }
         }
