@@ -11,6 +11,7 @@ type BlockAccountChanges = HashMap<u64, AccountChanges>;
 pub type AccountChanges = HashMap<Vec<u8>, AccountWithWriteVersion>;
 pub type AccountDataHash = HashMap<Vec<u8>, u64>;
 pub type AccountOwners = HashMap<Vec<u8>, Vec<u8>>;
+pub type StartupAccountReceivedSlot = HashMap<Vec<u8>, (u64, u64)>;
 
 pub type Transactions = HashMap<u64, Vec<ConfirmTransactionWithIndex>>;
 type ProcessedSlot = HashMap<u64, bool>;
@@ -74,6 +75,7 @@ pub struct State {
 
     account_data_hash: AccountDataHash, // only updated when we print the block
     account_owners: AccountOwners,      // only updated when we print the block
+    startup_received_slot: StartupAccountReceivedSlot, // only used during startup phase
 
     block_infos: BlockInfoMap,
     confirmed_slots: ConfirmedSlotsMap,
@@ -108,6 +110,7 @@ impl State {
             block_account_changes: HashMap::new(),
             account_data_hash: HashMap::new(),
             account_owners: HashMap::new(),
+            startup_received_slot: HashMap::new(),
             block_infos: HashMap::new(),
             confirmed_slots: HashMap::new(),
             last_sent_block: None,
@@ -345,11 +348,34 @@ impl State {
     }
 
     // set_account_on_startup populates the account caches on startup
-    pub fn set_account_on_startup(&mut self, pub_key: &[u8], owner: &[u8], data_hash: u64) {
+    pub fn set_account_on_startup(
+        &mut self,
+        pub_key: &[u8],
+        owner: &[u8],
+        data_hash: u64,
+        slot: u64,
+        write_version: u64,
+    ) {
+        if let Some((existing_slot, existing_write_version)) =
+            self.startup_received_slot.get(&pub_key.to_vec())
+        {
+            if *existing_slot > slot
+                || (*existing_slot == slot && *existing_write_version > write_version)
+            {
+                return;
+            }
+        }
+        self.startup_received_slot
+            .insert(pub_key.to_vec(), (slot, write_version));
+
         let owner_account_key = [owner, pub_key].concat();
         self.account_data_hash.insert(owner_account_key, data_hash);
         self.account_owners.insert(pub_key.to_vec(), owner.to_vec());
         return;
+    }
+
+    pub fn delete_startup_info(&mut self) {
+        self.startup_received_slot = HashMap::new();
     }
 
     // set_account populates the caches for set_account
@@ -1592,7 +1618,7 @@ mod tests {
 
         state.first_block_to_process = Some(slot);
         // First call with is_startup=true
-        state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash);
+        state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash, slot, 0);
 
         // Second call with incremented slot
         state.set_account(
@@ -1608,6 +1634,48 @@ mod tests {
 
         // Even if it is the same data, we still save it here, because it could be changed by another slot
         assert_eq!(state.block_account_changes.get(&slot).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_startup_value_keeps_highest_slot() {
+        let mut state = test_state_no_rpc(None);
+
+        let data_hash_1 = gxhash64(b"data.1", 76);
+        let data_hash_2 = gxhash64(b"data.1", 76);
+        let data_hash_3 = gxhash64(b"data.1", 76);
+
+        let owner_account_key = [OWNER_KEY_1, PUB_KEY_1].concat();
+
+        state.first_block_to_process = Some(10);
+
+        // set startup value with slot=8 -> must be set
+        state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_1, 8, 1);
+
+        assert_eq!(
+            state.account_data_hash.get(&owner_account_key).unwrap(),
+            &data_hash_1
+        );
+
+        // set startup value with slot=7 -> unchanged
+        state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_2, 7, 1);
+        assert_eq!(
+            state.account_data_hash.get(&owner_account_key).unwrap(),
+            &data_hash_1
+        );
+
+        // set startup value with slot=8, higher write_version -> changed
+        state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_2, 8, 4);
+        assert_eq!(
+            state.account_data_hash.get(&owner_account_key).unwrap(),
+            &data_hash_2
+        );
+
+        // set startup value with slot=9, lower write_version -> changed
+        state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_3, 9, 0);
+        assert_eq!(
+            state.account_data_hash.get(&owner_account_key).unwrap(),
+            &data_hash_3
+        );
     }
 
     #[test]

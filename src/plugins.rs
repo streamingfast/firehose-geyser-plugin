@@ -123,7 +123,7 @@ impl Plugin {
         };
 
         if is_startup {
-            lock_state.set_account_on_startup(pub_key, owner, data_hash);
+            lock_state.set_account_on_startup(pub_key, owner, data_hash, slot, write_version);
         } else {
             lock_state.set_account(
                 slot,
@@ -307,7 +307,6 @@ impl GeyserPlugin for Plugin {
         Ok(())
     }
 
-    // NOOP
     fn notify_end_of_startup(&self) -> PluginResult<()> {
         info!(
             "preloaded account data hash count: {}",
@@ -319,6 +318,14 @@ impl GeyserPlugin for Plugin {
                 .get_hash_count()
         );
         info!("end of startup");
+
+        let mut lock_state = self
+            .state
+            .as_ref()
+            .expect("cannot get RW lock for notify_end_of_startup (state is None)")
+            .write()
+            .expect("cannot get RW lock for notify_end_of_startup (poisoned)");
+        lock_state.delete_startup_info();
         Ok(())
     }
 
