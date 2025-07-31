@@ -269,21 +269,6 @@ impl State {
     }
 
     // should_skip_slot skips when not initialized and below target block
-    pub fn should_skip_slot(&self, slot: u64) -> bool {
-        if self.initialized {
-            return false;
-        }
-
-        // if we are not initialized, we skip any block below 'cursor' or 'first_block_to_process'
-        // without those numbers we accept any account_change but truncate to keep 32 blocks in memory
-        if self.first_block_to_process.is_some() && slot < self.first_block_to_process.unwrap() {
-            return true;
-        }
-        if let Some(cursor) = self.cursor {
-            return slot <= cursor;
-        }
-        false
-    }
 
     pub fn set_confirmed_slot(&mut self, slot: u64) {
         //if self.should_skip_slot(slot) {
@@ -373,6 +358,7 @@ impl State {
         data_hash: u64,
         slot: u64,
         write_version: u64,
+        deleted: bool,
     ) {
         // Convert to fixed-length arrays (Solana pubkeys are always 32 bytes)
         let mut pub_key_fixed = [0u8; 32];
@@ -409,8 +395,13 @@ impl State {
         owner_account_key[..32].copy_from_slice(&owner_fixed);
         owner_account_key[32..].copy_from_slice(&pub_key_fixed);
 
-        self.account_data_hash.insert(owner_account_key, data_hash);
-        self.account_owners.insert(pub_key_fixed, owner_fixed);
+        if deleted {
+            self.account_data_hash.remove(&owner_account_key);
+            self.account_owners.remove(&pub_key_fixed);
+        } else {
+            self.account_data_hash.insert(owner_account_key, data_hash);
+            self.account_owners.insert(pub_key_fixed, owner_fixed);
+        }
     }
 
     pub fn delete_startup_info(&mut self) {
@@ -1921,7 +1912,7 @@ mod tests {
 
         state.first_block_to_process = Some(slot);
         // First call with is_startup=true
-        state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash, slot, 0);
+        state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash, slot, 0, false);
 
         // Second call with incremented slot
         state.set_account(
@@ -1946,13 +1937,15 @@ mod tests {
         let data_hash_1 = gxhash64(b"data.1", 76);
         let data_hash_2 = gxhash64(b"data.1", 76);
         let data_hash_3 = gxhash64(b"data.1", 76);
+        let data_hash_4 = gxhash64(b"data.4", 76);
 
         let owner_account_key_fixed = create_composite_key(OWNER_KEY_1, PUB_KEY_1);
+        let pub_key_1_fixed = vec_to_fixed_32(PUB_KEY_1);
 
         state.first_block_to_process = Some(10);
 
         // set startup value with slot=8 -> must be set
-        state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_1, 8, 1);
+        state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_1, 8, 1, false);
 
         assert_eq!(
             state
@@ -1963,7 +1956,7 @@ mod tests {
         );
 
         // set startup value with slot=7 -> unchanged
-        state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_2, 7, 1);
+        state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_2, 7, 1, false);
         assert_eq!(
             state
                 .account_data_hash
@@ -1973,7 +1966,7 @@ mod tests {
         );
 
         // set startup value with slot=8, higher write_version -> changed
-        state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_2, 8, 4);
+        state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_2, 8, 4, false);
         assert_eq!(
             state
                 .account_data_hash
@@ -1983,13 +1976,65 @@ mod tests {
         );
 
         // set startup value with slot=9, lower write_version -> changed
-        state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_3, 9, 0);
+        state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_3, 9, 0, false);
         assert_eq!(
             state
                 .account_data_hash
                 .get(&owner_account_key_fixed)
                 .unwrap(),
             &data_hash_3
+        );
+
+        // set startup value with slot=10, higher write_version, deleted=true -> all traces removed
+        state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_4, 10, 1, true);
+
+        // verify all traces to the account are removed from hashes
+        assert!(state
+            .account_data_hash
+            .get(&owner_account_key_fixed)
+            .is_none());
+        assert!(state.account_owners.get(&pub_key_1_fixed).is_none());
+
+        // test with different owner: set up account with OWNER_KEY_1 again
+        state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_1, 11, 0, false);
+        assert_eq!(
+            state
+                .account_data_hash
+                .get(&owner_account_key_fixed)
+                .unwrap(),
+            &data_hash_1
+        );
+        assert_eq!(
+            state.account_owners.get(&pub_key_1_fixed).unwrap(),
+            &vec_to_fixed_32(OWNER_KEY_1)
+        );
+
+        // set with different owner (OWNER_KEY_11111111111111111111111111111111) and deleted=true
+        let different_owner = OWNER_KEY_11111111111111111111111111111111;
+        state.set_account_on_startup(PUB_KEY_1, different_owner, data_hash_4, 12, 0, true);
+
+        // Verify previous values with the other owner are also gone
+        assert!(state
+            .account_data_hash
+            .get(&owner_account_key_fixed)
+            .is_none());
+        assert!(state.account_owners.get(&pub_key_1_fixed).is_none());
+
+        // set a value 'before' the block where it got deleted. it should remain deleted
+        state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_1, 11, 0, false);
+        assert!(state
+            .account_data_hash
+            .get(&owner_account_key_fixed)
+            .is_none());
+
+        // set a value 'after' the block where it got deleted. it should remain deleted
+        state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_1, 12, 1, false);
+        assert_eq!(
+            state
+                .account_data_hash
+                .get(&owner_account_key_fixed)
+                .unwrap(),
+            &data_hash_1
         );
     }
 
@@ -2013,7 +2058,7 @@ mod tests {
         state.first_block_to_process = Some(slot1);
 
         // First call with owner1
-        state.set_account_on_startup(PUB_KEY_1, owner1, data_hash1, slot1, 0);
+        state.set_account_on_startup(PUB_KEY_1, owner1, data_hash1, slot1, 0, false);
 
         // Verify owner1+pubkey entry exists in account_data_hash
         let owner1_account_key_fixed = create_composite_key(owner1, PUB_KEY_1);
@@ -2032,7 +2077,7 @@ mod tests {
         );
 
         // Second call with owner2 and higher slot number
-        state.set_account_on_startup(PUB_KEY_1, owner2, data_hash2, slot2, 0);
+        state.set_account_on_startup(PUB_KEY_1, owner2, data_hash2, slot2, 0, false);
 
         // Verify that owner1+pubkey entry is deleted from account_data_hash
         assert!(state

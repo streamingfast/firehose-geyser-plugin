@@ -101,9 +101,6 @@ impl Plugin {
         if owner == Self::VOTE111111111111111111111111111111111111111 {
             return;
         }
-        if is_startup && deleted {
-            return;
-        }
 
         let mut lock_state = self
             .state
@@ -123,7 +120,14 @@ impl Plugin {
         };
 
         if is_startup {
-            lock_state.set_account_on_startup(pub_key, owner, data_hash, slot, write_version);
+            lock_state.set_account_on_startup(
+                pub_key,
+                owner,
+                data_hash,
+                slot,
+                write_version,
+                deleted,
+            );
         } else {
             lock_state.set_account(
                 slot,
