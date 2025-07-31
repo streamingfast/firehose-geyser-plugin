@@ -140,8 +140,12 @@ fn generate_test_data() -> Vec<(Vec<u8>, Vec<u8>, u64, u64, u64)> {
 
     // Generate 8000 unique entries
     for i in 0..8000 {
-        let pub_key = format!("pubkey_{:08}", i).as_bytes().to_vec();
-        let owner = format!("owner_{:04}", i % 100).as_bytes().to_vec(); // 100 different owners
+        let pub_key = format!("pubkeypubkeypubkeypubkey{:08}", i)
+            .as_bytes()
+            .to_vec();
+        let owner = format!("owner_owner_owner_ownerowner{:04}", i % 100)
+            .as_bytes()
+            .to_vec(); // 100 different owners
         let data_hash = i as u64;
         let slot = i as u64;
         let write_version = 1;
@@ -151,8 +155,12 @@ fn generate_test_data() -> Vec<(Vec<u8>, Vec<u8>, u64, u64, u64)> {
 
     // Add 2000 duplicates (these should be skipped due to existing slot/write_version)
     for i in 0..2000 {
-        let pub_key = format!("pubkey_{:08}", i).as_bytes().to_vec();
-        let owner = format!("owner_{:04}", i % 100).as_bytes().to_vec();
+        let pub_key = format!("pubkeypubkeypubkeypubkey{:08}", i)
+            .as_bytes()
+            .to_vec();
+        let owner = format!("owner_owner_owner_ownerowner{:04}", i % 100)
+            .as_bytes()
+            .to_vec();
         let data_hash = (i + 10000) as u64; // Different data hash
         let slot = i as u64; // Same slot
         let write_version = 0; // Lower write version (should be skipped)
