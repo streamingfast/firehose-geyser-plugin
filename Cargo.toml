@@ -52,3 +52,7 @@ codegen-units = 1
 [[bench]]
 name = "startup_benchmark"
 harness = false
+
+[[bench]]
+name = "fixed_length_benchmark"
+harness = false
