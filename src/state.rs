@@ -356,8 +356,10 @@ impl State {
         slot: u64,
         write_version: u64,
     ) {
+        let pub_key_vec = pub_key.to_vec();
+
         if let Some((existing_slot, existing_write_version)) =
-            self.startup_received_slot.get(&pub_key.to_vec())
+            self.startup_received_slot.get(&pub_key_vec)
         {
             if *existing_slot > slot
                 || (*existing_slot == slot && *existing_write_version > write_version)
@@ -366,11 +368,27 @@ impl State {
             }
         }
         self.startup_received_slot
-            .insert(pub_key.to_vec(), (slot, write_version));
+            .insert(pub_key_vec.clone(), (slot, write_version));
 
-        let owner_account_key = [owner, pub_key].concat();
+        // Check if there was a previous owner for this public key
+        if let Some(previous_owner) = self.account_owners.get(&pub_key_vec) {
+            if previous_owner != owner {
+                // Previous owner is different, so delete the old entry from account_data_hash
+                let mut previous_owner_account_key =
+                    Vec::with_capacity(previous_owner.len() + pub_key.len());
+                previous_owner_account_key.extend_from_slice(previous_owner);
+                previous_owner_account_key.extend_from_slice(pub_key);
+                self.account_data_hash.remove(&previous_owner_account_key);
+            }
+        }
+
+        // Pre-allocate with known capacity to avoid reallocation
+        let mut owner_account_key = Vec::with_capacity(owner.len() + pub_key.len());
+        owner_account_key.extend_from_slice(owner);
+        owner_account_key.extend_from_slice(pub_key);
+
         self.account_data_hash.insert(owner_account_key, data_hash);
-        self.account_owners.insert(pub_key.to_vec(), owner.to_vec());
+        self.account_owners.insert(pub_key_vec, owner.to_vec());
         return;
     }
 
@@ -1675,6 +1693,51 @@ mod tests {
         assert_eq!(
             state.account_data_hash.get(&owner_account_key).unwrap(),
             &data_hash_3
+        );
+    }
+
+    #[test]
+    fn test_startup_owner_change_cleanup() {
+        let mut state = test_state_no_rpc(None);
+        let slot1: u64 = 10;
+        let slot2: u64 = 20;
+
+        let owner1 = b"owner1";
+        let owner2 = b"owner2";
+        let data_hash1 = gxhash64(b"data.1", 76);
+        let data_hash2 = gxhash64(b"data.2", 76);
+
+        state.first_block_to_process = Some(slot1);
+
+        // First call with owner1
+        state.set_account_on_startup(PUB_KEY_1, owner1, data_hash1, slot1, 0);
+
+        // Verify owner1+pubkey entry exists in account_data_hash
+        let owner1_account_key = [owner1, PUB_KEY_1].concat();
+        assert_eq!(
+            state.account_data_hash.get(&owner1_account_key).unwrap(),
+            &data_hash1
+        );
+        assert_eq!(
+            state.account_owners.get(&PUB_KEY_1.to_vec()).unwrap(),
+            owner1
+        );
+
+        // Second call with owner2 and higher slot number
+        state.set_account_on_startup(PUB_KEY_1, owner2, data_hash2, slot2, 0);
+
+        // Verify that owner1+pubkey entry is deleted from account_data_hash
+        assert!(state.account_data_hash.get(&owner1_account_key).is_none());
+
+        // Verify that owner2+pubkey entry exists in account_data_hash
+        let owner2_account_key = [owner2, PUB_KEY_1].concat();
+        assert_eq!(
+            state.account_data_hash.get(&owner2_account_key).unwrap(),
+            &data_hash2
+        );
+        assert_eq!(
+            state.account_owners.get(&PUB_KEY_1.to_vec()).unwrap(),
+            owner2
         );
     }
 
