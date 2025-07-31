@@ -8,6 +8,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 hashbrown = "0.15"
+ahash = "0.8"
 agave-geyser-plugin-interface = "=2.3.5"
 lazy_static = "1.5.0"
 anyhow = "1.0.62"
@@ -42,7 +43,12 @@ wiremock = "0.6.2"
 pretty_assertions = { version = "1.4.1", default-features = false, features = [
     "alloc",
 ] }
+criterion = { version = "0.5", features = ["html_reports"] }
 
 [profile.release]
 lto = true
 codegen-units = 1
+
+[[bench]]
+name = "startup_benchmark"
+harness = false
