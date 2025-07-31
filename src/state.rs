@@ -573,18 +573,15 @@ impl State {
         }
 
         for slot in self.ordered_confirmed_slots_upto(slot) {
-            if slot < first_block_to_process {
-                debug!(
-                    "in process_upto, skipping slot {} below first_block_to_process {}",
-                    slot, first_block_to_process
-                );
-                continue;
-            }
+            let must_send = slot >= first_block_to_process;
 
             let block_info = match self.block_infos.get(&slot) {
                 None => {
-                    info!("No block info for slot {} in process_upto", slot);
-                    return Ok(());
+                    if must_send {
+                        info!("No block info for slot {} in process_upto", slot);
+                        return Ok(());
+                    };
+                    &BlockInfo::default()
                 }
                 Some(bi) => bi,
             };
@@ -616,22 +613,29 @@ impl State {
                 trace,
             );
 
-            let acc_block = create_account_block(effective_account_changes, &block_info);
+            if must_send {
+                let acc_block = create_account_block(effective_account_changes, &block_info);
 
-            let mut transactions_with_index =
-                self.transactions.remove(&slot).unwrap_or_else(|| vec![]);
+                let mut transactions_with_index =
+                    self.transactions.remove(&slot).unwrap_or_else(|| vec![]);
 
-            transactions_with_index.sort_by_key(|ti| ti.index);
+                transactions_with_index.sort_by_key(|ti| ti.index);
 
-            let block = compose_and_purge_block(slot, &block_info, transactions_with_index);
+                let block = compose_and_purge_block(slot, &block_info, transactions_with_index);
 
-            let printer = &mut self.block_printer;
-            let result = printer.print(&block_info, lib, block, acc_block, &self.cursor_path);
-            if !result.is_ok() {
-                info!("Error printing block at {}", slot);
-                return Err("Error printing block".into());
+                let printer = &mut self.block_printer;
+                let result = printer.print(&block_info, lib, block, acc_block, &self.cursor_path);
+                if !result.is_ok() {
+                    info!("Error printing block at {}", slot);
+                    return Err("Error printing block".into());
+                }
+                self.last_sent_block = Some(block_info.slot);
+            } else {
+                info!(
+                    "in process_upto, not actually sending slot {}, below first_block_to_process {}. applying to cache only",
+                    slot, first_block_to_process
+                );
             }
-            self.last_sent_block = Some(block_info.slot);
             self.purge_blocks_up_to(slot);
             self.processed_slots.insert(slot, true);
             self.apply_cache_changes(cache_changes);
