@@ -286,10 +286,10 @@ impl State {
     }
 
     pub fn set_confirmed_slot(&mut self, slot: u64) {
-        if self.should_skip_slot(slot) {
-            debug!("skipping slot {}", slot);
-            return;
-        }
+        //if self.should_skip_slot(slot) {
+        //    debug!("skipping slot {}", slot);
+        //    return;
+        //}
         if let Some(cursor) = self.cursor {
             if self.first_block_to_process.is_none() {
                 if slot >= cursor {

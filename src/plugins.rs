@@ -112,9 +112,9 @@ impl Plugin {
             .write()
             .expect("cannot get RW lock for set_account (poisoned)");
 
-        if !is_startup && lock_state.should_skip_slot(slot) {
-            return;
-        }
+        //if !is_startup && lock_state.should_skip_slot(slot) {
+        //    return;
+        //}
 
         let data_hash = if data.len() == 0 {
             0
