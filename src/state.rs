@@ -180,7 +180,7 @@ impl State {
         self.lib
     }
 
-    pub fn cache_block_from_rpc(&mut self, slot: u64) {
+    pub fn cache_block_from_rpc(&mut self, slot: u64, trace: bool) {
         match self
             .local_rpc_client
             .as_ref()
@@ -189,16 +189,19 @@ impl State {
         {
             Ok(block) => {
                 debug!("Block Info fetched locally for slot {}", slot);
-                self.set_block_info(BlockInfo {
-                    timestamp: convert_sol_timestamp(block.block_time.unwrap_or_default()),
-                    parent_slot: block.parent_slot.clone(),
-                    slot,
-                    block_hash: block.blockhash.clone(),
-                    parent_hash: block.previous_blockhash.clone(),
-                    height: block.block_height,
-                    rewards: to_block_rewards(&block.rewards),
-                    transaction_count: block.transactions.unwrap_or_default().len() as u64,
-                })
+                self.set_block_info(
+                    BlockInfo {
+                        timestamp: convert_sol_timestamp(block.block_time.unwrap_or_default()),
+                        parent_slot: block.parent_slot.clone(),
+                        slot,
+                        block_hash: block.blockhash.clone(),
+                        parent_hash: block.previous_blockhash.clone(),
+                        height: block.block_height,
+                        rewards: to_block_rewards(&block.rewards),
+                        transaction_count: block.transactions.unwrap_or_default().len() as u64,
+                    },
+                    trace,
+                )
             }
             Err(_err) => {
                 match self
@@ -209,16 +212,22 @@ impl State {
                 {
                     Ok(block) => {
                         debug!("Block Info fetched remotely for slot {}", slot);
-                        self.set_block_info(BlockInfo {
-                            timestamp: convert_sol_timestamp(block.block_time.unwrap_or_default()),
-                            parent_slot: block.parent_slot.clone(),
-                            slot,
-                            block_hash: block.blockhash.clone(),
-                            parent_hash: block.previous_blockhash.clone(),
-                            height: block.block_height,
-                            rewards: to_block_rewards(&block.rewards),
-                            transaction_count: block.transactions.unwrap_or_default().len() as u64,
-                        })
+                        self.set_block_info(
+                            BlockInfo {
+                                timestamp: convert_sol_timestamp(
+                                    block.block_time.unwrap_or_default(),
+                                ),
+                                parent_slot: block.parent_slot.clone(),
+                                slot,
+                                block_hash: block.blockhash.clone(),
+                                parent_hash: block.previous_blockhash.clone(),
+                                height: block.block_height,
+                                rewards: to_block_rewards(&block.rewards),
+                                transaction_count: block.transactions.unwrap_or_default().len()
+                                    as u64,
+                            },
+                            trace,
+                        )
                     }
                     Err(_err) => return,
                 }
@@ -238,7 +247,12 @@ impl State {
         slots
     }
 
-    fn add_missing_slots_to_confirmed_slots(&mut self, last_sent: u64, parent_slot: u64) -> bool {
+    fn add_missing_slots_to_confirmed_slots(
+        &mut self,
+        last_sent: u64,
+        parent_slot: u64,
+        trace: bool,
+    ) -> bool {
         let mut i = parent_slot;
         while i > last_sent {
             match self.block_infos.get(&i) {
@@ -249,7 +263,7 @@ impl State {
                     i = bi.parent_slot;
                 }
                 None => {
-                    self.cache_block_from_rpc(i);
+                    self.cache_block_from_rpc(i, trace);
                     match self.block_infos.get(&i) {
                         Some(bi) => {
                             if self.confirmed_slots.insert(i, true).is_none() {
@@ -270,7 +284,7 @@ impl State {
 
     // should_skip_slot skips when not initialized and below target block
 
-    pub fn set_confirmed_slot(&mut self, slot: u64) {
+    pub fn set_confirmed_slot(&mut self, slot: u64, trace: bool) {
         //if self.should_skip_slot(slot) {
         //    debug!("skipping slot {}", slot);
         //    return;
@@ -285,6 +299,12 @@ impl State {
             }
         }
         self.confirmed_slots.insert(slot, true);
+
+        if self.is_ready(slot) {
+            if self.process_upto(trace, slot).is_err() {
+                panic!("poisoned mutex")
+            }
+        }
     }
 
     pub fn has_block_info(&self, slot: u64) -> bool {
@@ -329,14 +349,16 @@ impl State {
         }
     }
 
-    pub fn set_block_info(&mut self, block_info: BlockInfo) {
+    pub fn set_block_info(&mut self, block_info: BlockInfo, trace: bool) {
         let slot = block_info.slot;
         if self.lib.is_none() {
+            // this may set the cursor to none
             self.set_last_finalized_block_from_rpc();
         }
         if self.first_received_blockmeta.is_none() {
             self.first_received_blockmeta = Some(slot);
             if self.cursor.is_none() {
+                // usually because the lib has been set from rpc
                 debug!("setting first_block_to_process to: {}", slot);
                 self.first_block_to_process = Some(slot);
                 debug!("deleting blocks up to: {}", slot - 1);
@@ -348,6 +370,19 @@ impl State {
             slot, block_info.block_hash
         );
         self.block_infos.insert(slot, block_info);
+
+        // if we get block_info for block 25, but we have 'confirmed blocks' 20 to 24, we'll fetch their block_info from RPC, which is a bit costly but prevents being stuck forever. This happens in rare cases, mostly upon startup
+        for slot in self.ordered_confirmed_slots_upto(slot) {
+            if !self.has_block_info(slot) {
+                self.cache_block_from_rpc(slot, trace);
+            }
+        }
+
+        if self.is_ready(slot) {
+            if self.process_upto(trace, slot).is_err() {
+                panic!("poisoned mutex")
+            }
+        }
     }
 
     // set_account_on_startup populates the account caches on startup
@@ -486,7 +521,12 @@ impl State {
         slot_entries.insert(owner_account_key, awv);
     }
 
-    pub fn set_transaction(&mut self, slot: u64, transaction: ConfirmTransactionWithIndex) {
+    pub fn set_transaction(
+        &mut self,
+        slot: u64,
+        transaction: ConfirmTransactionWithIndex,
+        trace: bool,
+    ) {
         if self.processed_slots.get(&slot).is_some() {
             error!(
                 "slot {} already processed should not receive transaction for it",
@@ -501,6 +541,12 @@ impl State {
             let mut txs = Vec::new();
             txs.push(transaction);
             self.transactions.insert(slot, txs);
+        }
+
+        if self.is_ready(slot) {
+            if self.process_upto(trace, slot).is_err() {
+                panic!("poisoned mutex")
+            }
         }
     }
 
@@ -595,7 +641,8 @@ impl State {
                             block_info.parent_slot,
                         );
 
-                    let success = self.add_missing_slots_to_confirmed_slots(last_sent_block, slot);
+                    let success =
+                        self.add_missing_slots_to_confirmed_slots(last_sent_block, slot, trace);
                     if !success {
                         warn!("Failed to add all missing slots to 'confirmed_slots' between {} and {}", last_sent_block, slot);
                     }
@@ -1817,7 +1864,7 @@ mod tests {
         // Test case 1: No lib set yet
         let block_info = test_block_info(100, 99);
 
-        state.set_block_info(block_info.clone());
+        state.set_block_info(block_info.clone(), false);
         assert_eq!(state.lib, Some(100)); // From mock response
         assert_eq!(state.first_received_blockmeta, Some(100));
         assert_eq!(state.first_block_to_process, Some(100));
@@ -1832,7 +1879,7 @@ mod tests {
             true,
         );
 
-        state_with_cursor.set_block_info(block_info.clone());
+        state_with_cursor.set_block_info(block_info.clone(), false);
         assert_eq!(state_with_cursor.first_received_blockmeta, Some(100));
         assert_eq!(state_with_cursor.first_block_to_process, None); // Should not be set since cursor exists
         assert_eq!(state_with_cursor.cursor, Some(110));
@@ -1847,7 +1894,7 @@ mod tests {
             true,
         );
 
-        state_with_cursor.set_block_info(block_info.clone());
+        state_with_cursor.set_block_info(block_info.clone(), false);
         assert_eq!(state_with_cursor.first_received_blockmeta, Some(100));
         assert_eq!(state_with_cursor.first_block_to_process, Some(100)); // gets set since cursor must be ignored
         assert_eq!(state_with_cursor.cursor, None);
@@ -1855,7 +1902,7 @@ mod tests {
         // Test case 4: Already initialized state
 
         state.first_received_blockmeta = Some(50);
-        state.set_block_info(test_block_info(100, 99));
+        state.set_block_info(test_block_info(100, 99), false);
 
         // Check block was added without modifying first_received_blockmeta
         assert_eq!(state.first_received_blockmeta, Some(50));
@@ -1883,7 +1930,8 @@ mod tests {
         state.block_infos.insert(6, test_block_info(6, 4));
 
         // assume we receive confirmed_slot 7 with parent_slot 6
-        let result = state.add_missing_slots_to_confirmed_slots(state.last_sent_block.unwrap(), 6);
+        let result =
+            state.add_missing_slots_to_confirmed_slots(state.last_sent_block.unwrap(), 6, false);
         assert!(result);
 
         assert!(state.confirmed_slots.get(&1).is_none()); // was already sent
