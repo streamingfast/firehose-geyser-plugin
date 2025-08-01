@@ -578,14 +578,26 @@ impl State {
     }
 
     fn apply_changes_upto(&mut self, trace: bool, slot: u64) {
-        info!("applying account cache changes for blocks up to: {}", slot);
+        // Find the lowest slot value in block_account_changes keys
+        let first_slot = self
+            .block_account_changes
+            .keys()
+            .min()
+            .copied()
+            .unwrap_or(slot);
 
-        for slot in self.ordered_confirmed_slots_upto(slot) {
+        info!(
+            "applying account cache changes for slots from {} to: {}",
+            first_slot, slot
+        );
+
+        // Loop through each slot from first_slot to slot (inclusive)
+        for current_slot in first_slot..=slot {
             let (_, changes) = filter_account_changes(
-                self.block_account_changes.get(&slot),
+                self.block_account_changes.get(&current_slot),
                 &self.account_data_hash,
                 &self.account_owners,
-                slot,
+                current_slot,
                 trace,
             );
             self.apply_cache_changes(changes);
@@ -609,16 +621,13 @@ impl State {
             }
         };
 
-        let first_received_blockmeta = match self.first_received_blockmeta {
-            Some(slot) => slot,
-            None => {
-                debug!(
-                    "No 'first_received_blockmeta' yet, skipping processing for slot {}",
-                    slot
-                );
-                return Ok(());
-            }
-        };
+        if self.first_received_blockmeta.is_none() {
+            debug!(
+                "No 'first_received_blockmeta' yet, skipping processing for slot {}",
+                slot
+            );
+            return Ok(());
+        }
 
         let lib = match self.get_lib() {
             Some(lib) => lib,
@@ -628,8 +637,9 @@ impl State {
             }
         };
 
-        if slot == first_received_blockmeta {
-            debug!("First block was sent, now initialized");
+        if self.last_sent_block.is_none() {
+            self.apply_changes_upto(trace, slot - 1);
+            debug!("First being sent, now initialized");
             self.initialized = true;
         }
 
@@ -2644,7 +2654,7 @@ mod tests {
     }
 
     #[test]
-    fn test_integration_cursor_and_lib_after_missing_first_blockinfo() {
+    fn test_integration_cursor_and_lib_after_missing_first_blockinfo_and_confirmed() {
         // Create state with noop BlockPrinter
         let mut state =
             new_test_state(Some(102), setup_noop_block_printer_with_logging(true, true));
@@ -2654,7 +2664,7 @@ mod tests {
         state.set_account(102, PUB_KEY_3, DATA_3, OWNER_KEY_1, 1, false, 34567, true);
 
         // here we DON'T send block_info for slot 100
-        state.set_confirmed_slot(100, true);
+        // we DON'T send confirmed_slot either
         state.set_block_info(simple_block_info(101), true);
         state.set_confirmed_slot(101, true);
 
