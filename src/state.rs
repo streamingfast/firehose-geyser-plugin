@@ -167,7 +167,7 @@ impl State {
                 }
             }
             Err(e) => {
-                println!("Error getting lib num from rpc client: {}", e);
+                info!("Error getting lib num from rpc client: {}", e);
             }
         }
     }
@@ -285,16 +285,11 @@ impl State {
     // should_skip_slot skips when not initialized and below target block
 
     pub fn set_confirmed_slot(&mut self, slot: u64, trace: bool) {
-        //if self.should_skip_slot(slot) {
-        //    debug!("skipping slot {}", slot);
-        //    return;
-        //}
         if let Some(cursor) = self.cursor {
             if self.first_block_to_process.is_none() {
                 if slot >= cursor {
                     self.first_block_to_process = Some(slot);
-                    debug!("deleting blocks up to: {}", slot - 1);
-                    self.purge_blocks_up_to(slot - 1);
+                    info!("setting first_block_to_process: {}", slot - 1);
                 }
             }
         }
@@ -361,6 +356,10 @@ impl State {
                 // usually because the lib has been set from rpc
                 debug!("setting first_block_to_process to: {}", slot);
                 self.first_block_to_process = Some(slot);
+
+                // since we don't send these blocks, we apply their changes to the cache manually
+                self.apply_changes_upto(trace, slot - 1);
+
                 debug!("deleting blocks up to: {}", slot - 1);
                 self.purge_blocks_up_to(slot - 1);
             }
@@ -577,6 +576,21 @@ impl State {
         }
     }
 
+    fn apply_changes_upto(&mut self, trace: bool, slot: u64) {
+        info!("applying account cache changes for blocks up to: {}", slot);
+
+        for slot in self.ordered_confirmed_slots_upto(slot) {
+            let (_, changes) = filter_account_changes(
+                self.block_account_changes.get(&slot),
+                &self.account_data_hash,
+                &self.account_owners,
+                slot,
+                trace,
+            );
+            self.apply_cache_changes(changes);
+        }
+    }
+
     pub fn process_upto(
         &mut self,
         trace: bool,
@@ -683,9 +697,9 @@ impl State {
                     slot, first_block_to_process
                 );
             }
-            self.purge_blocks_up_to(slot);
-            self.processed_slots.insert(slot, true);
             self.apply_cache_changes(cache_changes);
+            self.processed_slots.insert(slot, true);
+            self.purge_blocks_up_to(slot);
 
             if BLOCK_MUTEX.is_poisoned() || ACC_MUTEX.is_poisoned() {
                 return Err("mutex poisoned".into());
@@ -1819,6 +1833,89 @@ mod tests {
         )
     }
 
+    /// Create test state with customizable parameters
+    fn new_test_state(
+        cursor: Option<u64>,
+        block_printer: crate::block_printer::BlockPrinter,
+    ) -> State {
+        // Create temporary RPC clients (these won't be used in cache tests)
+        let local_client = RpcClient::new("http://localhost:8899".to_string());
+        let remote_client = RpcClient::new("http://localhost:8899".to_string());
+
+        State::new(
+            local_client,
+            remote_client,
+            cursor,
+            "/tmp/test_cursor".to_string(),
+            block_printer,
+            false,
+        )
+    }
+
+    /// Assert that logs contain expected messages in order
+    fn assert_logs_contain_ordered(expected_logs: Vec<String>) {
+        testing_logger::validate(|captured_logs| {
+            let log_bodies: Vec<String> =
+                captured_logs.iter().map(|log| log.body.clone()).collect();
+
+            for expected_log in &expected_logs {
+                let found = log_bodies.iter().any(|log| log.contains(expected_log));
+                assert!(
+                    found,
+                    "Expected log message '{}' not found in captured logs.\nCaptured logs: {:?}",
+                    expected_log, log_bodies
+                );
+            }
+        });
+    }
+
+    /// Setup noop block printer with logging for tests
+    fn setup_noop_block_printer_with_logging(
+        with_block: bool,
+        with_account: bool,
+    ) -> crate::block_printer::BlockPrinter {
+        use crate::block_printer::BlockPrinter;
+        use std::fs::File;
+        use tempfile::NamedTempFile;
+        use testing_logger;
+
+        // Setup log capture
+        testing_logger::setup();
+
+        let block_file = if with_block {
+            let temp_file = NamedTempFile::new().unwrap();
+            Some(File::open(temp_file.path()).unwrap())
+        } else {
+            None
+        };
+
+        let account_file = if with_account {
+            let temp_file = NamedTempFile::new().unwrap();
+            Some(File::open(temp_file.path()).unwrap())
+        } else {
+            None
+        };
+
+        BlockPrinter::new(block_file, account_file, true)
+    }
+
+    /// Create simple BlockInfo with just slot number, parent_slot defaults to slot-1
+    fn simple_block_info(slot: u64) -> BlockInfo {
+        BlockInfo {
+            slot,
+            parent_slot: slot.saturating_sub(1),
+            block_hash: format!("block_hash_{}", slot),
+            parent_hash: format!("parent_hash_{}", slot.saturating_sub(1)),
+            timestamp: Timestamp {
+                seconds: 1000 + slot as i64,
+                nanos: 0,
+            },
+            height: Some(slot),
+            rewards: vec![],
+            transaction_count: 0,
+        }
+    }
+
     fn test_block_info(slot: u64, parent_slot: u64) -> BlockInfo {
         BlockInfo {
             timestamp: Timestamp {
@@ -1945,11 +2042,21 @@ mod tests {
         1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
         1, 1,
     ];
-    const OWNER_KEY_1: &[u8] = &[
+    const PUB_KEY_2: &[u8] = &[
         2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
         2, 2,
     ];
+    const PUB_KEY_3: &[u8] = &[
+        3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+        3, 3,
+    ];
+    const OWNER_KEY_1: &[u8] = &[
+        10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10,
+        10, 10, 10, 10, 10, 10, 10, 10, 10,
+    ];
     const DATA_1: &[u8] = b"data.1";
+    const DATA_2: &[u8] = b"data.2";
+    const DATA_3: &[u8] = b"data.2";
     const OWNER_KEY_11111111111111111111111111111111: &[u8] = [
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0,
@@ -1983,7 +2090,7 @@ mod tests {
     }
 
     #[test]
-    fn test_startup_value_keeps_highest_slot() {
+    fn test_set_account_on_startup_keeps_highest_slot() {
         let mut state = test_state_no_rpc(None);
 
         let data_hash_1 = gxhash64(b"data.1", 76);
@@ -2091,7 +2198,7 @@ mod tests {
     }
 
     #[test]
-    fn test_startup_owner_change_cleanup() {
+    fn test_set_account_on_startup_owner_change_cleanup() {
         let mut state = test_state_no_rpc(None);
         let slot1: u64 = 10;
         let slot2: u64 = 20;
@@ -2326,6 +2433,213 @@ mod tests {
             BlockPrinter::new(None, None, false),
             true,
         )
+    }
+
+    #[test]
+    fn test_integration_simple() {
+        let mut state = new_test_state(Some(99), setup_noop_block_printer_with_logging(true, true));
+
+        state.set_lib(99);
+
+        state.set_account(100, PUB_KEY_1, DATA_1, OWNER_KEY_1, 1, false, 12345, true);
+        state.set_account(101, PUB_KEY_2, DATA_2, OWNER_KEY_1, 1, false, 23456, true);
+        state.set_account(102, PUB_KEY_3, DATA_3, OWNER_KEY_1, 1, false, 34567, true);
+
+        state.set_block_info(simple_block_info(100), true);
+        state.set_confirmed_slot(100, true);
+        state.set_block_info(simple_block_info(101), true);
+        state.set_confirmed_slot(101, true);
+        state.set_block_info(simple_block_info(102), true);
+        state.set_confirmed_slot(102, true);
+
+        // Build expected log messages
+        let mut expected_logs = Vec::new();
+        for slot in [100, 101, 102] {
+            expected_logs.push(format!("printing block {} (noop mode)", slot));
+            expected_logs.push(format!("printing account_block {} (noop mode)", slot));
+        }
+
+        // Validate captured logs
+        assert_logs_contain_ordered(expected_logs);
+    }
+
+    fn concat_keys(owner: &[u8], account: &[u8]) -> [u8; 64] {
+        let mut result = [0u8; 64];
+        result[..32].copy_from_slice(owner);
+        result[32..].copy_from_slice(account);
+        result
+    }
+
+    #[test]
+    fn test_integration_cursor_after_start() {
+        // Create state with noop BlockPrinter
+        let mut state =
+            new_test_state(Some(101), setup_noop_block_printer_with_logging(true, true));
+
+        state.set_lib(99);
+
+        state.set_account(100, PUB_KEY_1, DATA_1, OWNER_KEY_1, 1, false, 12345, true);
+        state.set_account(101, PUB_KEY_2, DATA_2, OWNER_KEY_1, 1, false, 23456, true);
+        state.set_account(102, PUB_KEY_3, DATA_3, OWNER_KEY_1, 1, false, 34567, true);
+
+        state.set_block_info(simple_block_info(100), true);
+        state.set_confirmed_slot(100, true);
+        state.set_block_info(simple_block_info(101), true);
+        state.set_confirmed_slot(101, true);
+        state.set_block_info(simple_block_info(102), true);
+        state.set_confirmed_slot(102, true);
+
+        // Build expected log messages
+        let mut expected_logs = Vec::new();
+        for slot in [101, 102] {
+            // slot 100 will not be printed
+            expected_logs.push(format!("printing block {} (noop mode)", slot));
+            expected_logs.push(format!("printing account_block {} (noop mode)", slot));
+        }
+
+        assert_eq!(
+            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_1)],
+            12345
+        );
+        assert_eq!(
+            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_2)],
+            23456
+        );
+        assert_eq!(
+            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_3)],
+            34567
+        );
+
+        // Validate captured logs
+        assert_logs_contain_ordered(expected_logs);
+    }
+
+    #[test]
+    fn test_integration_lib_after_cursor() {
+        // Create state with noop BlockPrinter
+        let mut state = new_test_state(Some(50), setup_noop_block_printer_with_logging(true, true));
+
+        state.set_lib(100);
+
+        state.set_account(100, PUB_KEY_1, DATA_1, OWNER_KEY_1, 1, false, 12345, true);
+        state.set_account(101, PUB_KEY_2, DATA_2, OWNER_KEY_1, 1, false, 23456, true);
+        state.set_account(102, PUB_KEY_3, DATA_3, OWNER_KEY_1, 1, false, 34567, true);
+
+        state.set_block_info(simple_block_info(100), true);
+        state.set_confirmed_slot(100, true);
+        state.set_block_info(simple_block_info(101), true);
+        state.set_confirmed_slot(101, true);
+        state.set_block_info(simple_block_info(102), true);
+        state.set_confirmed_slot(102, true);
+
+        // Build expected log messages
+        let mut expected_logs = Vec::new();
+        for slot in [100, 101, 102] {
+            expected_logs.push(format!("printing block {} (noop mode)", slot));
+            expected_logs.push(format!("printing account_block {} (noop mode)", slot));
+        }
+
+        assert_eq!(
+            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_1)],
+            12345
+        );
+        assert_eq!(
+            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_2)],
+            23456
+        );
+        assert_eq!(
+            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_3)],
+            34567
+        );
+
+        // Validate captured logs
+        assert_logs_contain_ordered(expected_logs);
+    }
+
+    #[test]
+    fn test_integration_no_cursor_set_lib_delayed() {
+        // Create state with noop BlockPrinter
+        let mut state = new_test_state(None, setup_noop_block_printer_with_logging(true, true));
+
+        state.set_account(100, PUB_KEY_1, DATA_1, OWNER_KEY_1, 1, false, 12345, true);
+        state.set_account(101, PUB_KEY_2, DATA_2, OWNER_KEY_1, 1, false, 23456, true);
+        state.set_account(102, PUB_KEY_3, DATA_3, OWNER_KEY_1, 1, false, 34567, true);
+        state.set_block_info(simple_block_info(100), true);
+        state.set_confirmed_slot(100, true);
+        state.set_block_info(simple_block_info(101), true);
+        state.set_confirmed_slot(101, true);
+
+        state.set_lib(50);
+
+        state.set_block_info(simple_block_info(102), true);
+        state.set_confirmed_slot(102, true);
+
+        // Build expected log messages
+        let mut expected_logs = Vec::new();
+        for slot in [100, 101, 102] {
+            expected_logs.push(format!("printing block {} (noop mode)", slot));
+            expected_logs.push(format!("printing account_block {} (noop mode)", slot));
+        }
+
+        assert_eq!(
+            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_1)],
+            12345
+        );
+        assert_eq!(
+            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_2)],
+            23456
+        );
+        assert_eq!(
+            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_3)],
+            34567
+        );
+
+        // Validate captured logs
+        assert_logs_contain_ordered(expected_logs);
+    }
+
+    #[test]
+    fn test_integration_no_cursor_missing_first_blockinfo() {
+        // Create state with noop BlockPrinter
+        let mut state = new_test_state(None, setup_noop_block_printer_with_logging(true, true));
+
+        state.set_account(100, PUB_KEY_1, DATA_1, OWNER_KEY_1, 1, false, 12345, true);
+        state.set_account(101, PUB_KEY_2, DATA_2, OWNER_KEY_1, 1, false, 23456, true);
+        state.set_account(102, PUB_KEY_3, DATA_3, OWNER_KEY_1, 1, false, 34567, true);
+
+        state.set_lib(100);
+
+        // here we DON'T send block_info for slot 100
+        state.set_confirmed_slot(100, true);
+        state.set_block_info(simple_block_info(101), true);
+        state.set_confirmed_slot(101, true);
+        state.set_block_info(simple_block_info(102), true);
+        state.set_confirmed_slot(102, true);
+
+        // Build expected log messages
+        let mut expected_logs = Vec::new();
+        for slot in [101, 102] {
+            // block 100 is not sent because we didn't get blockinfo for it and had no cursor
+            expected_logs.push(format!("printing block {} (noop mode)", slot));
+            expected_logs.push(format!("printing account_block {} (noop mode)", slot));
+        }
+
+        // this should be inserted even if we don't actually SEND the block
+        assert_eq!(
+            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_1)],
+            12345
+        );
+        assert_eq!(
+            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_2)],
+            23456
+        );
+        assert_eq!(
+            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_3)],
+            34567
+        );
+
+        // Validate captured logs
+        assert_logs_contain_ordered(expected_logs);
     }
 }
 

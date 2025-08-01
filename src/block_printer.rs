@@ -65,26 +65,27 @@ impl BlockPrinter {
             let parent_hash = block_info.parent_hash.clone();
             let cursor_path = cursor_path.to_string();
 
-            std::thread::spawn(move || {
-                let encoded_block = block.encode_to_vec();
-                let base64_encoded_block = rbase64::encode(&encoded_block);
-                let payload = base64_encoded_block;
+            if noop {
+                info!("printing block {} (noop mode)", slot);
+                write_cursor(&cursor_path, slot);
+            } else {
+                std::thread::spawn(move || {
+                    let encoded_block = block.encode_to_vec();
+                    let base64_encoded_block = rbase64::encode(&encoded_block);
+                    let payload = base64_encoded_block;
 
-                info!(
-                    "printing block {} {} with transaction count of {}",
-                    block.slot,
-                    block_hash,
-                    block.transactions.len()
-                );
+                    info!(
+                        "printing block {} {} with transaction count of {}",
+                        block.slot,
+                        block_hash,
+                        block.transactions.len()
+                    );
 
-                if noop {
-                    info!("printing block {} (noop mode)", slot);
-                } else {
                     let _lock = BLOCK_MUTEX.lock().expect("block_mutex lock poisoned");
                     writeln!(out_block, "FIRE BLOCK {slot} {block_hash} {parent_slot} {parent_hash} {lib} {timestamp_nano} {payload}").expect("cannot write to out_block");
-                }
-                write_cursor(&cursor_path, slot);
-            });
+                    write_cursor(&cursor_path, slot);
+                });
+            }
         } else {
             write_cursor(cursor_path, slot); // must still be called twice
         }
@@ -94,19 +95,21 @@ impl BlockPrinter {
             let block_hash = block_info.block_hash.clone();
             let parent_hash = block_info.parent_hash.clone();
             let cursor_path = cursor_path.to_string();
-            std::thread::spawn(move || {
-                let encoded_account_block = account_block.encode_to_vec();
 
-                let base64_encoded_block = rbase64::encode(&encoded_account_block);
-                let payload = base64_encoded_block;
-                if noop {
-                    info!("printing account_block {} (noop mode)", slot);
-                } else {
+            if noop {
+                info!("printing account_block {} (noop mode)", slot);
+                write_cursor(&cursor_path, slot);
+            } else {
+                std::thread::spawn(move || {
+                    let encoded_account_block = account_block.encode_to_vec();
+
+                    let base64_encoded_block = rbase64::encode(&encoded_account_block);
+                    let payload = base64_encoded_block;
                     let _lock = ACC_MUTEX.lock().expect("acc_mutex lock poisoned");
                     writeln!(out_account, "FIRE BLOCK {slot} {block_hash} {parent_slot} {parent_hash} {lib} {timestamp_nano} {payload}").expect("cannot write to out_account");
-                }
-                write_cursor(&cursor_path, slot);
-            });
+                    write_cursor(&cursor_path, slot);
+                });
+            }
         } else {
             write_cursor(cursor_path, slot); // must still be called twice
         }
