@@ -84,9 +84,8 @@ impl Plugin {
 
     // set_account:
     // * skips vote accounts
-    // * skips based on state.should_skip_slot()
     // * computes data hash
-    // * calls state.set_account()
+    // * calls state.set_account() or state.set_account_on_startup()
     fn set_account(
         &self,
         slot: u64,
@@ -449,8 +448,7 @@ impl GeyserPlugin for Plugin {
 
     // notify_block_metadata:
     // * decodes the blockinfo version
-    // * calls state.set_block_info
-    // * fills in missing block info from confirmed_slots from RPC
+    // * calls state.set_block_info (which will fill in missing block info from confirmed_slots from RPC)
     fn notify_block_metadata(&self, block_info: ReplicaBlockInfoVersions<'_>) -> PluginResult<()> {
         if ACC_MUTEX.is_poisoned() || BLOCK_MUTEX.is_poisoned() {
             panic!("poisoned mutex")
@@ -575,6 +573,7 @@ pub unsafe extern "C" fn _create_plugin() -> *mut dyn GeyserPlugin {
     Box::into_raw(plugin)
 }
 
+// Below are just transformation functions to help with decoding different versions of the data sent to the plugin
 fn to_confirm_transaction(tx: &'_ ReplicaTransactionInfoV2<'_>) -> ConfirmedTransaction {
     ConfirmedTransaction {
         transaction: Some(to_transaction(
