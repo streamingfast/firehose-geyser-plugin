@@ -293,6 +293,7 @@ impl State {
                 }
             }
         }
+        debug!("set_confirmed_slot: {}", slot);
         self.confirmed_slots.insert(slot, true);
 
         if self.is_ready(slot) {
@@ -2619,6 +2620,52 @@ mod tests {
         // Build expected log messages
         let mut expected_logs = Vec::new();
         for slot in [101, 102] {
+            // block 100 is not sent because we didn't get blockinfo for it and had no cursor
+            expected_logs.push(format!("printing block {} (noop mode)", slot));
+            expected_logs.push(format!("printing account_block {} (noop mode)", slot));
+        }
+
+        // this should be inserted even if we don't actually SEND the block
+        assert_eq!(
+            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_1)],
+            12345
+        );
+        assert_eq!(
+            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_2)],
+            23456
+        );
+        assert_eq!(
+            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_3)],
+            34567
+        );
+
+        // Validate captured logs
+        assert_logs_contain_ordered(expected_logs);
+    }
+
+    #[test]
+    fn test_integration_cursor_and_lib_after_missing_first_blockinfo() {
+        // Create state with noop BlockPrinter
+        let mut state =
+            new_test_state(Some(102), setup_noop_block_printer_with_logging(true, true));
+
+        state.set_account(100, PUB_KEY_1, DATA_1, OWNER_KEY_1, 1, false, 12345, true);
+        state.set_account(101, PUB_KEY_2, DATA_2, OWNER_KEY_1, 1, false, 23456, true);
+        state.set_account(102, PUB_KEY_3, DATA_3, OWNER_KEY_1, 1, false, 34567, true);
+
+        // here we DON'T send block_info for slot 100
+        state.set_confirmed_slot(100, true);
+        state.set_block_info(simple_block_info(101), true);
+        state.set_confirmed_slot(101, true);
+
+        state.set_lib(101);
+        state.set_block_info(simple_block_info(102), true);
+        state.set_confirmed_slot(102, true);
+
+        // Build expected log messages
+        let mut expected_logs = Vec::new();
+        // 100 and 101 not sent because cursor is at slot 102
+        for slot in [102] {
             // block 100 is not sent because we didn't get blockinfo for it and had no cursor
             expected_logs.push(format!("printing block {} (noop mode)", slot));
             expected_logs.push(format!("printing account_block {} (noop mode)", slot));
