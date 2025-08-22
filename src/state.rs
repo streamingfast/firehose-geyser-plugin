@@ -21,9 +21,9 @@ type ConfirmedSlotsMap = HashMap<u64, bool>;
 use crate::pb::sf::solana::r#type::v1::{Block, BlockHeight, Reward, UnixTimestamp};
 use crate::plugins::{to_block_rewards, ConfirmTransactionWithIndex};
 use log::{debug, error, info, warn};
+use solana_commitment_config::CommitmentConfig;
 use solana_rpc_client_api::config::RpcBlockConfig;
 use solana_sdk::bs58;
-use solana_sdk::commitment_config::CommitmentConfig;
 use solana_transaction_status::TransactionDetails;
 
 #[derive(Debug, Clone, PartialEq)]

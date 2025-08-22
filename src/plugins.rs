@@ -1,5 +1,5 @@
 use agave_geyser_plugin_interface::geyser_plugin_interface::{
-    ReplicaTransactionInfoV2, SlotStatus,
+    ReplicaTransactionInfoV2, ReplicaTransactionInfoV3, SlotStatus,
 };
 use {
     crate::{config::Config as PluginConfig, state::BlockInfo, state::State},
@@ -25,11 +25,12 @@ use solana_rpc_client::rpc_client::RpcClient;
 
 use crate::block_printer::BlockPrinter;
 
-use solana_sdk::bs58;
 use solana_sdk::hash::Hash;
 use solana_sdk::message::v0::LoadedAddresses;
 use solana_sdk::message::AccountKeys;
-use solana_sdk::transaction_context::TransactionReturnData;
+use solana_sdk::{bs58, pubkey::Pubkey};
+use solana_transaction::versioned::VersionedTransaction;
+use solana_transaction_context::TransactionReturnData;
 use std::fmt;
 use std::fs::OpenOptions;
 use std::str::FromStr;
@@ -417,16 +418,23 @@ impl GeyserPlugin for Plugin {
             return Ok(());
         }
 
-        let transaction = match transaction {
+        let index;
+        let compiled_transaction = match transaction {
             ReplicaTransactionInfoVersions::V0_0_1(_info) => {
                 unreachable!("ReplicaAccountInfoVersions::V0_0_1 is not supported")
             }
-            ReplicaTransactionInfoVersions::V0_0_2(info) => info,
+            ReplicaTransactionInfoVersions::V0_0_2(info) => {
+                index = info.index;
+                v2_to_confirm_transaction(&info)
+            }
+            ReplicaTransactionInfoVersions::V0_0_3(info) => {
+                index = info.index;
+                v3_to_confirm_transaction(info)
+            }
         };
 
-        let compiled_transaction = to_confirm_transaction(&transaction);
         let tx = ConfirmTransactionWithIndex {
-            index: transaction.index,
+            index,
             transaction: compiled_transaction,
         };
 
@@ -574,9 +582,20 @@ pub unsafe extern "C" fn _create_plugin() -> *mut dyn GeyserPlugin {
 }
 
 // Below are just transformation functions to help with decoding different versions of the data sent to the plugin
-fn to_confirm_transaction(tx: &'_ ReplicaTransactionInfoV2<'_>) -> ConfirmedTransaction {
+
+fn v2_to_confirm_transaction(tx: &'_ ReplicaTransactionInfoV2<'_>) -> ConfirmedTransaction {
     ConfirmedTransaction {
         transaction: Some(to_transaction(
+            tx.transaction,
+            &tx.transaction_status_meta.loaded_addresses,
+        )),
+        meta: Some(to_transaction_meta_status(tx.transaction_status_meta)),
+    }
+}
+
+fn v3_to_confirm_transaction(tx: &'_ ReplicaTransactionInfoV3<'_>) -> ConfirmedTransaction {
+    ConfirmedTransaction {
+        transaction: Some(versioned_to_transaction(
             tx.transaction,
             &tx.transaction_status_meta.loaded_addresses,
         )),
@@ -732,6 +751,85 @@ fn to_transaction(
     }
 }
 
+fn versioned_to_transaction(
+    tx: &VersionedTransaction,
+    loaded_addresses: &LoadedAddresses,
+) -> Transaction {
+    Transaction {
+        signatures: versioned_to_signature(tx.signatures.clone()), // FIXME clone
+        message: Some(versioned_to_message(&tx.message, loaded_addresses)),
+    }
+}
+
+fn versioned_to_signature(signatures: Vec<solana_sdk::signature::Signature>) -> Vec<Vec<u8>> {
+    signatures
+        .iter()
+        .map(|signature| signature.as_ref().to_vec())
+        .collect()
+}
+
+fn to_signature(signatures: &[solana_sdk::signature::Signature]) -> Vec<Vec<u8>> {
+    signatures
+        .iter()
+        .map(|signature| signature.as_ref().to_vec())
+        .collect()
+}
+
+fn versioned_to_message(
+    msg: &solana_message::VersionedMessage,
+    loaded_addresses: &LoadedAddresses,
+) -> Message {
+    match msg {
+        solana_message::VersionedMessage::Legacy(legacy_msg) => {
+            return Message {
+                header: Some(to_header(&legacy_msg.header)),
+                account_keys: legacy_msg
+                    .account_keys
+                    .iter()
+                    .map(|key| key.to_bytes().to_vec())
+                    .collect(),
+                recent_blockhash: to_recent_block_hash(&legacy_msg.recent_blockhash),
+                instructions: to_compiled_instructions(&legacy_msg.instructions),
+                versioned: false,
+                address_table_lookups: vec![],
+            }
+        }
+        solana_message::VersionedMessage::V0(v0_msg) => {
+            return Message {
+                header: Some(to_header(msg.header())),
+                account_keys: versioned_to_account_keys(
+                    v0_msg.account_keys.clone(), // FIXME clone
+                    loaded_addresses,
+                ),
+                recent_blockhash: to_recent_block_hash(msg.recent_blockhash()),
+                instructions: to_compiled_instructions(msg.instructions()),
+                versioned: true,
+                address_table_lookups: versioned_to_address_table_lookups(
+                    v0_msg.address_table_lookups.clone(), // FIXME clone
+                ),
+            };
+        }
+    }
+}
+
+fn versioned_to_account_keys(
+    keys: Vec<Pubkey>,
+    loaded_addresses: &LoadedAddresses,
+) -> Vec<Vec<u8>> {
+    // Create a HashSet of all loaded addresses (address lookup table)
+    let lookup_keys: std::collections::HashSet<_> = loaded_addresses
+        .writable
+        .iter()
+        .chain(loaded_addresses.readonly.iter())
+        .collect();
+
+    // Filter and convert account keys
+    keys.iter()
+        .filter(|key| !lookup_keys.contains(key))
+        .map(|key| key.to_bytes().to_vec())
+        .collect()
+}
+
 fn to_message(
     msg: &solana_sdk::message::SanitizedMessage,
     loaded_addresses: &LoadedAddresses,
@@ -759,8 +857,21 @@ fn to_address_table_lookups(
         .collect()
 }
 
+fn versioned_to_address_table_lookups(
+    addresses: Vec<solana_sdk::message::v0::MessageAddressTableLookup>,
+) -> Vec<MessageAddressTableLookup> {
+    addresses
+        .iter()
+        .map(|lookup| MessageAddressTableLookup {
+            account_key: lookup.account_key.to_bytes().to_vec(),
+            writable_indexes: lookup.writable_indexes.clone(),
+            readonly_indexes: lookup.readonly_indexes.clone(),
+        })
+        .collect()
+}
+
 fn to_compiled_instructions(
-    instructions: &[solana_sdk::instruction::CompiledInstruction],
+    instructions: &[solana_message::compiled_instruction::CompiledInstruction],
 ) -> Vec<CompiledInstruction> {
     instructions
         .iter()
@@ -796,11 +907,4 @@ fn to_header(h: &solana_sdk::message::MessageHeader) -> MessageHeader {
         num_readonly_signed_accounts: h.num_readonly_signed_accounts as u32,
         num_readonly_unsigned_accounts: h.num_readonly_unsigned_accounts as u32,
     }
-}
-
-fn to_signature(signatures: &[solana_sdk::signature::Signature]) -> Vec<Vec<u8>> {
-    signatures
-        .iter()
-        .map(|signature| signature.as_ref().to_vec())
-        .collect()
 }
