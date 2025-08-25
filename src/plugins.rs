@@ -756,16 +756,9 @@ fn versioned_to_transaction(
     loaded_addresses: &LoadedAddresses,
 ) -> Transaction {
     Transaction {
-        signatures: versioned_to_signature(&tx.signatures),
+        signatures: to_signature(&tx.signatures),
         message: Some(versioned_to_message(&tx.message, loaded_addresses)),
     }
-}
-
-fn versioned_to_signature(signatures: &[solana_sdk::signature::Signature]) -> Vec<Vec<u8>> {
-    signatures
-        .iter()
-        .map(|signature| signature.as_ref().to_vec())
-        .collect()
 }
 
 fn to_signature(signatures: &[solana_sdk::signature::Signature]) -> Vec<Vec<u8>> {
@@ -801,9 +794,7 @@ fn versioned_to_message(
                 recent_blockhash: to_recent_block_hash(msg.recent_blockhash()),
                 instructions: to_compiled_instructions(msg.instructions()),
                 versioned: true,
-                address_table_lookups: versioned_to_address_table_lookups(
-                    &v0_msg.address_table_lookups,
-                ),
+                address_table_lookups: to_address_table_lookups(&v0_msg.address_table_lookups),
             };
         }
     }
@@ -839,19 +830,6 @@ fn to_message(
 }
 
 fn to_address_table_lookups(
-    addresses: &[solana_sdk::message::v0::MessageAddressTableLookup],
-) -> Vec<MessageAddressTableLookup> {
-    addresses
-        .iter()
-        .map(|lookup| MessageAddressTableLookup {
-            account_key: lookup.account_key.to_bytes().to_vec(),
-            writable_indexes: lookup.writable_indexes.clone(),
-            readonly_indexes: lookup.readonly_indexes.clone(),
-        })
-        .collect()
-}
-
-fn versioned_to_address_table_lookups(
     addresses: &[solana_sdk::message::v0::MessageAddressTableLookup],
 ) -> Vec<MessageAddressTableLookup> {
     addresses
