@@ -756,12 +756,12 @@ fn versioned_to_transaction(
     loaded_addresses: &LoadedAddresses,
 ) -> Transaction {
     Transaction {
-        signatures: versioned_to_signature(tx.signatures.clone()), // FIXME clone
+        signatures: versioned_to_signature(&tx.signatures),
         message: Some(versioned_to_message(&tx.message, loaded_addresses)),
     }
 }
 
-fn versioned_to_signature(signatures: Vec<solana_sdk::signature::Signature>) -> Vec<Vec<u8>> {
+fn versioned_to_signature(signatures: &[solana_sdk::signature::Signature]) -> Vec<Vec<u8>> {
     signatures
         .iter()
         .map(|signature| signature.as_ref().to_vec())
@@ -797,25 +797,19 @@ fn versioned_to_message(
         solana_message::VersionedMessage::V0(v0_msg) => {
             return Message {
                 header: Some(to_header(msg.header())),
-                account_keys: versioned_to_account_keys(
-                    v0_msg.account_keys.clone(), // FIXME clone
-                    loaded_addresses,
-                ),
+                account_keys: versioned_to_account_keys(&v0_msg.account_keys, loaded_addresses),
                 recent_blockhash: to_recent_block_hash(msg.recent_blockhash()),
                 instructions: to_compiled_instructions(msg.instructions()),
                 versioned: true,
                 address_table_lookups: versioned_to_address_table_lookups(
-                    v0_msg.address_table_lookups.clone(), // FIXME clone
+                    &v0_msg.address_table_lookups,
                 ),
             };
         }
     }
 }
 
-fn versioned_to_account_keys(
-    keys: Vec<Pubkey>,
-    loaded_addresses: &LoadedAddresses,
-) -> Vec<Vec<u8>> {
+fn versioned_to_account_keys(keys: &[Pubkey], loaded_addresses: &LoadedAddresses) -> Vec<Vec<u8>> {
     // Create a HashSet of all loaded addresses (address lookup table)
     let lookup_keys: std::collections::HashSet<_> = loaded_addresses
         .writable
@@ -858,7 +852,7 @@ fn to_address_table_lookups(
 }
 
 fn versioned_to_address_table_lookups(
-    addresses: Vec<solana_sdk::message::v0::MessageAddressTableLookup>,
+    addresses: &[solana_sdk::message::v0::MessageAddressTableLookup],
 ) -> Vec<MessageAddressTableLookup> {
     addresses
         .iter()
