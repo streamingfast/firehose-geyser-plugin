@@ -372,10 +372,16 @@ impl GeyserPlugin for Plugin {
                     .expect("cannot get RW lock for set_lib (poisoned)")
                     .set_lib(slot);
             }
-            SlotStatus::Completed => {}
-            SlotStatus::FirstShredReceived => {}
+            SlotStatus::FirstShredReceived => {
+                debug!("slot first shred received {}", slot);
+            }
+            SlotStatus::Completed => {
+                debug!("slot last shred received {}", slot);
+            }
             SlotStatus::Dead(_) => {}
-            SlotStatus::CreatedBank => {}
+            SlotStatus::CreatedBank => {
+                debug!("slot created bank {}", slot);
+            }
             SlotStatus::Confirmed => match self.send_processed {
                 true => {
                     debug!(
