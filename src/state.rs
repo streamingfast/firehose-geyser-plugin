@@ -681,7 +681,10 @@ impl State {
             };
 
             if let Some(last_sent_block) = self.last_sent_block {
-                if last_sent_block < block_info.parent_slot {
+                if last_sent_block < block_info.parent_slot
+                    && !self.dead_slots.contains_key(&last_sent_block)
+                // skip this check when last_sent_block is dead
+                {
                     warn!(
                             "last sent block {} is not the parent of slot {}. Expecting {}. (This is a very rare case that would create a hole). Manually adding missing slots to 'confirmed_slots', they will be sent on next loop",
                             last_sent_block,
