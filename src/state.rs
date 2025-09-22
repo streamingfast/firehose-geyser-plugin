@@ -18,6 +18,7 @@ type ProcessedSlot = HashMap<u64, bool>;
 
 type BlockInfoMap = HashMap<u64, BlockInfo>;
 type ConfirmedSlotsMap = HashMap<u64, bool>;
+type DeadSlotsMap = HashMap<u64, bool>;
 use crate::pb::sf::solana::r#type::v1::{Block, BlockHeight, Reward, UnixTimestamp};
 use crate::plugins::{to_block_rewards, ConfirmTransactionWithIndex};
 use log::{debug, error, info, warn};
@@ -97,6 +98,7 @@ pub struct State {
 
     block_infos: BlockInfoMap,
     confirmed_slots: ConfirmedSlotsMap,
+    dead_slots: DeadSlotsMap,
 
     with_block: bool,
     //with_account: bool,
@@ -135,6 +137,7 @@ impl State {
 
             transactions: HashMap::new(),
             processed_slots: HashMap::new(),
+            dead_slots: HashMap::new(),
 
             local_rpc_client: Some(local_rpc_client),
             remote_rpc_client: Some(remote_rpc_client),
@@ -301,6 +304,11 @@ impl State {
                 panic!("poisoned mutex")
             }
         }
+    }
+
+    pub fn set_dead_slot(&mut self, slot: u64, trace: bool) {
+        debug!("set_dead_slot: {}", slot);
+        self.dead_slots.insert(slot, true);
     }
 
     pub fn has_block_info(&self, slot: u64) -> bool {
@@ -575,6 +583,18 @@ impl State {
                 }
             }
         }
+
+        let slots = self.dead_slots.keys().cloned().collect::<Vec<u64>>();
+        for slot in slots {
+            if slot <= upto {
+                debug!("purging dead slot {}", slot);
+                self.dead_slots.remove(&slot);
+                if upto > 100 {
+                    let dead_slot_remove = upto - 100;
+                    self.dead_slots.remove(&dead_slot_remove);
+                }
+            }
+        }
     }
 
     fn apply_changes_upto(&mut self, trace: bool, slot: u64) {
@@ -644,6 +664,9 @@ impl State {
         }
 
         for slot in self.ordered_confirmed_slots_upto(slot) {
+            if self.dead_slots.contains_key(&slot) {
+                continue; // skip for now, will be deleted with purge
+            }
             let must_send = slot >= first_block_to_process;
 
             let block_info = match self.block_infos.get(&slot) {

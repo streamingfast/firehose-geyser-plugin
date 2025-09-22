@@ -378,7 +378,15 @@ impl GeyserPlugin for Plugin {
             SlotStatus::Completed => {
                 debug!("slot last shred received {}", slot);
             }
-            SlotStatus::Dead(_) => {}
+            SlotStatus::Dead(_) => {
+                let mut lock_state = self
+                    .state
+                    .as_ref()
+                    .expect("cannot get RW lock for update_slot_status (state is None)")
+                    .write()
+                    .expect("cannot get RW lock for update_slot_status (poisoned)");
+                lock_state.set_dead_slot(slot, self.trace);
+            }
             SlotStatus::CreatedBank => {
                 debug!("slot created bank {}", slot);
             }
