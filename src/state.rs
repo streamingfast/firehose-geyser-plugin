@@ -306,7 +306,7 @@ impl State {
         }
     }
 
-    pub fn set_dead_slot(&mut self, slot: u64, trace: bool) {
+    pub fn set_dead_slot(&mut self, slot: u64, _trace: bool) {
         debug!("set_dead_slot: {}", slot);
         self.dead_slots.insert(slot, true);
     }
@@ -2723,6 +2723,330 @@ mod tests {
 
         // Validate captured logs
         assert_logs_contain_ordered(expected_logs);
+    }
+
+    // Tests for process_upto focusing on dead_slots behavior
+
+    #[test]
+    fn test_process_upto_skips_dead_slots() {
+        let mut state = new_test_state(None, setup_noop_block_printer_with_logging(true, true));
+
+        // Setup initial state
+        state.set_lib(50);
+        state.first_block_to_process = Some(100);
+        state.first_received_blockmeta = Some(100);
+
+        // Add some block infos
+        state.block_infos.insert(100, simple_block_info(100));
+        state.block_infos.insert(101, simple_block_info(101));
+        state.block_infos.insert(102, simple_block_info(102));
+
+        // Confirm these slots
+        state.confirmed_slots.insert(100, true);
+        state.confirmed_slots.insert(101, true);
+        state.confirmed_slots.insert(102, true);
+
+        // Mark slot 101 as dead
+        state.dead_slots.insert(101, true);
+
+        // Process up to slot 102
+        let result = state.process_upto(false, 102);
+        assert!(result.is_ok());
+
+        // Only slots that are not dead should be processed
+        // However, slot 102 won't be processed because there's a gap after slot 100
+        // (slot 101 is dead but still creates a gap in the parent chain)
+        assert!(state.processed_slots.contains_key(&100));
+        assert!(!state.processed_slots.contains_key(&101)); // Dead slot not processed
+
+        // Verify that dead slots are skipped in the logs
+        testing_logger::validate(|captured_logs| {
+            let log_bodies: Vec<String> =
+                captured_logs.iter().map(|log| log.body.clone()).collect();
+
+            // Should have logs for slot 100 but not 101 (dead) or 102 (gap after dead slot)
+            let has_100 = log_bodies
+                .iter()
+                .any(|log| log.contains("printing block 100"));
+            let has_101 = log_bodies
+                .iter()
+                .any(|log| log.contains("printing block 101"));
+
+            assert!(has_100, "Should have processed slot 100");
+            assert!(!has_101, "Should NOT have processed dead slot 101");
+        });
+    }
+
+    #[test]
+    fn test_process_upto_multiple_dead_slots() {
+        let mut state = new_test_state(None, setup_noop_block_printer_with_logging(true, true));
+
+        // Setup initial state
+        state.set_lib(50);
+        state.first_block_to_process = Some(100);
+        state.first_received_blockmeta = Some(100);
+
+        // Add block infos for slots 100-105
+        for slot in 100..=105 {
+            state.block_infos.insert(slot, simple_block_info(slot));
+            state.confirmed_slots.insert(slot, true);
+        }
+
+        // Mark slot 102 as dead (creates a gap after 101)
+        state.dead_slots.insert(102, true);
+
+        // Process up to slot 105
+        let result = state.process_upto(false, 105);
+        assert!(result.is_ok());
+
+        // Due to parent chain checking, after processing 100 and 101,
+        // when we skip dead slot 102, slot 103's parent (102) creates a gap
+        assert!(state.processed_slots.contains_key(&100));
+        assert!(state.processed_slots.contains_key(&101));
+        assert!(!state.processed_slots.contains_key(&102)); // Dead
+
+        // Verify only the expected slots were processed in logs
+        testing_logger::validate(|captured_logs| {
+            let log_bodies: Vec<String> =
+                captured_logs.iter().map(|log| log.body.clone()).collect();
+
+            // Check that non-dead slots before the gap were processed
+            let has_100 = log_bodies
+                .iter()
+                .any(|log| log.contains("printing block 100"));
+            let has_101 = log_bodies
+                .iter()
+                .any(|log| log.contains("printing block 101"));
+
+            // Check that dead slot was NOT processed
+            let has_102 = log_bodies
+                .iter()
+                .any(|log| log.contains("printing block 102"));
+
+            assert!(has_100, "Should have processed slot 100");
+            assert!(has_101, "Should have processed slot 101");
+            assert!(!has_102, "Should NOT have processed dead slot 102");
+        });
+    }
+
+    #[test]
+    fn test_process_upto_dead_slot_parent_check_behavior() {
+        let mut state = new_test_state(None, setup_noop_block_printer_with_logging(true, true));
+
+        // Setup initial state
+        state.set_lib(50);
+        state.first_block_to_process = Some(100);
+        state.first_received_blockmeta = Some(100);
+
+        // Create a chain where slot 101 has parent 100, and slot 102 has parent 101
+        let mut block_100 = simple_block_info(100);
+        block_100.parent_slot = 99;
+        let mut block_101 = simple_block_info(101);
+        block_101.parent_slot = 100;
+        let mut block_102 = simple_block_info(102);
+        block_102.parent_slot = 101;
+
+        state.block_infos.insert(100, block_100);
+        state.block_infos.insert(101, block_101);
+        state.block_infos.insert(102, block_102);
+
+        state.confirmed_slots.insert(100, true);
+        // there is no 101
+        state.confirmed_slots.insert(102, true);
+
+        // Set last_sent_block to 100 to test the parent check logic
+        state.last_sent_block = Some(100);
+
+        // Process up to slot 102
+        let result = state.process_upto(false, 102);
+        assert!(result.is_ok());
+
+        // Slot 102 should not be processed because of parent check
+        assert!(!state.processed_slots.contains_key(&102));
+
+        // Mark slot 100 as dead
+        state.dead_slots.insert(100, true);
+
+        // Process up to slot 102 again, now it gets processed because the 'parent' is dead
+        let result = state.process_upto(false, 102);
+        assert!(result.is_ok());
+        assert!(state.processed_slots.contains_key(&102));
+    }
+
+    #[test]
+    fn test_process_upto_dead_slot_parent_check_behavior_second_way() {
+        let mut state = new_test_state(None, setup_noop_block_printer_with_logging(true, true));
+
+        // Setup initial state
+        state.set_lib(50);
+        state.first_block_to_process = Some(100);
+        state.first_received_blockmeta = Some(100);
+
+        // Create a chain where slot 101 has parent 100, and slot 102 has parent 101
+        let mut block_100 = simple_block_info(100);
+        block_100.parent_slot = 99;
+        let mut block_101 = simple_block_info(101);
+        block_101.parent_slot = 100;
+        let mut block_102 = simple_block_info(102);
+        block_102.parent_slot = 101;
+        let mut block_103 = simple_block_info(103);
+        block_103.parent_slot = 102;
+
+        state.block_infos.insert(100, block_100);
+        state.block_infos.insert(101, block_101);
+        state.block_infos.insert(102, block_102);
+        state.block_infos.insert(103, block_103);
+
+        state.confirmed_slots.insert(100, true);
+        state.confirmed_slots.insert(102, true); // confirmed but also dead
+        state.confirmed_slots.insert(103, true);
+
+        // Set last_sent_block to 100 to test the parent check logic
+        state.last_sent_block = Some(100);
+
+        // Mark slot 100, 101, 102 as dead
+        state.dead_slots.insert(100, true);
+        state.dead_slots.insert(101, true);
+        state.dead_slots.insert(102, true);
+
+        // Process up to slot 103, it gets processed because all 'parents' are dead
+        let result = state.process_upto(false, 103);
+        assert!(result.is_ok());
+        assert!(!state.processed_slots.contains_key(&101)); // skipped dead
+        assert!(!state.processed_slots.contains_key(&102)); // skipped dead
+        assert!(state.processed_slots.contains_key(&103));
+    }
+
+    #[test]
+    fn test_process_upto_no_first_block_to_process_returns_early() {
+        let mut state = new_test_state(None, setup_noop_block_printer_with_logging(false, false));
+
+        // Don't set first_block_to_process
+        state.first_block_to_process = None;
+        state.first_received_blockmeta = Some(100);
+        state.set_lib(50);
+
+        // Add some data
+        state.block_infos.insert(100, simple_block_info(100));
+        state.confirmed_slots.insert(100, true);
+
+        let result = state.process_upto(false, 100);
+        assert!(result.is_ok());
+
+        // No slots should be processed since first_block_to_process is None
+        assert!(state.processed_slots.is_empty());
+    }
+
+    #[test]
+    fn test_process_upto_no_first_received_blockmeta_returns_early() {
+        let mut state = new_test_state(None, setup_noop_block_printer_with_logging(false, false));
+
+        // Set first_block_to_process but not first_received_blockmeta
+        state.first_block_to_process = Some(100);
+        state.first_received_blockmeta = None;
+        state.set_lib(50);
+
+        // Add some data
+        state.block_infos.insert(100, simple_block_info(100));
+        state.confirmed_slots.insert(100, true);
+
+        let result = state.process_upto(false, 100);
+        assert!(result.is_ok());
+
+        // No slots should be processed since first_received_blockmeta is None
+        assert!(state.processed_slots.is_empty());
+    }
+
+    #[test]
+    fn test_process_upto_no_lib_returns_early() {
+        let mut state = new_test_state(None, setup_noop_block_printer_with_logging(false, false));
+
+        // Set required fields but not lib
+        state.first_block_to_process = Some(100);
+        state.first_received_blockmeta = Some(100);
+        // Don't set lib
+
+        // Add some data
+        state.block_infos.insert(100, simple_block_info(100));
+        state.confirmed_slots.insert(100, true);
+
+        let result = state.process_upto(false, 100);
+        assert!(result.is_ok());
+
+        // No slots should be processed since lib is None
+        assert!(state.processed_slots.is_empty());
+    }
+
+    #[test]
+    fn test_process_upto_dead_slots_get_purged() {
+        let mut state = new_test_state(None, setup_noop_block_printer_with_logging(true, true));
+
+        // Setup initial state
+        state.set_lib(50);
+        state.first_block_to_process = Some(100);
+        state.first_received_blockmeta = Some(100);
+
+        // Add block infos
+        state.block_infos.insert(100, simple_block_info(100));
+        state.block_infos.insert(101, simple_block_info(101));
+
+        // Confirm these slots
+        state.confirmed_slots.insert(100, true);
+        state.confirmed_slots.insert(101, true);
+
+        // Mark slot 100 as dead
+        state.dead_slots.insert(100, true);
+
+        // Process up to slot 101 (which should trigger purging of slot 100)
+        let result = state.process_upto(false, 101);
+        assert!(result.is_ok());
+
+        // After processing, slot 100 should be purged from dead_slots since it's <= the processed slot
+        assert!(!state.dead_slots.contains_key(&100));
+
+        // Slot 101 should be processed normally
+        assert!(state.processed_slots.contains_key(&101));
+    }
+
+    #[test]
+    fn test_process_upto_below_first_block_to_process_cache_only() {
+        let mut state = new_test_state(None, setup_noop_block_printer_with_logging(false, false));
+
+        // Setup initial state with first_block_to_process higher than the slot we'll process
+        state.set_lib(50);
+        state.first_block_to_process = Some(200);
+        state.first_received_blockmeta = Some(100);
+
+        // Add account changes
+        let account = create_test_account(
+            PUB_KEY_1.to_vec(),
+            OWNER_KEY_1.to_vec(),
+            DATA_1.to_vec(),
+            false,
+        );
+        let account_with_version = create_test_account_with_version(account, 1, 12345);
+        let key = create_composite_key(OWNER_KEY_1, PUB_KEY_1);
+
+        let mut slot_changes = HashMap::new();
+        slot_changes.insert(key, account_with_version);
+        state.block_account_changes.insert(100, slot_changes);
+
+        // Add block info and confirm slot
+        state.block_infos.insert(100, simple_block_info(100));
+        state.confirmed_slots.insert(100, true);
+
+        let result = state.process_upto(false, 100);
+        assert!(result.is_ok());
+
+        // Slot should be processed (added to processed_slots) but not printed
+        assert!(state.processed_slots.contains_key(&100));
+
+        // Account changes should still be applied to cache even though block wasn't sent
+        let owner_account_key = create_composite_key(OWNER_KEY_1, PUB_KEY_1);
+        assert_eq!(
+            state.account_data_hash.get(&owner_account_key).unwrap(),
+            &12345
+        );
     }
 }
 
