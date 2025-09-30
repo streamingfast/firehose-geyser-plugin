@@ -1,6 +1,6 @@
 [package]
 name = "firehose-geyser-plugin"
-version = "0.2.0"
+version = "2.3.11"
 edition = "2021"
 
 [lib]
@@ -9,7 +9,6 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 hashbrown = "0.15"
 ahash = "0.8"
-agave-geyser-plugin-interface = "=2.3.9"
 lazy_static = "1.5.0"
 anyhow = "1.0.62"
 config = "0.14.1"
@@ -26,9 +25,6 @@ vergen = "9.0.0"
 prost = "0.11.9"
 solana-program = "2.3.0"
 rbase64 = "2.0.3"
-solana-rpc-client = "=2.3.9"
-solana-rpc-client-api = "=2.3.9"
-solana-transaction-status = "=2.3.9"
 serde_json = "1.0.132"
 serde = { version = "1.0.215", features = ["derive"] }
 solana-sdk = "2.3.1"
@@ -36,6 +32,12 @@ sleep = "1.0.2"
 env_logger = "0.9.3"
 gxhash = "3.4.1"
 hex = "0.4.3"
+
+# Needs to be bumped in sync
+agave-geyser-plugin-interface = "=2.3.11"
+solana-rpc-client = "=2.3.11"
+solana-rpc-client-api = "=2.3.11"
+solana-transaction-status = "=2.3.11"
 
 [dev-dependencies]
 tempfile = "3.10.1"
