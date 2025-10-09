@@ -22,6 +22,20 @@ pub struct Config {
     pub log: ConfigLog,
     pub account_block_destination_file: String,
     pub block_destination_file: String,
+
+    pub dev: DevelopmentConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct DevelopmentConfig {
+    /// Wheter to force sending transactions even if we they we haven't yet
+    /// determine the slot at which we assume we are ready to process data.
+    ///
+    /// This can be used against a local test validator where we know that
+    /// we start from genesis and as such can't have miss any slots.
+    #[serde(default)]
+    pub force_send: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

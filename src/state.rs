@@ -1,4 +1,5 @@
 use crate::block_printer::BlockPrinter;
+use crate::config::DevelopmentConfig;
 use crate::pb;
 use crate::utils::{convert_sol_timestamp, create_account_block};
 use hashbrown::HashMap;
@@ -107,6 +108,8 @@ pub struct State {
     remote_rpc_client: Option<RpcClient>,
     cursor_path: String,
     block_printer: BlockPrinter,
+
+    dev_config: DevelopmentConfig,
 }
 
 impl State {
@@ -117,11 +120,12 @@ impl State {
         cursor_path: String,
         block_printer: BlockPrinter,
         with_block: bool,
+        dev_config: DevelopmentConfig,
     ) -> Self {
         State {
             cursor,
-            first_block_to_process: None,
-            first_received_blockmeta: None,
+            first_block_to_process: if dev_config.force_send { Some(0) } else { None },
+            first_received_blockmeta: if dev_config.force_send { Some(0) } else { None },
             lib: None,
             initialized: false,
 
@@ -141,6 +145,7 @@ impl State {
             cursor_path,
             block_printer,
             with_block,
+            dev_config,
         }
     }
 
@@ -644,7 +649,7 @@ impl State {
         }
 
         for slot in self.ordered_confirmed_slots_upto(slot) {
-            let must_send = slot >= first_block_to_process;
+            let must_send = slot >= first_block_to_process || self.dev_config.force_send;
 
             let block_info = match self.block_infos.get(&slot) {
                 None => {

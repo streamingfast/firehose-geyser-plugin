@@ -153,9 +153,7 @@ impl GeyserPlugin for Plugin {
     }
 
     fn on_load(&mut self, config_file: &str, _is_reload: bool) -> PluginResult<()> {
-        info!("on load called with config_file: {}", config_file);
         let plugin_config = PluginConfig::load_from_file(config_file)?;
-
         let filter_level =
             LevelFilter::from_str(plugin_config.log.level.as_str()).unwrap_or(LevelFilter::Info);
 
@@ -169,7 +167,7 @@ impl GeyserPlugin for Plugin {
             .target(Target::Stdout)
             .init();
 
-        debug!("on load");
+        debug!("on load with config: {:?}", plugin_config);
 
         let local_rpc_client = RpcClient::new(plugin_config.local_rpc_client.endpoint);
         let remote_rpc_client = RpcClient::new(plugin_config.remote_rpc_client.endpoint);
@@ -243,6 +241,7 @@ impl GeyserPlugin for Plugin {
             plugin_config.cursor_file,
             printer,
             self.with_block,
+            plugin_config.dev,
         )));
 
         info!("cursor: {:?}", cursor);
