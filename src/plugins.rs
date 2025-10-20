@@ -44,11 +44,11 @@ pub struct ConfirmTransactionWithIndex {
 }
 
 pub struct Plugin {
-    state: Option<RwLock<State>>,
-    send_processed: bool,
-    trace: bool,
-    with_block: bool,
-    with_account: bool,
+    pub(crate) state: Option<RwLock<State>>,
+    pub(crate) send_processed: bool,
+    pub(crate) trace: bool,
+    pub(crate) with_block: bool,
+    pub(crate) with_account: bool,
 }
 
 impl fmt::Debug for Plugin {
@@ -77,11 +77,39 @@ impl Plugin {
             with_block: true, // in case transaction_notifications_enabled gets called before on_load
         }
     }
+
+    pub fn is_trace(&self) -> bool {
+        self.trace
+    }
+
+    pub fn is_with_account(&self) -> bool {
+        self.with_account
+    }
+
+    pub fn is_with_block(&self) -> bool {
+        self.with_block
+    }
+
     const VOTE111111111111111111111111111111111111111: [u8; 32] = [
         0x07, 0x61, 0x48, 0x1d, 0x35, 0x74, 0x74, 0xbb, 0x7c, 0x4d, 0x76, 0x24, 0xeb, 0xd3, 0xbd,
         0xb3, 0xd8, 0x35, 0x5e, 0x73, 0xd1, 0x10, 0x43, 0xfc, 0x0d, 0xa3, 0x53, 0x80, 0x00, 0x00,
         0x00, 0x00,
     ];
+
+    pub fn is_send_processed(&self) -> bool {
+        self.send_processed
+    }
+
+    /// Returns a copy of the State object at time of calling, refer
+    /// to [State::internal_copy] for details on what is copied.
+    pub fn state_copy(&self) -> State {
+        self.state
+            .as_ref()
+            .expect("cannot get development config (state is None)")
+            .read()
+            .expect("cannot get development config (poisoned)")
+            .internal_copy()
+    }
 
     // set_account:
     // * skips vote accounts
@@ -161,11 +189,19 @@ impl GeyserPlugin for Plugin {
             self.trace = true;
         }
 
-        env_logger::Builder::new()
+        // This if called multiple times panic the process, but to read the level from the config,
+        // it needs to be here so we cannot also call it from where the plugin is created from the validator
+        // side.
+        //
+        // So we ignore the error if the logger is already initialized.
+        let init_result = env_logger::Builder::new()
             .filter_level(filter_level)
             .format_timestamp_nanos()
             .target(Target::Stdout)
-            .init();
+            .try_init();
+        if init_result.is_err() {
+            info!("logger already initialized, skipping");
+        }
 
         debug!("on load with config: {:?}", plugin_config);
 

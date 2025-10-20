@@ -46,6 +46,7 @@ impl AccountFixed {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
 pub struct AccountWithWriteVersion {
     pub account: AccountFixed,
     pub write_version: u64,
@@ -80,36 +81,36 @@ const DEFAULT_RPC_BLOCK_CONFIG: RpcBlockConfig = RpcBlockConfig {
 };
 
 pub struct State {
-    initialized: bool, // passed the first received blockmeta
+    pub initialized: bool, // passed the first received blockmeta
 
-    first_received_blockmeta: Option<u64>,
-    first_block_to_process: Option<u64>,
+    pub first_received_blockmeta: Option<u64>,
+    pub first_block_to_process: Option<u64>,
 
-    last_sent_block: Option<u64>,
+    pub last_sent_block: Option<u64>,
 
-    cursor: Option<u64>,
-    lib: Option<u64>,
+    pub cursor: Option<u64>,
+    pub lib: Option<u64>,
 
-    block_account_changes: BlockAccountChanges,
+    pub block_account_changes: BlockAccountChanges,
 
-    account_data_hash: AccountDataHash, // only updated when we print the block
-    account_owners: AccountOwners,      // only updated when we print the block
-    startup_received_slot: StartupAccountReceivedSlot, // only used during startup phase
+    pub account_data_hash: AccountDataHash, // only updated when we print the block
+    pub account_owners: AccountOwners,      // only updated when we print the block
+    pub startup_received_slot: StartupAccountReceivedSlot, // only used during startup phase
 
-    block_infos: BlockInfoMap,
-    confirmed_slots: ConfirmedSlotsMap,
+    pub block_infos: BlockInfoMap,
+    pub confirmed_slots: ConfirmedSlotsMap,
 
-    with_block: bool,
+    pub with_block: bool,
     //with_account: bool,
-    transactions: Transactions,
-    processed_slots: ProcessedSlot,
+    pub transactions: Transactions,
+    pub processed_slots: ProcessedSlot,
+
+    pub cursor_path: String,
+    pub dev_config: DevelopmentConfig,
 
     local_rpc_client: Option<RpcClient>,
     remote_rpc_client: Option<RpcClient>,
-    cursor_path: String,
     block_printer: BlockPrinter,
-
-    dev_config: DevelopmentConfig,
 }
 
 impl State {
@@ -146,6 +147,35 @@ impl State {
             block_printer,
             with_block,
             dev_config,
+        }
+    }
+
+    /// Internal copy for testing purposes, cannot clone RpcClient nor
+    /// BlockPrinter which are set respectively to None and a new instance.
+    pub(crate) fn internal_copy(&self) -> State {
+        State {
+            initialized: self.initialized,
+            first_received_blockmeta: self.first_received_blockmeta,
+            first_block_to_process: self.first_block_to_process,
+            last_sent_block: self.last_sent_block,
+            cursor: self.cursor,
+            lib: self.lib,
+            block_account_changes: self.block_account_changes.clone(),
+            account_data_hash: self.account_data_hash.clone(),
+            account_owners: self.account_owners.clone(),
+            startup_received_slot: self.startup_received_slot.clone(),
+            block_infos: self.block_infos.clone(),
+            confirmed_slots: self.confirmed_slots.clone(),
+            with_block: self.with_block,
+            transactions: self.transactions.clone(),
+            processed_slots: self.processed_slots.clone(),
+            cursor_path: self.cursor_path.clone(),
+            dev_config: self.dev_config.clone(),
+
+            // Cannot clone those
+            local_rpc_client: None,
+            remote_rpc_client: None,
+            block_printer: BlockPrinter::new(None, None, true),
         }
     }
 
@@ -1846,6 +1876,7 @@ mod tests {
             "/tmp/test_cursor".to_string(),
             block_printer,
             false,
+            DevelopmentConfig::default(),
         )
     }
 
@@ -1865,6 +1896,7 @@ mod tests {
             "/tmp/test_cursor".to_string(),
             block_printer,
             false,
+            DevelopmentConfig::default(),
         )
     }
 
@@ -1972,6 +2004,7 @@ mod tests {
             "test_cursor_file".to_string(),
             BlockPrinter::new(None, None, false),
             true,
+            DevelopmentConfig::default(),
         );
 
         // Test case 1: No lib set yet
@@ -1990,6 +2023,7 @@ mod tests {
             "test_cursor_file".to_string(),
             BlockPrinter::new(None, None, false),
             true,
+            DevelopmentConfig::default(),
         );
 
         state_with_cursor.set_block_info(block_info.clone(), false);
@@ -2005,6 +2039,7 @@ mod tests {
             "test_cursor_file".to_string(),
             BlockPrinter::new(None, None, false),
             true,
+            DevelopmentConfig::default(),
         );
 
         state_with_cursor.set_block_info(block_info.clone(), false);
@@ -2031,6 +2066,7 @@ mod tests {
             "test_cursor.txt".to_string(),
             BlockPrinter::new(None, None, false),
             true,
+            DevelopmentConfig::default(),
         );
 
         // Setup initial state
@@ -2448,6 +2484,7 @@ mod tests {
             "test_cursor.txt".to_string(),
             BlockPrinter::new(None, None, false),
             true,
+            DevelopmentConfig::default(),
         )
     }
 

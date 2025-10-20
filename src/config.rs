@@ -23,6 +23,7 @@ pub struct Config {
     pub account_block_destination_file: String,
     pub block_destination_file: String,
 
+    #[serde(default)]
     pub dev: DevelopmentConfig,
 }
 
