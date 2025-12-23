@@ -24,11 +24,11 @@ gxhash = "3.4.1"
 hex = "0.4.3"
 
 # Needs to be bumped in sync (seems no version 3.0.9 has been published for those one yet)
-agave-geyser-plugin-interface = "=3.0.11"
-solana-rpc-client = "=3.0.11"
-solana-rpc-client-api = "=3.0.11"
-solana-transaction-status = "=3.0.11"
-solana-transaction-context = "=3.0.11"
+agave-geyser-plugin-interface = "=3.0.13"
+solana-rpc-client = "=3.0.13"
+solana-rpc-client-api = "=3.0.13"
+solana-transaction-status = "=3.0.13"
+solana-transaction-context = "=3.0.13"
 
 # Seems that those ones is not always following others ...
 solana-commitment-config = "3.0"
