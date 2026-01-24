@@ -977,7 +977,6 @@ mod tests {
             account,
             write_version,
             data_hash,
-            owner_account_key: None,
         }
     }
 
@@ -2068,103 +2067,56 @@ mod tests {
         let data_hash_3 = gxhash64(b"data.1", 76);
         let data_hash_4 = gxhash64(b"data.4", 76);
 
-        let owner_account_key_fixed = create_composite_key(OWNER_KEY_1, PUB_KEY_1);
         let pub_key_1_fixed = vec_to_fixed_32(PUB_KEY_1);
+        let owner_1_fixed = vec_to_fixed_32(OWNER_KEY_1);
 
         state.first_block_to_process = Some(10);
 
         // set startup value with slot=8 -> must be set
         state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_1, 8, 1, false);
 
-        assert_eq!(
-            state
-                .account_data_hash
-                .get(&owner_account_key_fixed)
-                .unwrap(),
-            &data_hash_1
-        );
+        let value = state.account_data_hash.get(&pub_key_1_fixed).unwrap();
+        assert_eq!(value.owner, owner_1_fixed);
+        assert_eq!(value.data_hash, data_hash_1);
 
         // set startup value with slot=7 -> unchanged
         state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_2, 7, 1, false);
-        assert_eq!(
-            state
-                .account_data_hash
-                .get(&owner_account_key_fixed)
-                .unwrap(),
-            &data_hash_1
-        );
+        let value = state.account_data_hash.get(&pub_key_1_fixed).unwrap();
+        assert_eq!(value.data_hash, data_hash_1);
 
         // set startup value with slot=8, higher write_version -> changed
         state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_2, 8, 4, false);
-        assert_eq!(
-            state
-                .account_data_hash
-                .get(&owner_account_key_fixed)
-                .unwrap(),
-            &data_hash_2
-        );
+        let value = state.account_data_hash.get(&pub_key_1_fixed).unwrap();
+        assert_eq!(value.owner, owner_1_fixed);
+        assert_eq!(value.data_hash, data_hash_2);
 
         // set startup value with slot=9, lower write_version -> changed
         state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_3, 9, 0, false);
-        assert_eq!(
-            state
-                .account_data_hash
-                .get(&owner_account_key_fixed)
-                .unwrap(),
-            &data_hash_3
-        );
+        let value = state.account_data_hash.get(&pub_key_1_fixed).unwrap();
+        assert_eq!(value.data_hash, data_hash_3);
 
-        // set startup value with slot=10, higher write_version, deleted=true -> all traces removed
-        state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_4, 10, 1, true);
-
-        // verify all traces to the account are removed from hashes
-        assert!(state
-            .account_data_hash
-            .get(&owner_account_key_fixed)
-            .is_none());
-        assert!(state.account_owners.get(&pub_key_1_fixed).is_none());
-
-        // test with different owner: set up account with OWNER_KEY_1 again
-        state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_1, 11, 0, false);
-        assert_eq!(
-            state
-                .account_data_hash
-                .get(&owner_account_key_fixed)
-                .unwrap(),
-            &data_hash_1
-        );
-        assert_eq!(
-            state.account_owners.get(&pub_key_1_fixed).unwrap(),
-            &vec_to_fixed_32(OWNER_KEY_1)
-        );
+        // set startup value with slot=10, write_version=0 -> changed (higher slot)
+        state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_4, 10, 0, false);
+        let value = state.account_data_hash.get(&pub_key_1_fixed).unwrap();
+        assert_eq!(value.data_hash, data_hash_4);
+        assert_eq!(value.owner, owner_1_fixed);
 
         // set with different owner (OWNER_KEY_11111111111111111111111111111111) and deleted=true
         let different_owner = OWNER_KEY_11111111111111111111111111111111;
         state.set_account_on_startup(PUB_KEY_1, different_owner, data_hash_4, 12, 0, true);
 
-        // Verify previous values with the other owner are also gone
-        assert!(state
-            .account_data_hash
-            .get(&owner_account_key_fixed)
-            .is_none());
-        assert!(state.account_owners.get(&pub_key_1_fixed).is_none());
+        // should be removed
+        assert!(state.account_data_hash.get(&pub_key_1_fixed).is_none());
 
         // set a value 'before' the block where it got deleted. it should remain deleted
         state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_1, 11, 0, false);
-        assert!(state
-            .account_data_hash
-            .get(&owner_account_key_fixed)
-            .is_none());
+        assert!(state.account_data_hash.get(&pub_key_1_fixed).is_none());
 
-        // set a value 'after' the block where it got deleted. it should remain deleted
+        // set a value 'after' the block where it got deleted with higher write_version. it should be set
         state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_1, 12, 1, false);
-        assert_eq!(
-            state
-                .account_data_hash
-                .get(&owner_account_key_fixed)
-                .unwrap(),
-            &data_hash_1
-        );
+        let value = state.account_data_hash.get(&pub_key_1_fixed).unwrap();
+        assert_eq!(value.owner, owner_1_fixed);
+        assert_eq!(value.data_hash, data_hash_1);
     }
 
     #[test]
@@ -2190,44 +2142,20 @@ mod tests {
         state.set_account_on_startup(PUB_KEY_1, owner1, data_hash1, slot1, 0, false);
 
         // Verify owner1+pubkey entry exists in account_data_hash
-        let owner1_account_key_fixed = create_composite_key(owner1, PUB_KEY_1);
         let pub_key_1_fixed = vec_to_fixed_32(PUB_KEY_1);
         let owner1_fixed = vec_to_fixed_32(owner1);
-        assert_eq!(
-            state
-                .account_data_hash
-                .get(&owner1_account_key_fixed)
-                .unwrap(),
-            &data_hash1
-        );
-        assert_eq!(
-            state.account_owners.get(&pub_key_1_fixed).unwrap(),
-            &owner1_fixed
-        );
+        let value = state.account_data_hash.get(&pub_key_1_fixed).unwrap();
+        assert_eq!(value.owner, owner1_fixed);
+        assert_eq!(value.data_hash, data_hash1);
 
         // Second call with owner2 and higher slot number
         state.set_account_on_startup(PUB_KEY_1, owner2, data_hash2, slot2, 0, false);
 
-        // Verify that owner1+pubkey entry is deleted from account_data_hash
-        assert!(state
-            .account_data_hash
-            .get(&owner1_account_key_fixed)
-            .is_none());
-
         // Verify that owner2+pubkey entry exists in account_data_hash
-        let owner2_account_key_fixed = create_composite_key(owner2, PUB_KEY_1);
         let owner2_fixed = vec_to_fixed_32(owner2);
-        assert_eq!(
-            state
-                .account_data_hash
-                .get(&owner2_account_key_fixed)
-                .unwrap(),
-            &data_hash2
-        );
-        assert_eq!(
-            state.account_owners.get(&pub_key_1_fixed).unwrap(),
-            &owner2_fixed
-        );
+        let value = state.account_data_hash.get(&pub_key_1_fixed).unwrap();
+        assert_eq!(value.owner, owner2_fixed);
+        assert_eq!(value.data_hash, data_hash2);
     }
 
     #[test]
@@ -2264,14 +2192,19 @@ mod tests {
         // Assert that self.block_account_entries(slot_number) is empty for the slot+1
         let slot_changes = state.block_account_changes.get(&slot).unwrap();
         assert!(!slot_changes.is_empty());
-        assert!(slot_changes.len() == 2);
+        // With the new structure, same pubkey overwrites, so only 1 entry
+        assert!(slot_changes.len() == 1);
 
-        let acc_owner_1 = create_composite_key(OWNER_KEY_1, PUB_KEY_1);
-        let acc_owner_11111 =
-            create_composite_key(OWNER_KEY_11111111111111111111111111111111, PUB_KEY_1);
+        let pub_key_1_fixed = vec_to_fixed_32(PUB_KEY_1);
+        assert!(slot_changes.contains_key(&pub_key_1_fixed));
 
-        assert!(slot_changes.contains_key(&acc_owner_1));
-        assert!(slot_changes.contains_key(&acc_owner_11111));
+        // Verify it has the last owner (11111...) with deleted=true
+        let entry = slot_changes.get(&pub_key_1_fixed).unwrap();
+        assert_eq!(
+            entry.account.owner,
+            *OWNER_KEY_11111111111111111111111111111111
+        );
+        assert_eq!(entry.account.deleted, true);
     }
 
     #[test]
@@ -2320,14 +2253,19 @@ mod tests {
         // Assert that self.block_account_entries(slot_number) is empty for the slot+1
         let slot_changes = state.block_account_changes.get(&slot).unwrap();
         assert!(!slot_changes.is_empty());
-        assert!(slot_changes.len() == 2);
+        // With the new structure, same pubkey overwrites, so only 1 entry
+        assert!(slot_changes.len() == 1);
 
-        let acc_owner_1 = create_composite_key(OWNER_KEY_1, PUB_KEY_1);
-        let acc_owner_11111 =
-            create_composite_key(OWNER_KEY_11111111111111111111111111111111, PUB_KEY_1);
+        let pub_key_1_fixed = vec_to_fixed_32(PUB_KEY_1);
+        assert!(slot_changes.contains_key(&pub_key_1_fixed));
 
-        assert!(slot_changes.contains_key(&acc_owner_1));
-        assert!(slot_changes.contains_key(&acc_owner_11111));
+        // Verify it has the last owner (11111...) with deleted=true
+        let entry = slot_changes.get(&pub_key_1_fixed).unwrap();
+        assert_eq!(
+            entry.account.owner,
+            *OWNER_KEY_11111111111111111111111111111111
+        );
+        assert_eq!(entry.account.deleted, true);
     }
 
     #[test]
@@ -2376,14 +2314,19 @@ mod tests {
         // Assert that self.block_account_entries(slot_number) is empty for the slot+1
         let slot_changes = state.block_account_changes.get(&slot).unwrap();
         assert!(!slot_changes.is_empty());
-        assert!(slot_changes.len() == 2);
+        // With the new structure, same pubkey overwrites, so only 1 entry
+        assert!(slot_changes.len() == 1);
 
-        let acc_owner_1 = create_composite_key(OWNER_KEY_1, PUB_KEY_1);
-        let acc_owner_11111 =
-            create_composite_key(OWNER_KEY_11111111111111111111111111111111, PUB_KEY_1);
+        let pub_key_1_fixed = vec_to_fixed_32(PUB_KEY_1);
+        assert!(slot_changes.contains_key(&pub_key_1_fixed));
 
-        assert!(slot_changes.contains_key(&acc_owner_1));
-        assert!(slot_changes.contains_key(&acc_owner_11111));
+        // Verify it has the last owner (OWNER_KEY_11111...) with deleted=true
+        let entry = slot_changes.get(&pub_key_1_fixed).unwrap();
+        assert_eq!(
+            entry.account.owner,
+            *OWNER_KEY_11111111111111111111111111111111
+        );
+        assert_eq!(entry.account.deleted, true);
     }
 
     fn test_state_no_rpc(cursor: Option<u64>) -> State {
@@ -2468,18 +2411,9 @@ mod tests {
             expected_logs.push(format!("printing account_block {} (noop mode)", slot));
         }
 
-        assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_1)],
-            12345
-        );
-        assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_2)],
-            23456
-        );
-        assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_3)],
-            34567
-        );
+        assert_eq!(state.account_data_hash[PUB_KEY_1].data_hash, 12345);
+        assert_eq!(state.account_data_hash[PUB_KEY_2].data_hash, 23456);
+        assert_eq!(state.account_data_hash[PUB_KEY_3].data_hash, 34567);
 
         // Validate captured logs
         assert_logs_contain_ordered(expected_logs);
@@ -2510,18 +2444,9 @@ mod tests {
             expected_logs.push(format!("printing account_block {} (noop mode)", slot));
         }
 
-        assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_1)],
-            12345
-        );
-        assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_2)],
-            23456
-        );
-        assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_3)],
-            34567
-        );
+        assert_eq!(state.account_data_hash[PUB_KEY_1].data_hash, 12345);
+        assert_eq!(state.account_data_hash[PUB_KEY_2].data_hash, 23456);
+        assert_eq!(state.account_data_hash[PUB_KEY_3].data_hash, 34567);
 
         // Validate captured logs
         assert_logs_contain_ordered(expected_logs);
@@ -2552,18 +2477,9 @@ mod tests {
             expected_logs.push(format!("printing account_block {} (noop mode)", slot));
         }
 
-        assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_1)],
-            12345
-        );
-        assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_2)],
-            23456
-        );
-        assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_3)],
-            34567
-        );
+        assert_eq!(state.account_data_hash[PUB_KEY_1].data_hash, 12345);
+        assert_eq!(state.account_data_hash[PUB_KEY_2].data_hash, 23456);
+        assert_eq!(state.account_data_hash[PUB_KEY_3].data_hash, 34567);
 
         // Validate captured logs
         assert_logs_contain_ordered(expected_logs);
@@ -2596,18 +2512,9 @@ mod tests {
         }
 
         // this should be inserted even if we don't actually SEND the block
-        assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_1)],
-            12345
-        );
-        assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_2)],
-            23456
-        );
-        assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_3)],
-            34567
-        );
+        assert_eq!(state.account_data_hash[PUB_KEY_1].data_hash, 12345);
+        assert_eq!(state.account_data_hash[PUB_KEY_2].data_hash, 23456);
+        assert_eq!(state.account_data_hash[PUB_KEY_3].data_hash, 34567);
 
         // Validate captured logs
         assert_logs_contain_ordered(expected_logs);
@@ -2642,18 +2549,9 @@ mod tests {
         }
 
         // this should be inserted even if we don't actually SEND the block
-        assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_1)],
-            12345
-        );
-        assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_2)],
-            23456
-        );
-        assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_3)],
-            34567
-        );
+        assert_eq!(state.account_data_hash[PUB_KEY_1].data_hash, 12345);
+        assert_eq!(state.account_data_hash[PUB_KEY_2].data_hash, 23456);
+        assert_eq!(state.account_data_hash[PUB_KEY_3].data_hash, 34567);
 
         // Validate captured logs
         assert_logs_contain_ordered(expected_logs);
