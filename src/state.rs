@@ -17,7 +17,7 @@ pub struct AccountDataHashValue {
 type BlockAccountChanges = HashMap<u64, AccountChanges>;
 pub type AccountChanges = HashMap<[u8; 32], AccountWithWriteVersion>; // pubkey(32) -> AccountWithWriteVersion
 pub type AccountDataHash = HashMap<[u8; 32], AccountDataHashValue>; // pubkey(32) -> AccountDataHashValue
-pub type StartupAccountReceivedSlot = HashMap<[u8; 32], (u64, u64)>; // pubkey(32)
+pub type StartupAccountReceivedSlot = HashMap<[u8; 32], u64>; // pubkey(32) -> composite value (slot << 24 + write_version)
 
 pub type Transactions = HashMap<u64, Vec<ConfirmTransactionWithIndex>>;
 type ProcessedSlot = HashMap<u64, bool>;
@@ -456,18 +456,18 @@ impl State {
             arr.assume_init()
         };
 
+        // Create composite value: slot << 24 + write_version
+        // Using left shift by 24 bits (~16M) which is > 10M max write_version
+        let composite_value = (slot << 24) | write_version;
+
         // Check if we already have this account with a newer version
-        if let Some((existing_slot, existing_write_version)) =
-            self.startup_received_slot.get(&pub_key_fixed)
-        {
-            if *existing_slot > slot
-                || (*existing_slot == slot && *existing_write_version >= write_version)
-            {
+        if let Some(&existing_composite) = self.startup_received_slot.get(&pub_key_fixed) {
+            if existing_composite >= composite_value {
                 return;
             }
         }
         self.startup_received_slot
-            .insert(pub_key_fixed, (slot, write_version));
+            .insert(pub_key_fixed, composite_value);
 
         // Extract owner as fixed array using unsafe for performance
         let owner_fixed: [u8; 32] = unsafe {
