@@ -1001,6 +1001,7 @@ dependencies = [
  "prost",
  "prost-types",
  "rbase64",
+ "rustc-hash",
  "serde",
  "serde_json",
  "solana-commitment-config",
