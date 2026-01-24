@@ -99,6 +99,7 @@ pub struct State {
 
     pub account_data_hash: AccountDataHash, // only updated when we print the block
     pub startup_received_slot: StartupAccountReceivedSlot, // only used during startup phase
+    pub set_account_on_startup_call_count: u64, // counter for logging
 
     pub block_infos: BlockInfoMap,
     pub confirmed_slots: ConfirmedSlotsMap,
@@ -136,6 +137,7 @@ impl State {
             block_account_changes: HashMap::new(),
             account_data_hash: HashMap::new(),
             startup_received_slot: HashMap::new(),
+            set_account_on_startup_call_count: 0,
             block_infos: HashMap::new(),
             confirmed_slots: HashMap::new(),
             last_sent_block: None,
@@ -165,6 +167,7 @@ impl State {
             block_account_changes: self.block_account_changes.clone(),
             account_data_hash: self.account_data_hash.clone(),
             startup_received_slot: self.startup_received_slot.clone(),
+            set_account_on_startup_call_count: self.set_account_on_startup_call_count,
             block_infos: self.block_infos.clone(),
             confirmed_slots: self.confirmed_slots.clone(),
             with_block: self.with_block,
@@ -437,6 +440,21 @@ impl State {
 
         pub_key_fixed[..32].copy_from_slice(&pub_key[..32]);
         owner_fixed[..32].copy_from_slice(&owner[..32]);
+
+        // Increment call counter and log every x calls
+        self.set_account_on_startup_call_count += 1;
+        if self.set_account_on_startup_call_count % 50000 == 0 {
+            info!(
+                "set_account_on_startup called {} times, account_owners size: {}, account_data_hash size: {}, slot: {}, write_version: {}, pub_key: {}, owner: {}",
+                self.set_account_on_startup_call_count,
+                self.startup_received_slot.len(),
+                self.account_data_hash.len(),
+                slot,
+                write_version,
+                bs58::encode(pub_key).into_string(),
+                bs58::encode(owner).into_string()
+            );
+        }
 
         if let Some((existing_slot, existing_write_version)) =
             self.startup_received_slot.get(&pub_key_fixed)
