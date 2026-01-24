@@ -518,9 +518,12 @@ impl State {
             }
         }
 
-        // Use pubkey as the key
-        let mut pub_key_fixed = [0u8; 32];
-        pub_key_fixed.copy_from_slice(pub_key);
+        // Use pubkey as the key - Extract pub_key as fixed array using unsafe for performance
+        let pub_key_fixed: [u8; 32] = unsafe {
+            let mut arr = std::mem::MaybeUninit::<[u8; 32]>::uninit();
+            std::ptr::copy_nonoverlapping(pub_key.as_ptr(), arr.as_mut_ptr() as *mut u8, 32);
+            arr.assume_init()
+        };
 
         // purge tail data on initialization
         if !self.block_account_changes.contains_key(&slot) {
@@ -555,11 +558,17 @@ impl State {
             debug!("handle_account_change@{}: account {:?} owner: {:?} delete: {:?} version: {:?} Data Size: {} Data Hash: {} Data Preview: {}", slot, bs58::encode(pub_key).into_string(), bs58::encode(owner).into_string(), deleted, write_version, data.len(), data_hash, data_as_hex);
         }
 
-        let mut address = [0u8; 32];
-        let mut owner_array = [0u8; 32];
-
-        address.copy_from_slice(pub_key);
-        owner_array.copy_from_slice(owner);
+        // Extract address and owner as fixed arrays using unsafe for performance
+        let address: [u8; 32] = unsafe {
+            let mut arr = std::mem::MaybeUninit::<[u8; 32]>::uninit();
+            std::ptr::copy_nonoverlapping(pub_key.as_ptr(), arr.as_mut_ptr() as *mut u8, 32);
+            arr.assume_init()
+        };
+        let owner_array: [u8; 32] = unsafe {
+            let mut arr = std::mem::MaybeUninit::<[u8; 32]>::uninit();
+            std::ptr::copy_nonoverlapping(owner.as_ptr(), arr.as_mut_ptr() as *mut u8, 32);
+            arr.assume_init()
+        };
 
         let fixed_account = AccountFixed {
             address,
