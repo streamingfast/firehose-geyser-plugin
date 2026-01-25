@@ -12,7 +12,7 @@ type BlockAccountChanges = HashMap<u64, AccountChanges>;
 pub type AccountChanges = HashMap<[u8; 64], AccountWithWriteVersion>;
 pub type AccountDataHash = HashMap<[u8; 64], u64>; // owner(32) + pubkey(32)
 pub type AccountOwners = HashMap<[u8; 32], [u8; 32]>; // pubkey(32) -> owner(32)
-pub type StartupAccountReceivedSlot = HashMap<[u8; 32], (u64, u64)>; // pubkey(32)
+pub type StartupAccountReceivedSlot = HashMap<[u8; 32], u64>; // pubkey(32) -> composite value (slot << 25 + write_version)
 
 pub type Transactions = HashMap<u64, Vec<ConfirmTransactionWithIndex>>;
 type ProcessedSlot = HashMap<u64, bool>;
@@ -441,17 +441,21 @@ impl State {
             std::ptr::copy_nonoverlapping(owner.as_ptr(), owner_fixed.as_mut_ptr(), 32);
         }
 
-        if let Some((existing_slot, existing_write_version)) =
-            self.startup_received_slot.get(&pub_key_fixed)
-        {
-            if *existing_slot > slot
-                || (*existing_slot == slot && *existing_write_version > write_version)
-            {
+        // Using left shift by 25 bits to pack slot and write_version into a u64:
+        // 1) Assumed max write_version: 2^25 - 1 = 33,554,431 (~33.5M)
+        //    This is well above the observed max of ~10K write_versions per slot
+        // 2) Max slot considering u64: (2^64 - 1) >> 25 = 2^39 - 1 = 549,755,813,887 (~549B slots)
+        //    At 400ms per slot, this supports ~6,900 years of blockchain history
+        let composite_value = (slot << 25) | write_version;
+
+        // Check if we already have this account with a newer version
+        if let Some(&existing_composite) = self.startup_received_slot.get(&pub_key_fixed) {
+            if existing_composite >= composite_value {
                 return;
             }
         }
         self.startup_received_slot
-            .insert(pub_key_fixed, (slot, write_version));
+            .insert(pub_key_fixed, composite_value);
 
         // Check if there was a previous owner for this public key
         if let Some(previous_owner) = self.account_owners.get(&pub_key_fixed) {
