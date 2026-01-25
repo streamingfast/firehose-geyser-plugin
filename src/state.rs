@@ -1,6 +1,7 @@
 use crate::block_printer::BlockPrinter;
 use crate::config::DevelopmentConfig;
 use crate::pb;
+use crate::state_optimized::StateOptimized;
 use crate::utils::{convert_sol_timestamp, create_account_block};
 use lazy_static::lazy_static;
 use pb::sf::solana::r#type::v1::Account;
@@ -10,9 +11,7 @@ use solana_rpc_client::rpc_client::RpcClient;
 
 type BlockAccountChanges = HashMap<u64, AccountChanges>;
 pub type AccountChanges = HashMap<[u8; 64], AccountWithWriteVersion>;
-pub type AccountDataHash = HashMap<[u8; 64], u64>; // owner(32) + pubkey(32)
-pub type AccountOwners = HashMap<[u8; 32], [u8; 32]>; // pubkey(32) -> owner(32)
-pub type StartupAccountReceivedSlot = HashMap<[u8; 32], u64>; // pubkey(32) -> composite value (slot << 25 + write_version)
+// Note: AccountDataHash, AccountOwners, and StartupAccountReceivedSlot are now part of StateOptimized
 
 pub type Transactions = HashMap<u64, Vec<ConfirmTransactionWithIndex>>;
 type ProcessedSlot = HashMap<u64, bool>;
@@ -93,9 +92,8 @@ pub struct State {
 
     pub block_account_changes: BlockAccountChanges,
 
-    pub account_data_hash: AccountDataHash, // only updated when we print the block
-    pub account_owners: AccountOwners,      // only updated when we print the block
-    pub startup_received_slot: StartupAccountReceivedSlot, // only used during startup phase
+    // Optimized arena-based storage with U48 indices and explicit owner deduplication
+    pub optimized_accounts: StateOptimized,
 
     pub block_infos: BlockInfoMap,
     pub confirmed_slots: ConfirmedSlotsMap,
@@ -131,9 +129,7 @@ impl State {
             initialized: false,
 
             block_account_changes: HashMap::default(),
-            account_data_hash: HashMap::default(),
-            account_owners: HashMap::default(),
-            startup_received_slot: HashMap::default(),
+            optimized_accounts: StateOptimized::new(),
             block_infos: HashMap::default(),
             confirmed_slots: HashMap::default(),
             last_sent_block: None,
@@ -161,9 +157,7 @@ impl State {
             cursor: self.cursor,
             lib: self.lib,
             block_account_changes: self.block_account_changes.clone(),
-            account_data_hash: self.account_data_hash.clone(),
-            account_owners: self.account_owners.clone(),
-            startup_received_slot: self.startup_received_slot.clone(),
+            optimized_accounts: self.optimized_accounts.clone(),
             block_infos: self.block_infos.clone(),
             confirmed_slots: self.confirmed_slots.clone(),
             with_block: self.with_block,
@@ -441,67 +435,19 @@ impl State {
             std::ptr::copy_nonoverlapping(owner.as_ptr(), owner_fixed.as_mut_ptr(), 32);
         }
 
-        // Using left shift by 25 bits to pack slot and write_version into a u64:
-        // 1) Assumed max write_version: 2^25 - 1 = 33,554,431 (~33.5M)
-        //    This is well above the observed max of ~10K write_versions per slot
-        // 2) Max slot considering u64: (2^64 - 1) >> 25 = 2^39 - 1 = 549,755,813,887 (~549B slots)
-        //    At 400ms per slot, this supports ~6,900 years of blockchain history
-        let composite_value = (slot << 25) | write_version;
-
-        // Check if we already have this account with a newer version
-        if let Some(&existing_composite) = self.startup_received_slot.get(&pub_key_fixed) {
-            if existing_composite >= composite_value {
-                return;
-            }
-        }
-        self.startup_received_slot
-            .insert(pub_key_fixed, composite_value);
-
-        // Check if there was a previous owner for this public key
-        if let Some(previous_owner) = self.account_owners.get(&pub_key_fixed) {
-            if previous_owner != &owner_fixed {
-                // Previous owner is different, so delete the old entry from account_data_hash
-                let mut previous_owner_account_key = [0u8; 64];
-                // SAFETY: previous_owner is 32 bytes and pub_key_fixed is 32 bytes
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        previous_owner.as_ptr(),
-                        previous_owner_account_key.as_mut_ptr(),
-                        32,
-                    );
-                    std::ptr::copy_nonoverlapping(
-                        pub_key_fixed.as_ptr(),
-                        previous_owner_account_key.as_mut_ptr().add(32),
-                        32,
-                    );
-                }
-                self.account_data_hash.remove(&previous_owner_account_key);
-            }
-        }
-
-        // Create owner+pubkey composite key (64 bytes total)
-        let mut owner_account_key = [0u8; 64];
-        // SAFETY: owner_fixed is 32 bytes and pub_key_fixed is 32 bytes
-        unsafe {
-            std::ptr::copy_nonoverlapping(owner_fixed.as_ptr(), owner_account_key.as_mut_ptr(), 32);
-            std::ptr::copy_nonoverlapping(
-                pub_key_fixed.as_ptr(),
-                owner_account_key.as_mut_ptr().add(32),
-                32,
-            );
-        }
-
-        if deleted {
-            self.account_data_hash.remove(&owner_account_key);
-            self.account_owners.remove(&pub_key_fixed);
-        } else {
-            self.account_data_hash.insert(owner_account_key, data_hash);
-            self.account_owners.insert(pub_key_fixed, owner_fixed);
-        }
+        // Delegate to optimized implementation - handles everything including owner deduplication!
+        self.optimized_accounts.set_account_on_startup(
+            pub_key_fixed,
+            owner_fixed,
+            data_hash,
+            slot,
+            write_version,
+            deleted,
+        );
     }
 
     pub fn delete_startup_info(&mut self) {
-        self.startup_received_slot = HashMap::default();
+        self.optimized_accounts.startup_received_slot.clear();
     }
 
     // set_account populates the caches for set_account
@@ -666,8 +612,8 @@ impl State {
         for current_slot in first_slot..=slot {
             let (_, changes) = filter_account_changes(
                 self.block_account_changes.get(&current_slot),
-                &self.account_data_hash,
-                &self.account_owners,
+                &self.optimized_accounts,
+                &(),
                 current_slot,
                 trace,
             );
@@ -750,8 +696,8 @@ impl State {
 
             let (effective_account_changes, cache_changes) = filter_account_changes(
                 self.block_account_changes.get(&slot),
-                &self.account_data_hash,
-                &self.account_owners,
+                &self.optimized_accounts,
+                &(),
                 slot,
                 trace,
             );
@@ -791,38 +737,68 @@ impl State {
     }
 
     pub fn get_hash_count(&self) -> usize {
-        self.account_data_hash.len()
+        self.optimized_accounts.account_data_hash.len()
     }
 
     fn apply_cache_changes(&mut self, changes: Vec<StateChange>) {
         for change in changes {
-            let address_vec = change.address;
-            let owner_vec = change.owner;
-            let data_hash = change.data_hash;
-            let deleted = change.deleted;
-
-            // Convert to fixed-length arrays (assume exactly 32 bytes)
             let mut address_fixed = [0u8; 32];
             let mut owner_fixed = [0u8; 32];
 
-            address_fixed.copy_from_slice(&address_vec);
-            owner_fixed.copy_from_slice(&owner_vec);
+            address_fixed.copy_from_slice(&change.address);
+            owner_fixed.copy_from_slice(&change.owner);
 
-            // Create composite key (owner + address)
-            let mut owner_account_key = [0u8; 64];
-            owner_account_key[..32].copy_from_slice(&owner_fixed);
-            owner_account_key[32..].copy_from_slice(&address_fixed);
+            if change.deleted {
+                // Get indices if they exist
+                if let Some(pubkey_idx) = self
+                    .optimized_accounts
+                    .arena
+                    .get_pubkey_index(&address_fixed)
+                {
+                    if let Some(owner_idx) =
+                        self.optimized_accounts.arena.get_owner_index(&owner_fixed)
+                    {
+                        let composite =
+                            crate::state_optimized::CompositeIndex::new(owner_idx, pubkey_idx);
+                        self.optimized_accounts.account_data_hash.remove(&composite);
 
-            if deleted {
-                self.account_data_hash.remove(&owner_account_key);
-                if let Some(cached) = self.account_owners.get(&address_fixed) {
-                    if cached == &owner_fixed {
-                        self.account_owners.remove(&address_fixed);
+                        // Only remove if owner matches
+                        if let Some(&cached_owner_idx) =
+                            self.optimized_accounts.account_owners.get(&pubkey_idx)
+                        {
+                            if cached_owner_idx == owner_idx {
+                                self.optimized_accounts.account_owners.remove(&pubkey_idx);
+                            }
+                        }
                     }
                 }
             } else {
-                self.account_data_hash.insert(owner_account_key, data_hash);
-                self.account_owners.insert(address_fixed, owner_fixed); // last one wins
+                // Intern keys and update (owner deduplication happens automatically!)
+                let pubkey_idx = self.optimized_accounts.arena.intern_pubkey(address_fixed);
+                let owner_idx = self.optimized_accounts.arena.intern_owner(owner_fixed);
+
+                // Check for ownership change and remove old composite key if needed
+                if let Some(&old_owner_idx) =
+                    self.optimized_accounts.account_owners.get(&pubkey_idx)
+                {
+                    if old_owner_idx != owner_idx {
+                        // Remove old owner+pubkey composite from account_data_hash
+                        let old_composite =
+                            crate::state_optimized::CompositeIndex::new(old_owner_idx, pubkey_idx);
+                        self.optimized_accounts
+                            .account_data_hash
+                            .remove(&old_composite);
+                    }
+                }
+
+                let composite = crate::state_optimized::CompositeIndex::new(owner_idx, pubkey_idx);
+
+                self.optimized_accounts
+                    .account_data_hash
+                    .insert(composite, change.data_hash);
+                self.optimized_accounts
+                    .account_owners
+                    .insert(pubkey_idx, owner_idx);
             }
         }
     }
@@ -837,15 +813,15 @@ struct StateChange {
 
 fn filter_account_changes(
     changes: Option<&HashMap<[u8; 64], AccountWithWriteVersion>>,
-    account_data_hash: &AccountDataHash,
-    account_owners: &AccountOwners,
+    optimized_state: &crate::state_optimized::StateOptimized,
+    _unused_param: &(), // Placeholder for signature compatibility
     slot: u64,
     trace: bool,
 ) -> (Vec<Account>, Vec<StateChange>) {
     let mut filtered_changes: Vec<AccountFixed> = Vec::new();
     let mut state_changes: Vec<StateChange> = Vec::new();
 
-    let mut in_block_owners = AccountOwners::default();
+    let mut in_block_owners: HashMap<[u8; 32], [u8; 32]> = HashMap::default();
     let mut ordered_changes: Vec<AccountWithWriteVersion> = Vec::new();
 
     if let Some(changes) = changes {
@@ -872,8 +848,10 @@ fn filter_account_changes(
         account_with_version.write_version;
 
         let mut should_include = false;
-        if let Some(cached_hash) = account_data_hash.get(owner_account_key_fixed) {
-            if *cached_hash != account_with_version.data_hash {
+        if let Some(cached_hash) =
+            optimized_state.get_data_hash_by_composite_key(owner_account_key_fixed)
+        {
+            if cached_hash != account_with_version.data_hash {
                 should_include = true;
             }
             if account.deleted {
@@ -885,8 +863,8 @@ fn filter_account_changes(
 
         let cached_owner = in_block_owners
             .get(&account.address)
-            .or_else(|| account_owners.get(&account.address))
-            .copied();
+            .copied()
+            .or_else(|| optimized_state.get_owner_by_pubkey(&account.address));
 
         let different_previous_owner = match cached_owner {
             None => None,
@@ -1040,11 +1018,10 @@ mod tests {
 
     #[test]
     fn test_filter_account_changes_empty_changes() {
-        let account_data_hash: AccountDataHash = HashMap::default();
-        let account_owners: AccountOwners = HashMap::default();
+        let optimized_state = StateOptimized::new();
 
         let (filtered_changes, state_changes) =
-            filter_account_changes(None, &account_data_hash, &account_owners, 0, false);
+            filter_account_changes(None, &optimized_state, &(), 0, false);
 
         assert!(filtered_changes.is_empty());
         assert!(state_changes.is_empty());
@@ -1053,8 +1030,7 @@ mod tests {
     #[test]
     fn test_filter_account_changes_new_account() {
         let mut changes = HashMap::default();
-        let account_data_hash = HashMap::default();
-        let account_owners = HashMap::default();
+        let optimized_state = StateOptimized::new();
 
         let address = vec![
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
@@ -1071,13 +1047,8 @@ mod tests {
         let key = create_composite_key(&owner, &address);
         changes.insert(key, account_with_version);
 
-        let (filtered_changes, state_changes) = filter_account_changes(
-            Some(&changes),
-            &account_data_hash,
-            &account_owners,
-            0,
-            false,
-        );
+        let (filtered_changes, state_changes) =
+            filter_account_changes(Some(&changes), &optimized_state, &(), 0, false);
 
         assert_eq!(filtered_changes.len(), 1);
         assert_eq!(state_changes.len(), 1);
@@ -1098,8 +1069,7 @@ mod tests {
     #[test]
     fn test_filter_account_changes_same_data_hash_not_deleted() {
         let mut changes = HashMap::default();
-        let mut account_data_hash: AccountDataHash = HashMap::default();
-        let account_owners: AccountOwners = HashMap::default();
+        let mut optimized_state = StateOptimized::new();
 
         let address = vec![
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
@@ -1115,16 +1085,15 @@ mod tests {
 
         let owner_account_key = create_composite_key(&owner, &address);
         changes.insert(owner_account_key, account_with_version);
-        let owner_account_key_fixed = owner_account_key;
-        account_data_hash.insert(owner_account_key_fixed, 123); // Same hash
+        let _owner_account_key_fixed = owner_account_key;
+        let mut owner_fixed = [0u8; 32];
+        let mut address_fixed = [0u8; 32];
+        owner_fixed.copy_from_slice(&owner);
+        address_fixed.copy_from_slice(&address);
+        optimized_state.set_account_on_startup(address_fixed, owner_fixed, 123, 0, 1, false);
 
-        let (filtered_changes, state_changes) = filter_account_changes(
-            Some(&changes),
-            &account_data_hash,
-            &account_owners,
-            0,
-            false,
-        );
+        let (filtered_changes, state_changes) =
+            filter_account_changes(Some(&changes), &optimized_state, &(), 0, false);
 
         // Should be filtered out because hash is the same and not deleted
         assert!(filtered_changes.is_empty());
@@ -1134,8 +1103,7 @@ mod tests {
     #[test]
     fn test_filter_account_changes_different_data_hash() {
         let mut changes = HashMap::default();
-        let mut account_data_hash: AccountDataHash = HashMap::default();
-        let account_owners: AccountOwners = HashMap::default();
+        let mut optimized_state = StateOptimized::new();
 
         let address = vec![
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
@@ -1151,16 +1119,15 @@ mod tests {
 
         let owner_account_key = create_composite_key(&owner, &address);
         changes.insert(owner_account_key, account_with_version);
-        let owner_account_key_fixed = owner_account_key;
-        account_data_hash.insert(owner_account_key_fixed, 456); // Different hash
+        let _owner_account_key_fixed = owner_account_key;
+        let mut owner_fixed = [0u8; 32];
+        let mut address_fixed = [0u8; 32];
+        owner_fixed.copy_from_slice(&owner);
+        address_fixed.copy_from_slice(&address);
+        optimized_state.set_account_on_startup(address_fixed, owner_fixed, 456, 0, 1, false);
 
-        let (filtered_changes, state_changes) = filter_account_changes(
-            Some(&changes),
-            &account_data_hash,
-            &account_owners,
-            0,
-            false,
-        );
+        let (filtered_changes, state_changes) =
+            filter_account_changes(Some(&changes), &optimized_state, &(), 0, false);
 
         // Should be included because hash is different
         assert_eq!(filtered_changes.len(), 1);
@@ -1173,8 +1140,7 @@ mod tests {
     #[test]
     fn test_filter_account_changes_deleted_account() {
         let mut changes = HashMap::default();
-        let mut account_data_hash: AccountDataHash = HashMap::default();
-        let account_owners: AccountOwners = HashMap::default();
+        let mut optimized_state = StateOptimized::new();
 
         let address = vec![
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
@@ -1190,16 +1156,15 @@ mod tests {
 
         let owner_account_key = create_composite_key(&owner, &address);
         changes.insert(owner_account_key, account_with_version);
-        let owner_account_key_fixed = owner_account_key;
-        account_data_hash.insert(owner_account_key_fixed, 123); // Same hash but account is deleted
+        let _owner_account_key_fixed = owner_account_key;
+        let mut owner_fixed = [0u8; 32];
+        let mut address_fixed = [0u8; 32];
+        owner_fixed.copy_from_slice(&owner);
+        address_fixed.copy_from_slice(&address);
+        optimized_state.set_account_on_startup(address_fixed, owner_fixed, 123, 0, 1, false);
 
-        let (filtered_changes, state_changes) = filter_account_changes(
-            Some(&changes),
-            &account_data_hash,
-            &account_owners,
-            0,
-            false,
-        );
+        let (filtered_changes, state_changes) =
+            filter_account_changes(Some(&changes), &optimized_state, &(), 0, false);
 
         // Should be included because account is deleted even with same hash
         assert_eq!(filtered_changes.len(), 1);
@@ -1213,8 +1178,7 @@ mod tests {
     #[test]
     fn test_filter_account_changes_ownership_change() {
         let mut changes = HashMap::default();
-        let account_data_hash: AccountDataHash = HashMap::default();
-        let mut account_owners: AccountOwners = HashMap::default();
+        let mut optimized_state = StateOptimized::new();
 
         let address = vec![
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
@@ -1236,15 +1200,11 @@ mod tests {
             create_composite_key(&new_owner, &address),
             account_with_version,
         );
-        account_owners.insert(vec_to_fixed_32(&address), vec_to_fixed_32(&old_owner)); // Different owner
+        optimized_state
+            .insert_owner_for_pubkey(vec_to_fixed_32(&address), vec_to_fixed_32(&old_owner));
 
-        let (filtered_changes, state_changes) = filter_account_changes(
-            Some(&changes),
-            &account_data_hash,
-            &account_owners,
-            0,
-            false,
-        );
+        let (filtered_changes, state_changes) =
+            filter_account_changes(Some(&changes), &optimized_state, &(), 0, false);
 
         // Should have 2 accounts: one with old owner, one with new owner
         assert_eq!(filtered_changes.len(), 2);
@@ -1277,8 +1237,7 @@ mod tests {
     #[test]
     fn test_filter_account_changes_create_changeowner_delete() {
         let mut changes = HashMap::default();
-        let account_data_hash: AccountDataHash = HashMap::default();
-        let account_owners: AccountOwners = HashMap::default();
+        let optimized_state = StateOptimized::new();
 
         let address = vec![
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
@@ -1304,13 +1263,8 @@ mod tests {
         let key2 = create_composite_key(&new_owner, &address);
         changes.insert(key2, account2_with_version);
 
-        let (mut filtered_changes, state_changes) = filter_account_changes(
-            Some(&changes),
-            &account_data_hash,
-            &account_owners,
-            0,
-            false,
-        );
+        let (filtered_changes, state_changes) =
+            filter_account_changes(Some(&changes), &optimized_state, &(), 0, false);
 
         // Should have 2 accounts: one with old owner, one with new owner
         assert_eq!(filtered_changes.len(), 2);
@@ -1318,6 +1272,7 @@ mod tests {
         assert_eq!(state_changes.len(), 3);
 
         // we sort because them hashes are unordered and we want deterministic tests
+        let mut filtered_changes = filtered_changes;
         filtered_changes.sort_by(|a, b| a.owner.cmp(&b.owner));
 
         // First account should have the new owner
@@ -1352,8 +1307,7 @@ mod tests {
     #[test]
     fn test_filter_account_changes_multiple_accounts_sorted() {
         let mut changes = HashMap::default();
-        let account_data_hash: AccountDataHash = HashMap::default();
-        let account_owners: AccountOwners = HashMap::default();
+        let optimized_state = StateOptimized::new();
 
         // Create accounts with addresses that will test sorting
         let address1 = vec![
@@ -1396,13 +1350,8 @@ mod tests {
             account_with_version3,
         );
 
-        let (filtered_changes, state_changes) = filter_account_changes(
-            Some(&changes),
-            &account_data_hash,
-            &account_owners,
-            0,
-            false,
-        );
+        let (filtered_changes, state_changes) =
+            filter_account_changes(Some(&changes), &optimized_state, &(), 0, false);
 
         assert_eq!(filtered_changes.len(), 3);
         assert_eq!(state_changes.len(), 3);
@@ -1416,8 +1365,7 @@ mod tests {
     #[test]
     fn test_filter_account_changes_complex_scenario() {
         let mut changes = HashMap::default();
-        let mut account_data_hash: AccountDataHash = HashMap::default();
-        let mut account_owners: AccountOwners = HashMap::default();
+        let mut optimized_state = StateOptimized::new();
 
         // Account 1: New account (should be included)
         let address1 = vec![
@@ -1448,7 +1396,12 @@ mod tests {
         let account_with_version2 = create_test_account_with_version(account2, 2, 222);
         let owner_account_key2 = create_composite_key(&owner2, &address2);
         changes.insert(owner_account_key2, account_with_version2);
-        account_data_hash.insert(owner_account_key2, 222); // Same hash
+        // Set up account 2 with same hash in optimized_state
+        let mut address2_fixed = [0u8; 32];
+        let mut owner2_fixed = [0u8; 32];
+        address2_fixed.copy_from_slice(&address2);
+        owner2_fixed.copy_from_slice(&owner2);
+        optimized_state.set_account_on_startup(address2_fixed, owner2_fixed, 222, 0, 1, false);
 
         // Account 3: Ownership change (should include both old and new owner versions)
         let address3 = vec![
@@ -1469,7 +1422,8 @@ mod tests {
         let account_with_version3 = create_test_account_with_version(account3, 3, 333);
         let owner_account_key3 = create_composite_key(&new_owner3, &address3);
         changes.insert(owner_account_key3, account_with_version3);
-        account_owners.insert(vec_to_fixed_32(&address3), vec_to_fixed_32(&old_owner3));
+        optimized_state
+            .insert_owner_for_pubkey(vec_to_fixed_32(&address3), vec_to_fixed_32(&old_owner3));
 
         // Account 4: Deleted account with same hash (should be included)
         let address4 = vec![
@@ -1485,15 +1439,14 @@ mod tests {
         let account_with_version4 = create_test_account_with_version(account4, 4, 444);
         let owner_account_key4 = create_composite_key(&owner4, &address4);
         changes.insert(owner_account_key4, account_with_version4);
-        account_data_hash.insert(owner_account_key4, 444); // Same hash but deleted
+        let mut owner4_fixed = [0u8; 32];
+        let mut address4_fixed = [0u8; 32];
+        owner4_fixed.copy_from_slice(&owner4);
+        address4_fixed.copy_from_slice(&address4);
+        optimized_state.set_account_on_startup(address4_fixed, owner4_fixed, 444, 0, 1, false);
 
-        let (filtered_changes, state_changes) = filter_account_changes(
-            Some(&changes),
-            &account_data_hash,
-            &account_owners,
-            0,
-            false,
-        );
+        let (filtered_changes, state_changes) =
+            filter_account_changes(Some(&changes), &optimized_state, &(), 0, false);
 
         // Should have: Account1, Account3 (old owner), Account3 (new owner), Account4
         assert_eq!(filtered_changes.len(), 4);
@@ -1517,8 +1470,8 @@ mod tests {
 
         state.apply_cache_changes(changes);
 
-        assert!(state.account_data_hash.is_empty());
-        assert!(state.account_owners.is_empty());
+        assert!(state.optimized_accounts.account_data_hash.is_empty());
+        assert!(state.optimized_accounts.account_owners.is_empty());
     }
 
     #[test]
@@ -1546,12 +1499,26 @@ mod tests {
         // Check that account_owners is updated
         let address_fixed = vec_to_fixed_32(&address);
         let owner_fixed = vec_to_fixed_32(&owner);
-        assert_eq!(state.account_owners.get(&address_fixed), Some(&owner_fixed));
-
-        // Check that account_data_hash is updated with the combined key
-        let expected_key_fixed = create_composite_key(&owner, &address);
+        // Check that account_owners is updated
+        let address_idx = state
+            .optimized_accounts
+            .arena
+            .get_pubkey_index(&address_fixed)
+            .unwrap();
+        let owner_idx = state
+            .optimized_accounts
+            .arena
+            .get_owner_index(&owner_fixed)
+            .unwrap();
         assert_eq!(
-            state.account_data_hash.get(&expected_key_fixed),
+            state.optimized_accounts.account_owners.get(&address_idx),
+            Some(&owner_idx)
+        );
+
+        // Check that account_data_hash is updated with the composite index
+        let composite = crate::state_optimized::CompositeIndex::new(owner_idx, address_idx);
+        assert_eq!(
+            state.optimized_accounts.account_data_hash.get(&composite),
             Some(&data_hash)
         );
     }
@@ -1572,18 +1539,30 @@ mod tests {
         // First add an account
         let address_fixed = vec_to_fixed_32(&address);
         let owner_fixed = vec_to_fixed_32(&owner);
-        let owner_account_key_fixed = create_composite_key(&owner, &address);
+        let _owner_account_key_fixed = create_composite_key(&owner, &address);
 
-        state.account_owners.insert(address_fixed, owner_fixed);
+        // Insert using optimized_accounts
+        let pubkey_idx = state.optimized_accounts.arena.intern_pubkey(address_fixed);
+        let owner_idx = state.optimized_accounts.arena.intern_owner(owner_fixed);
         state
+            .optimized_accounts
+            .account_owners
+            .insert(pubkey_idx, owner_idx);
+        let composite = crate::state_optimized::CompositeIndex::new(owner_idx, pubkey_idx);
+        state
+            .optimized_accounts
             .account_data_hash
-            .insert(owner_account_key_fixed, data_hash);
+            .insert(composite, data_hash);
 
         // Verify it's there
-        assert!(state.account_owners.contains_key(&address_fixed));
         assert!(state
+            .optimized_accounts
+            .account_owners
+            .contains_key(&pubkey_idx));
+        assert!(state
+            .optimized_accounts
             .account_data_hash
-            .contains_key(&owner_account_key_fixed));
+            .contains_key(&composite));
 
         // Now delete it
         let change = StateChange {
@@ -1596,10 +1575,23 @@ mod tests {
         state.apply_cache_changes(vec![change]);
 
         // Check that both are removed
-        assert!(!state.account_owners.contains_key(&address_fixed));
-        assert!(!state
-            .account_data_hash
-            .contains_key(&owner_account_key_fixed));
+        let pubkey_idx_opt = state
+            .optimized_accounts
+            .arena
+            .get_pubkey_index(&address_fixed);
+        if let Some(pubkey_idx) = pubkey_idx_opt {
+            assert!(!state
+                .optimized_accounts
+                .account_owners
+                .contains_key(&pubkey_idx));
+            if let Some(owner_idx) = state.optimized_accounts.arena.get_owner_index(&owner_fixed) {
+                let composite = crate::state_optimized::CompositeIndex::new(owner_idx, pubkey_idx);
+                assert!(!state
+                    .optimized_accounts
+                    .account_data_hash
+                    .contains_key(&composite));
+            }
+        }
     }
 
     #[test]
@@ -1667,27 +1659,68 @@ mod tests {
         let address3_fixed = vec_to_fixed_32(&address3);
         let owner3_fixed = vec_to_fixed_32(&owner3);
 
+        // Check all accounts are added using optimized_accounts
+        let pubkey1_idx = state
+            .optimized_accounts
+            .arena
+            .get_pubkey_index(&address1_fixed)
+            .unwrap();
+        let owner1_idx = state
+            .optimized_accounts
+            .arena
+            .get_owner_index(&owner1_fixed)
+            .unwrap();
+        let pubkey2_idx = state
+            .optimized_accounts
+            .arena
+            .get_pubkey_index(&address2_fixed)
+            .unwrap();
+        let owner2_idx = state
+            .optimized_accounts
+            .arena
+            .get_owner_index(&owner2_fixed)
+            .unwrap();
+        let pubkey3_idx = state
+            .optimized_accounts
+            .arena
+            .get_pubkey_index(&address3_fixed)
+            .unwrap();
+        let owner3_idx = state
+            .optimized_accounts
+            .arena
+            .get_owner_index(&owner3_fixed)
+            .unwrap();
+
         assert_eq!(
-            state.account_owners.get(&address1_fixed),
-            Some(&owner1_fixed)
+            state.optimized_accounts.account_owners.get(&pubkey1_idx),
+            Some(&owner1_idx)
         );
         assert_eq!(
-            state.account_owners.get(&address2_fixed),
-            Some(&owner2_fixed)
+            state.optimized_accounts.account_owners.get(&pubkey2_idx),
+            Some(&owner2_idx)
         );
         assert_eq!(
-            state.account_owners.get(&address3_fixed),
-            Some(&owner3_fixed)
+            state.optimized_accounts.account_owners.get(&pubkey3_idx),
+            Some(&owner3_idx)
         );
 
         // Check all data hashes are added
-        let key1_fixed = create_composite_key(&owner1, &address1);
-        let key2_fixed = create_composite_key(&owner2, &address2);
-        let key3_fixed = create_composite_key(&owner3, &address3);
+        let composite1 = crate::state_optimized::CompositeIndex::new(owner1_idx, pubkey1_idx);
+        let composite2 = crate::state_optimized::CompositeIndex::new(owner2_idx, pubkey2_idx);
+        let composite3 = crate::state_optimized::CompositeIndex::new(owner3_idx, pubkey3_idx);
 
-        assert_eq!(state.account_data_hash.get(&key1_fixed), Some(&data_hash1));
-        assert_eq!(state.account_data_hash.get(&key2_fixed), Some(&data_hash2));
-        assert_eq!(state.account_data_hash.get(&key3_fixed), Some(&data_hash3));
+        assert_eq!(
+            state.optimized_accounts.account_data_hash.get(&composite1),
+            Some(&data_hash1)
+        );
+        assert_eq!(
+            state.optimized_accounts.account_data_hash.get(&composite2),
+            Some(&data_hash2)
+        );
+        assert_eq!(
+            state.optimized_accounts.account_data_hash.get(&composite3),
+            Some(&data_hash3)
+        );
     }
 
     #[test]
@@ -1719,13 +1752,34 @@ mod tests {
         let owner1_fixed = vec_to_fixed_32(&owner1);
         let address2_fixed = vec_to_fixed_32(&address2);
         let owner2_fixed = vec_to_fixed_32(&owner2);
-        let key1_fixed = create_composite_key(&owner1, &address1);
-        let key2_fixed = create_composite_key(&owner2, &address2);
+        let _key1_fixed = create_composite_key(&owner1, &address1);
+        let _key2_fixed = create_composite_key(&owner2, &address2);
 
-        state.account_owners.insert(address1_fixed, owner1_fixed);
-        state.account_data_hash.insert(key1_fixed, data_hash1);
-        state.account_owners.insert(address2_fixed, owner2_fixed);
-        state.account_data_hash.insert(key2_fixed, data_hash2);
+        // Pre-populate using optimized_accounts
+        let pubkey1_idx = state.optimized_accounts.arena.intern_pubkey(address1_fixed);
+        let owner1_idx = state.optimized_accounts.arena.intern_owner(owner1_fixed);
+        let pubkey2_idx = state.optimized_accounts.arena.intern_pubkey(address2_fixed);
+        let owner2_idx = state.optimized_accounts.arena.intern_owner(owner2_fixed);
+
+        state
+            .optimized_accounts
+            .account_owners
+            .insert(pubkey1_idx, owner1_idx);
+        let composite1 = crate::state_optimized::CompositeIndex::new(owner1_idx, pubkey1_idx);
+        state
+            .optimized_accounts
+            .account_data_hash
+            .insert(composite1, data_hash1);
+
+        state
+            .optimized_accounts
+            .account_owners
+            .insert(pubkey2_idx, owner2_idx);
+        let composite2 = crate::state_optimized::CompositeIndex::new(owner2_idx, pubkey2_idx);
+        state
+            .optimized_accounts
+            .account_data_hash
+            .insert(composite2, data_hash2);
 
         // Now apply mixed changes: delete one, add one, update one
         let address3 = vec![
@@ -1765,25 +1819,60 @@ mod tests {
         state.apply_cache_changes(changes);
 
         // Check address1 is deleted
-        assert!(!state.account_owners.contains_key(&address1_fixed));
-        assert!(!state.account_data_hash.contains_key(&key1_fixed));
+        let pubkey1_idx_opt = state
+            .optimized_accounts
+            .arena
+            .get_pubkey_index(&address1_fixed);
+        if let Some(pubkey1_idx) = pubkey1_idx_opt {
+            assert!(!state
+                .optimized_accounts
+                .account_owners
+                .contains_key(&pubkey1_idx));
+        }
 
         // Check address2 is updated
+        let pubkey2_idx = state
+            .optimized_accounts
+            .arena
+            .get_pubkey_index(&address2_fixed)
+            .unwrap();
+        let owner2_idx = state
+            .optimized_accounts
+            .arena
+            .get_owner_index(&owner2_fixed)
+            .unwrap();
         assert_eq!(
-            state.account_owners.get(&address2_fixed),
-            Some(&owner2_fixed)
+            state.optimized_accounts.account_owners.get(&pubkey2_idx),
+            Some(&owner2_idx)
         );
-        assert_eq!(state.account_data_hash.get(&key2_fixed), Some(&999u64));
+        let composite2 = crate::state_optimized::CompositeIndex::new(owner2_idx, pubkey2_idx);
+        assert_eq!(
+            state.optimized_accounts.account_data_hash.get(&composite2),
+            Some(&999u64)
+        );
 
         // Check address3 is added
         let address3_fixed = vec_to_fixed_32(&address3);
         let owner3_fixed = vec_to_fixed_32(&owner3);
+        let pubkey3_idx = state
+            .optimized_accounts
+            .arena
+            .get_pubkey_index(&address3_fixed)
+            .unwrap();
+        let owner3_idx = state
+            .optimized_accounts
+            .arena
+            .get_owner_index(&owner3_fixed)
+            .unwrap();
         assert_eq!(
-            state.account_owners.get(&address3_fixed),
-            Some(&owner3_fixed)
+            state.optimized_accounts.account_owners.get(&pubkey3_idx),
+            Some(&owner3_idx)
         );
-        let key3_fixed = create_composite_key(&owner3, &address3);
-        assert_eq!(state.account_data_hash.get(&key3_fixed), Some(&data_hash3));
+        let composite3 = crate::state_optimized::CompositeIndex::new(owner3_idx, pubkey3_idx);
+        assert_eq!(
+            state.optimized_accounts.account_data_hash.get(&composite3),
+            Some(&data_hash3)
+        );
     }
 
     #[test]
@@ -1807,10 +1896,20 @@ mod tests {
         // Set up initial state with old owner
         let address_fixed = vec_to_fixed_32(&address);
         let old_owner_fixed = vec_to_fixed_32(&old_owner);
-        let old_key_fixed = create_composite_key(&old_owner, &address);
+        let _old_key_fixed = create_composite_key(&old_owner, &address);
 
-        state.account_owners.insert(address_fixed, old_owner_fixed);
-        state.account_data_hash.insert(old_key_fixed, data_hash);
+        // Pre-populate using optimized_accounts
+        let pubkey_idx = state.optimized_accounts.arena.intern_pubkey(address_fixed);
+        let old_owner_idx = state.optimized_accounts.arena.intern_owner(old_owner_fixed);
+        state
+            .optimized_accounts
+            .account_owners
+            .insert(pubkey_idx, old_owner_idx);
+        let old_composite = crate::state_optimized::CompositeIndex::new(old_owner_idx, pubkey_idx);
+        state
+            .optimized_accounts
+            .account_data_hash
+            .insert(old_composite, data_hash);
 
         // Apply ownership change
         let change = StateChange {
@@ -1824,17 +1923,40 @@ mod tests {
 
         // Check that account_owners is updated to new owner
         let new_owner_fixed = vec_to_fixed_32(&new_owner);
+        // Verify ownership change
+        let pubkey_idx = state
+            .optimized_accounts
+            .arena
+            .get_pubkey_index(&address_fixed)
+            .unwrap();
+        let new_owner_idx = state
+            .optimized_accounts
+            .arena
+            .get_owner_index(&new_owner_fixed)
+            .unwrap();
         assert_eq!(
-            state.account_owners.get(&address_fixed),
-            Some(&new_owner_fixed)
+            state.optimized_accounts.account_owners.get(&pubkey_idx),
+            Some(&new_owner_idx)
         );
-
-        // Check that new key is added
-        let new_key_fixed = create_composite_key(&new_owner, &address);
+        let new_composite = crate::state_optimized::CompositeIndex::new(new_owner_idx, pubkey_idx);
         assert_eq!(
-            state.account_data_hash.get(&new_key_fixed),
+            state
+                .optimized_accounts
+                .account_data_hash
+                .get(&new_composite),
             Some(&data_hash)
         );
+        // Old composite should be removed
+        let old_owner_idx = state
+            .optimized_accounts
+            .arena
+            .get_owner_index(&old_owner_fixed)
+            .unwrap();
+        let old_composite = crate::state_optimized::CompositeIndex::new(old_owner_idx, pubkey_idx);
+        assert!(!state
+            .optimized_accounts
+            .account_data_hash
+            .contains_key(&old_composite));
 
         // Note: the apply_cache should be called with a 'deleted: true' on the old state. we're testing an incomplete scenario
     }
@@ -1879,19 +2001,70 @@ mod tests {
         // Verify new account is added and old account with old owner is deleted
         let address_fixed = vec_to_fixed_32(&address);
         let owner2_fixed = vec_to_fixed_32(&owner2);
+        let owner1_fixed = vec_to_fixed_32(&owner1);
+
+        let pubkey_idx = state
+            .optimized_accounts
+            .arena
+            .get_pubkey_index(&address_fixed)
+            .unwrap();
+        let owner2_idx = state
+            .optimized_accounts
+            .arena
+            .get_owner_index(&owner2_fixed)
+            .unwrap();
+
         assert_eq!(
-            state.account_owners.get(&address_fixed),
-            Some(&owner2_fixed)
+            state.optimized_accounts.account_owners.get(&pubkey_idx),
+            Some(&owner2_idx)
         );
 
-        let new_key_fixed = create_composite_key(&owner2, &address);
-        let old_key_fixed = create_composite_key(&owner1, &address);
-
+        let new_composite = crate::state_optimized::CompositeIndex::new(owner2_idx, pubkey_idx);
         assert_eq!(
-            state.account_data_hash.get(&new_key_fixed),
+            state
+                .optimized_accounts
+                .account_data_hash
+                .get(&new_composite),
             Some(&data_hash2)
         );
-        assert_eq!(state.account_data_hash.get(&old_key_fixed), None);
+
+        // Old owner composite should not exist
+        if let Some(owner1_idx) = state
+            .optimized_accounts
+            .arena
+            .get_owner_index(&owner1_fixed)
+        {
+            let old_composite = crate::state_optimized::CompositeIndex::new(owner1_idx, pubkey_idx);
+            assert_eq!(
+                state
+                    .optimized_accounts
+                    .account_data_hash
+                    .get(&old_composite),
+                None
+            );
+        }
+    }
+
+    // Helper function to get account data hash from optimized state
+    fn get_account_data_hash(state: &State, owner: &[u8], pubkey: &[u8]) -> Option<u64> {
+        let owner_fixed = vec_to_fixed_32(owner);
+        let pubkey_fixed = vec_to_fixed_32(pubkey);
+
+        let pubkey_idx = state
+            .optimized_accounts
+            .arena
+            .get_pubkey_index(&pubkey_fixed)?;
+        let owner_idx = state
+            .optimized_accounts
+            .arena
+            .get_owner_index(&owner_fixed)?;
+        let composite = crate::state_optimized::CompositeIndex::new(owner_idx, pubkey_idx);
+
+        state
+            .optimized_accounts
+            .account_data_hash
+            .get(&composite)
+            .copied()
     }
 
     // Helper function to create a test State instance
@@ -2186,7 +2359,7 @@ mod tests {
         let data_hash_3 = gxhash64(b"data.1", 76);
         let data_hash_4 = gxhash64(b"data.4", 76);
 
-        let owner_account_key_fixed = create_composite_key(OWNER_KEY_1, PUB_KEY_1);
+        let _owner_account_key_fixed = create_composite_key(OWNER_KEY_1, PUB_KEY_1);
         let pub_key_1_fixed = vec_to_fixed_32(PUB_KEY_1);
 
         state.first_block_to_process = Some(10);
@@ -2194,40 +2367,88 @@ mod tests {
         // set startup value with slot=8 -> must be set
         state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_1, 8, 1, false);
 
+        let pubkey_idx = state
+            .optimized_accounts
+            .arena
+            .get_pubkey_index(&pub_key_1_fixed)
+            .unwrap();
+        let owner_idx = state
+            .optimized_accounts
+            .arena
+            .get_owner_index(&vec_to_fixed_32(OWNER_KEY_1))
+            .unwrap();
+        let composite = crate::state_optimized::CompositeIndex::new(owner_idx, pubkey_idx);
         assert_eq!(
             state
+                .optimized_accounts
                 .account_data_hash
-                .get(&owner_account_key_fixed)
+                .get(&composite)
                 .unwrap(),
             &data_hash_1
         );
 
         // set startup value with slot=7 -> unchanged
         state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_2, 7, 1, false);
+        let pubkey_idx = state
+            .optimized_accounts
+            .arena
+            .get_pubkey_index(&pub_key_1_fixed)
+            .unwrap();
+        let owner_idx = state
+            .optimized_accounts
+            .arena
+            .get_owner_index(&vec_to_fixed_32(OWNER_KEY_1))
+            .unwrap();
+        let composite = crate::state_optimized::CompositeIndex::new(owner_idx, pubkey_idx);
         assert_eq!(
             state
+                .optimized_accounts
                 .account_data_hash
-                .get(&owner_account_key_fixed)
+                .get(&composite)
                 .unwrap(),
             &data_hash_1
         );
 
         // set startup value with slot=8, higher write_version -> changed
         state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_2, 8, 4, false);
+        let pubkey_idx = state
+            .optimized_accounts
+            .arena
+            .get_pubkey_index(&pub_key_1_fixed)
+            .unwrap();
+        let owner_idx = state
+            .optimized_accounts
+            .arena
+            .get_owner_index(&vec_to_fixed_32(OWNER_KEY_1))
+            .unwrap();
+        let composite = crate::state_optimized::CompositeIndex::new(owner_idx, pubkey_idx);
         assert_eq!(
             state
+                .optimized_accounts
                 .account_data_hash
-                .get(&owner_account_key_fixed)
+                .get(&composite)
                 .unwrap(),
             &data_hash_2
         );
 
         // set startup value with slot=9, lower write_version -> changed
         state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_3, 9, 0, false);
+        let pubkey_idx = state
+            .optimized_accounts
+            .arena
+            .get_pubkey_index(&pub_key_1_fixed)
+            .unwrap();
+        let owner_idx = state
+            .optimized_accounts
+            .arena
+            .get_owner_index(&vec_to_fixed_32(OWNER_KEY_1))
+            .unwrap();
+        let composite = crate::state_optimized::CompositeIndex::new(owner_idx, pubkey_idx);
         assert_eq!(
             state
+                .optimized_accounts
                 .account_data_hash
-                .get(&owner_account_key_fixed)
+                .get(&composite)
                 .unwrap(),
             &data_hash_3
         );
@@ -2236,24 +2457,58 @@ mod tests {
         state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_4, 10, 1, true);
 
         // verify all traces to the account are removed from hashes
-        assert!(state
-            .account_data_hash
-            .get(&owner_account_key_fixed)
-            .is_none());
-        assert!(state.account_owners.get(&pub_key_1_fixed).is_none());
+        let pubkey_idx_opt = state
+            .optimized_accounts
+            .arena
+            .get_pubkey_index(&pub_key_1_fixed);
+        if let Some(pubkey_idx) = pubkey_idx_opt {
+            let owner_idx_opt = state
+                .optimized_accounts
+                .arena
+                .get_owner_index(&vec_to_fixed_32(OWNER_KEY_1));
+            if let Some(owner_idx) = owner_idx_opt {
+                let composite = crate::state_optimized::CompositeIndex::new(owner_idx, pubkey_idx);
+                assert!(state
+                    .optimized_accounts
+                    .account_data_hash
+                    .get(&composite)
+                    .is_none());
+            }
+            assert!(state
+                .optimized_accounts
+                .account_owners
+                .get(&pubkey_idx)
+                .is_none());
+        }
 
         // test with different owner: set up account with OWNER_KEY_1 again
         state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_1, 11, 0, false);
+        let pubkey_idx = state
+            .optimized_accounts
+            .arena
+            .get_pubkey_index(&pub_key_1_fixed)
+            .unwrap();
+        let owner_idx = state
+            .optimized_accounts
+            .arena
+            .get_owner_index(&vec_to_fixed_32(OWNER_KEY_1))
+            .unwrap();
+        let composite = crate::state_optimized::CompositeIndex::new(owner_idx, pubkey_idx);
         assert_eq!(
             state
+                .optimized_accounts
                 .account_data_hash
-                .get(&owner_account_key_fixed)
+                .get(&composite)
                 .unwrap(),
             &data_hash_1
         );
         assert_eq!(
-            state.account_owners.get(&pub_key_1_fixed).unwrap(),
-            &vec_to_fixed_32(OWNER_KEY_1)
+            state
+                .optimized_accounts
+                .account_owners
+                .get(&pubkey_idx)
+                .unwrap(),
+            &owner_idx
         );
 
         // set with different owner (OWNER_KEY_11111111111111111111111111111111) and deleted=true
@@ -2261,25 +2516,71 @@ mod tests {
         state.set_account_on_startup(PUB_KEY_1, different_owner, data_hash_4, 12, 0, true);
 
         // Verify previous values with the other owner are also gone
-        assert!(state
-            .account_data_hash
-            .get(&owner_account_key_fixed)
-            .is_none());
-        assert!(state.account_owners.get(&pub_key_1_fixed).is_none());
+        // verify all traces to the account with OWNER_KEY_1 are removed from hashes
+        let pubkey_idx_opt = state
+            .optimized_accounts
+            .arena
+            .get_pubkey_index(&pub_key_1_fixed);
+        if let Some(pubkey_idx) = pubkey_idx_opt {
+            let owner_idx_opt = state
+                .optimized_accounts
+                .arena
+                .get_owner_index(&vec_to_fixed_32(OWNER_KEY_1));
+            if let Some(owner_idx) = owner_idx_opt {
+                let composite = crate::state_optimized::CompositeIndex::new(owner_idx, pubkey_idx);
+                assert!(state
+                    .optimized_accounts
+                    .account_data_hash
+                    .get(&composite)
+                    .is_none());
+            }
+            assert!(state
+                .optimized_accounts
+                .account_owners
+                .get(&pubkey_idx)
+                .is_none());
+        }
 
         // set a value 'before' the block where it got deleted. it should remain deleted
         state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_1, 11, 0, false);
-        assert!(state
-            .account_data_hash
-            .get(&owner_account_key_fixed)
-            .is_none());
+        // verify all traces to the account are removed from hashes
+        let pubkey_idx_opt = state
+            .optimized_accounts
+            .arena
+            .get_pubkey_index(&pub_key_1_fixed);
+        if let Some(pubkey_idx) = pubkey_idx_opt {
+            let owner_idx_opt = state
+                .optimized_accounts
+                .arena
+                .get_owner_index(&vec_to_fixed_32(OWNER_KEY_1));
+            if let Some(owner_idx) = owner_idx_opt {
+                let composite = crate::state_optimized::CompositeIndex::new(owner_idx, pubkey_idx);
+                assert!(state
+                    .optimized_accounts
+                    .account_data_hash
+                    .get(&composite)
+                    .is_none());
+            }
+        }
 
         // set a value 'after' the block where it got deleted. it should remain deleted
         state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_1, 12, 1, false);
+        let pubkey_idx = state
+            .optimized_accounts
+            .arena
+            .get_pubkey_index(&pub_key_1_fixed)
+            .unwrap();
+        let owner_idx = state
+            .optimized_accounts
+            .arena
+            .get_owner_index(&vec_to_fixed_32(OWNER_KEY_1))
+            .unwrap();
+        let composite = crate::state_optimized::CompositeIndex::new(owner_idx, pubkey_idx);
         assert_eq!(
             state
+                .optimized_accounts
                 .account_data_hash
-                .get(&owner_account_key_fixed)
+                .get(&composite)
                 .unwrap(),
             &data_hash_1
         );
@@ -2308,43 +2609,89 @@ mod tests {
         state.set_account_on_startup(PUB_KEY_1, owner1, data_hash1, slot1, 0, false);
 
         // Verify owner1+pubkey entry exists in account_data_hash
-        let owner1_account_key_fixed = create_composite_key(owner1, PUB_KEY_1);
+        let _owner1_account_key_fixed = create_composite_key(owner1, PUB_KEY_1);
         let pub_key_1_fixed = vec_to_fixed_32(PUB_KEY_1);
         let owner1_fixed = vec_to_fixed_32(owner1);
+        let pubkey_idx = state
+            .optimized_accounts
+            .arena
+            .get_pubkey_index(&pub_key_1_fixed)
+            .unwrap();
+        let owner1_idx = state
+            .optimized_accounts
+            .arena
+            .get_owner_index(&owner1_fixed)
+            .unwrap();
+        let composite1 = crate::state_optimized::CompositeIndex::new(owner1_idx, pubkey_idx);
         assert_eq!(
             state
+                .optimized_accounts
                 .account_data_hash
-                .get(&owner1_account_key_fixed)
+                .get(&composite1)
                 .unwrap(),
             &data_hash1
         );
         assert_eq!(
-            state.account_owners.get(&pub_key_1_fixed).unwrap(),
-            &owner1_fixed
+            state
+                .optimized_accounts
+                .account_owners
+                .get(&pubkey_idx)
+                .unwrap(),
+            &owner1_idx
         );
 
         // Second call with owner2 and higher slot number
         state.set_account_on_startup(PUB_KEY_1, owner2, data_hash2, slot2, 0, false);
 
         // Verify that owner1+pubkey entry is deleted from account_data_hash
-        assert!(state
-            .account_data_hash
-            .get(&owner1_account_key_fixed)
-            .is_none());
+        let pubkey_idx_check = state
+            .optimized_accounts
+            .arena
+            .get_pubkey_index(&pub_key_1_fixed)
+            .unwrap();
+        if let Some(owner1_idx_check) = state
+            .optimized_accounts
+            .arena
+            .get_owner_index(&owner1_fixed)
+        {
+            let composite1 =
+                crate::state_optimized::CompositeIndex::new(owner1_idx_check, pubkey_idx_check);
+            assert!(state
+                .optimized_accounts
+                .account_data_hash
+                .get(&composite1)
+                .is_none());
+        }
 
         // Verify that owner2+pubkey entry exists in account_data_hash
-        let owner2_account_key_fixed = create_composite_key(owner2, PUB_KEY_1);
+        let _owner2_account_key_fixed = create_composite_key(owner2, PUB_KEY_1);
         let owner2_fixed = vec_to_fixed_32(owner2);
+        let pubkey_idx2 = state
+            .optimized_accounts
+            .arena
+            .get_pubkey_index(&pub_key_1_fixed)
+            .unwrap();
+        let owner2_idx = state
+            .optimized_accounts
+            .arena
+            .get_owner_index(&owner2_fixed)
+            .unwrap();
+        let composite2 = crate::state_optimized::CompositeIndex::new(owner2_idx, pubkey_idx2);
         assert_eq!(
             state
+                .optimized_accounts
                 .account_data_hash
-                .get(&owner2_account_key_fixed)
+                .get(&composite2)
                 .unwrap(),
             &data_hash2
         );
         assert_eq!(
-            state.account_owners.get(&pub_key_1_fixed).unwrap(),
-            &owner2_fixed
+            state
+                .optimized_accounts
+                .account_owners
+                .get(&pubkey_idx2)
+                .unwrap(),
+            &owner2_idx
         );
     }
 
@@ -2552,13 +2899,6 @@ mod tests {
         assert_logs_contain_ordered(expected_logs);
     }
 
-    fn concat_keys(owner: &[u8], account: &[u8]) -> [u8; 64] {
-        let mut result = [0u8; 64];
-        result[..32].copy_from_slice(owner);
-        result[32..].copy_from_slice(account);
-        result
-    }
-
     #[test]
     fn test_integration_cursor_after_start() {
         // Create state with noop BlockPrinter
@@ -2587,15 +2927,15 @@ mod tests {
         }
 
         assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_1)],
+            get_account_data_hash(&state, OWNER_KEY_1, PUB_KEY_1).unwrap(),
             12345
         );
         assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_2)],
+            get_account_data_hash(&state, OWNER_KEY_1, PUB_KEY_2).unwrap(),
             23456
         );
         assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_3)],
+            get_account_data_hash(&state, OWNER_KEY_1, PUB_KEY_3).unwrap(),
             34567
         );
 
@@ -2629,15 +2969,15 @@ mod tests {
         }
 
         assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_1)],
+            get_account_data_hash(&state, OWNER_KEY_1, PUB_KEY_1).unwrap(),
             12345
         );
         assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_2)],
+            get_account_data_hash(&state, OWNER_KEY_1, PUB_KEY_2).unwrap(),
             23456
         );
         assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_3)],
+            get_account_data_hash(&state, OWNER_KEY_1, PUB_KEY_3).unwrap(),
             34567
         );
 
@@ -2671,15 +3011,15 @@ mod tests {
         }
 
         assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_1)],
+            get_account_data_hash(&state, OWNER_KEY_1, PUB_KEY_1).unwrap(),
             12345
         );
         assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_2)],
+            get_account_data_hash(&state, OWNER_KEY_1, PUB_KEY_2).unwrap(),
             23456
         );
         assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_3)],
+            get_account_data_hash(&state, OWNER_KEY_1, PUB_KEY_3).unwrap(),
             34567
         );
 
@@ -2715,15 +3055,15 @@ mod tests {
 
         // this should be inserted even if we don't actually SEND the block
         assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_1)],
+            get_account_data_hash(&state, OWNER_KEY_1, PUB_KEY_1).unwrap(),
             12345
         );
         assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_2)],
+            get_account_data_hash(&state, OWNER_KEY_1, PUB_KEY_2).unwrap(),
             23456
         );
         assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_3)],
+            get_account_data_hash(&state, OWNER_KEY_1, PUB_KEY_3).unwrap(),
             34567
         );
 
@@ -2761,15 +3101,15 @@ mod tests {
 
         // this should be inserted even if we don't actually SEND the block
         assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_1)],
+            get_account_data_hash(&state, OWNER_KEY_1, PUB_KEY_1).unwrap(),
             12345
         );
         assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_2)],
+            get_account_data_hash(&state, OWNER_KEY_1, PUB_KEY_2).unwrap(),
             23456
         );
         assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_3)],
+            get_account_data_hash(&state, OWNER_KEY_1, PUB_KEY_3).unwrap(),
             34567
         );
 
