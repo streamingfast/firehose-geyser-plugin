@@ -22,9 +22,9 @@ pub struct StateHashbrown {
 impl StateHashbrown {
     pub fn new() -> Self {
         Self {
-            account_data_hash: HashbrownHashMap::new(),
-            account_owners: HashbrownHashMap::new(),
-            startup_received_slot: HashbrownHashMap::new(),
+            account_data_hash: HashbrownHashMap::default(),
+            account_owners: HashbrownHashMap::default(),
+            startup_received_slot: HashbrownHashMap::default(),
         }
     }
 
@@ -83,9 +83,9 @@ pub struct StateAhash {
 impl StateAhash {
     pub fn new() -> Self {
         Self {
-            account_data_hash: AHashMap::new(),
-            account_owners: AHashMap::new(),
-            startup_received_slot: AHashMap::new(),
+            account_data_hash: AHashMap::default(),
+            account_owners: AHashMap::default(),
+            startup_received_slot: AHashMap::default(),
         }
     }
 

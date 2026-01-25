@@ -22,9 +22,9 @@ pub struct StateVec {
 impl StateVec {
     pub fn new() -> Self {
         Self {
-            account_data_hash: HashbrownHashMap::new(),
-            account_owners: HashbrownHashMap::new(),
-            startup_received_slot: HashbrownHashMap::new(),
+            account_data_hash: HashbrownHashMap::default(),
+            account_owners: HashbrownHashMap::default(),
+            startup_received_slot: HashbrownHashMap::default(),
         }
     }
 
@@ -83,9 +83,9 @@ pub struct StateFixed {
 impl StateFixed {
     pub fn new() -> Self {
         Self {
-            account_data_hash: HashbrownHashMap::new(),
-            account_owners: HashbrownHashMap::new(),
-            startup_received_slot: HashbrownHashMap::new(),
+            account_data_hash: HashbrownHashMap::default(),
+            account_owners: HashbrownHashMap::default(),
+            startup_received_slot: HashbrownHashMap::default(),
         }
     }
 
