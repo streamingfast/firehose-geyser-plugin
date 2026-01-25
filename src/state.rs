@@ -520,8 +520,15 @@ impl State {
 
         //create a unique key from owner and account addresses
         let mut owner_account_key = [0u8; 64];
-        owner_account_key[..32].copy_from_slice(owner);
-        owner_account_key[32..].copy_from_slice(pub_key);
+        // SAFETY: Both owner and pub_key are guaranteed to be 32 bytes (Solana pubkey size)
+        unsafe {
+            std::ptr::copy_nonoverlapping(owner.as_ptr(), owner_account_key.as_mut_ptr(), 32);
+            std::ptr::copy_nonoverlapping(
+                pub_key.as_ptr(),
+                owner_account_key.as_mut_ptr().add(32),
+                32,
+            );
+        }
 
         // purge tail data on initialization
         if !self.block_account_changes.contains_key(&slot) {
@@ -559,8 +566,11 @@ impl State {
         let mut address = [0u8; 32];
         let mut owner_array = [0u8; 32];
 
-        address.copy_from_slice(pub_key);
-        owner_array.copy_from_slice(owner);
+        // SAFETY: Both pub_key and owner are guaranteed to be 32 bytes (Solana pubkey size)
+        unsafe {
+            std::ptr::copy_nonoverlapping(pub_key.as_ptr(), address.as_mut_ptr(), 32);
+            std::ptr::copy_nonoverlapping(owner.as_ptr(), owner_array.as_mut_ptr(), 32);
+        }
 
         let fixed_account = AccountFixed {
             address,
