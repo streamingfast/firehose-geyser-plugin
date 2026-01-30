@@ -665,6 +665,7 @@ fn to_transaction_meta_status(
             .collect(),
         return_data: to_return_data(&status.return_data),
         compute_units_consumed: status.compute_units_consumed,
+        cost_units: status.cost_units,
     }
 }
 
