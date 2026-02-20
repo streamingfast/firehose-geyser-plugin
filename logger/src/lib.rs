@@ -154,8 +154,11 @@ impl GeyserPlugin for LoggerPlugin {
         &self,
         _account: ReplicaAccountInfoVersions,
         slot: u64,
-        _is_startup: bool,
+        is_startup: bool,
     ) -> PluginResult<()> {
+        if is_startup {
+            OK(())
+        }
         if let Some(mutex) = &self.inner {
             let mut g = mutex.lock().expect("logger inner mutex poisoned");
             let line = format!("{} update_account slot={}", now_ms(), slot);
