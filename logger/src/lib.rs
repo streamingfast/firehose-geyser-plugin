@@ -19,24 +19,67 @@ fn now_ms() -> u128 {
         .as_millis()
 }
 
+/// Tracks first/last dedup state for a single event type.
+/// The first event for a new slot is printed immediately; subsequent events
+/// for the same slot are held in `pending_line`. The pending line is flushed
+/// to the writer before the next unrelated write occurs.
+#[derive(Default)]
+struct DedupState {
+    last_slot: Option<u64>,
+    pending_line: Option<String>,
+}
+
 struct Inner {
     writer: BufWriter<std::fs::File>,
-    /// The slot of the last notify_transaction that was printed immediately.
-    last_tx_slot: Option<u64>,
-    /// The most-recently suppressed notify_transaction line (same slot as last_tx_slot).
-    /// Flushed to the writer before the next non-transaction event is written.
-    pending_tx_line: Option<String>,
+    accounts: DedupState,
+    transactions: DedupState,
 }
 
 impl Inner {
-    /// Write `line` to the underlying writer, flushing any pending transaction
-    /// line first. Flushes the BufWriter afterwards.
-    fn write_line(&mut self, line: &str) {
-        if let Some(pending) = self.pending_tx_line.take() {
+    /// Flush any suppressed (last-seen) lines for both accounts and transactions.
+    /// Called before writing any unrelated event so the log stays in order.
+    fn flush_pending(&mut self) {
+        if let Some(pending) = self.accounts.pending_line.take() {
             let _ = writeln!(self.writer, "{}", pending);
         }
+        if let Some(pending) = self.transactions.pending_line.take() {
+            let _ = writeln!(self.writer, "{}", pending);
+        }
+    }
+
+    /// Write an arbitrary line, flushing all pending dedup lines first.
+    fn write_line(&mut self, line: &str) {
+        self.flush_pending();
         let _ = writeln!(self.writer, "{}", line);
         let _ = self.writer.flush();
+    }
+
+    /// Handle a deduplicated account event for `slot`.
+    /// - First event for a new slot → flush all pending, print immediately.
+    /// - Repeated events for the same slot → store as pending (overwrites previous).
+    fn handle_account(&mut self, slot: u64, line: String) {
+        if self.accounts.last_slot == Some(slot) {
+            self.accounts.pending_line = Some(line);
+        } else {
+            self.flush_pending();
+            let _ = writeln!(self.writer, "{}", line);
+            let _ = self.writer.flush();
+            self.accounts.last_slot = Some(slot);
+        }
+    }
+
+    /// Handle a deduplicated transaction event for `slot`.
+    /// - First event for a new slot → flush all pending, print immediately.
+    /// - Repeated events for the same slot → store as pending (overwrites previous).
+    fn handle_transaction(&mut self, slot: u64, line: String) {
+        if self.transactions.last_slot == Some(slot) {
+            self.transactions.pending_line = Some(line);
+        } else {
+            self.flush_pending();
+            let _ = writeln!(self.writer, "{}", line);
+            let _ = self.writer.flush();
+            self.transactions.last_slot = Some(slot);
+        }
     }
 }
 
@@ -96,8 +139,8 @@ impl GeyserPlugin for LoggerPlugin {
         self.with_transactions = config.with_transactions;
         self.inner = Some(Mutex::new(Inner {
             writer: BufWriter::new(file),
-            last_tx_slot: None,
-            pending_tx_line: None,
+            accounts: DedupState::default(),
+            transactions: DedupState::default(),
         }));
         self.log_no_slot("on_load");
         Ok(())
@@ -113,7 +156,11 @@ impl GeyserPlugin for LoggerPlugin {
         slot: u64,
         _is_startup: bool,
     ) -> PluginResult<()> {
-        self.log("update_account", slot);
+        if let Some(mutex) = &self.inner {
+            let mut g = mutex.lock().expect("logger inner mutex poisoned");
+            let line = format!("{} update_account slot={}", now_ms(), slot);
+            g.handle_account(slot, line);
+        }
         Ok(())
     }
 
@@ -155,21 +202,7 @@ impl GeyserPlugin for LoggerPlugin {
         if let Some(mutex) = &self.inner {
             let mut g = mutex.lock().expect("logger inner mutex poisoned");
             let line = format!("{} {} slot={}", now_ms(), event, slot);
-
-            if g.last_tx_slot == Some(slot) {
-                // Same slot as the last printed transaction: suppress this line
-                // but keep it so it can be flushed before the next other event.
-                g.pending_tx_line = Some(line);
-            } else {
-                // New slot: flush any pending line from the previous slot, then
-                // print this one immediately and update the tracked slot.
-                if let Some(pending) = g.pending_tx_line.take() {
-                    let _ = writeln!(g.writer, "{}", pending);
-                }
-                let _ = writeln!(g.writer, "{}", line);
-                let _ = g.writer.flush();
-                g.last_tx_slot = Some(slot);
-            }
+            g.handle_transaction(slot, line);
         }
         Ok(())
     }
