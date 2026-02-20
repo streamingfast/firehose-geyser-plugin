@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "logger"]
+
 [package]
 name = "firehose-geyser-plugin"
 version = "3.0.0"
