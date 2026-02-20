@@ -157,7 +157,7 @@ impl GeyserPlugin for LoggerPlugin {
         is_startup: bool,
     ) -> PluginResult<()> {
         if is_startup {
-            OK(())
+            Ok(())
         }
         if let Some(mutex) = &self.inner {
             let mut g = mutex.lock().expect("logger inner mutex poisoned");
