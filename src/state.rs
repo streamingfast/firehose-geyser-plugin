@@ -773,6 +773,94 @@ impl State {
                     return Err("Error printing block".into());
                 }
                 self.last_sent_block = Some(block_info.slot);
+
+                if slot % 10 == 0 {
+                    use std::mem::size_of;
+
+                    // block_account_changes: HashMap<u64, AccountChanges>
+                    // AccountChanges = HashMap<[u8;64], AccountWithWriteVersion>
+                    // Iterate outer (one entry per in-flight block, always small) to sum inner stats.
+                    // Inner bytes = spine only; AccountFixed.data (Vec<u8>) heap is excluded.
+                    let (bac_inner_entries, bac_inner_bytes) = self
+                        .block_account_changes
+                        .values()
+                        .fold((0usize, 0usize), |(entries, bytes), inner| {
+                            (
+                                entries + inner.len(),
+                                bytes
+                                    + inner.capacity()
+                                        * (size_of::<([u8; 64], AccountWithWriteVersion)>() + 1),
+                            )
+                        });
+                    let bac_bytes = self.block_account_changes.capacity()
+                        * (size_of::<(u64, AccountChanges)>() + 1)
+                        + bac_inner_bytes;
+
+                    // account_data_hash: HashMap<[u8;64], u64>  — 72 bytes/entry data
+                    let adh_entries = self.account_data_hash.len();
+                    let adh_bytes =
+                        self.account_data_hash.capacity() * (size_of::<([u8; 64], u64)>() + 1);
+
+                    // account_owners: HashMap<[u8;32], [u8;32]>  — 64 bytes/entry data
+                    let ao_entries = self.account_owners.len();
+                    let ao_bytes =
+                        self.account_owners.capacity() * (size_of::<([u8; 32], [u8; 32])>() + 1);
+
+                    // startup_received_slot: HashMap<[u8;32], u64>  — 40 bytes/entry data
+                    let srs_entries = self.startup_received_slot.len();
+                    let srs_bytes =
+                        self.startup_received_slot.capacity() * (size_of::<([u8; 32], u64)>() + 1);
+
+                    // block_infos: HashMap<u64, BlockInfo>
+                    // BlockInfo contains String/Vec fields; bytes = spine only.
+                    let bi_entries = self.block_infos.len();
+                    let bi_bytes =
+                        self.block_infos.capacity() * (size_of::<(u64, BlockInfo)>() + 1);
+
+                    // confirmed_slots: HashMap<u64, bool>  — 9 bytes/entry data
+                    let cs_entries = self.confirmed_slots.len();
+                    let cs_bytes = self.confirmed_slots.capacity() * (size_of::<(u64, bool)>() + 1);
+
+                    // transactions: HashMap<u64, Vec<ConfirmTransactionWithIndex>>
+                    // Vec spine only; inner allocations excluded.
+                    let tx_entries = self.transactions.len();
+                    let tx_bytes = self.transactions.capacity()
+                        * (size_of::<(u64, Vec<ConfirmTransactionWithIndex>)>() + 1);
+
+                    // processed_slots: HashMap<u64, bool>  — 9 bytes/entry data
+                    let ps_entries = self.processed_slots.len();
+                    let ps_bytes = self.processed_slots.capacity() * (size_of::<(u64, bool)>() + 1);
+
+                    const MIB: usize = 1024 * 1024;
+                    info!(
+                        "RAM[slot={}] block_account_changes: {} outer / {} inner / {} MiB; \
+                        account_data_hash: {} / {} MiB; \
+                        account_owners: {} / {} MiB; \
+                        startup_received_slot: {} / {} MiB; \
+                        block_infos: {} / {} MiB; \
+                        confirmed_slots: {} / {} MiB; \
+                        transactions: {} / {} MiB; \
+                        processed_slots: {} / {} MiB",
+                        slot,
+                        self.block_account_changes.len(),
+                        bac_inner_entries,
+                        bac_bytes / MIB,
+                        adh_entries,
+                        adh_bytes / MIB,
+                        ao_entries,
+                        ao_bytes / MIB,
+                        srs_entries,
+                        srs_bytes / MIB,
+                        bi_entries,
+                        bi_bytes / MIB,
+                        cs_entries,
+                        cs_bytes / MIB,
+                        tx_entries,
+                        tx_bytes / MIB,
+                        ps_entries,
+                        ps_bytes / MIB,
+                    );
+                }
             } else {
                 info!(
                     "in process_upto, not actually sending slot {}, below first_block_to_process {}. applying to cache only",
