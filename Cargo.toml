@@ -60,3 +60,7 @@ harness = false
 [[bench]]
 name = "fixed_length_benchmark"
 harness = false
+
+[[bench]]
+name = "fxhash_vs_ahash_benchmark"
+harness = false
