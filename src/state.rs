@@ -94,6 +94,7 @@ pub struct State {
 
     pub account_state: AccountState, // pubkey -> (owner, data_hash), only updated when we print the block
     pub startup_received_slot: StartupAccountReceivedSlot, // only used during startup phase
+    pub highest_startup_slot: u64, // highest slot seen in set_account_on_startup calls
 
     pub block_infos: BlockInfoMap,
     pub confirmed_slots: ConfirmedSlotsMap,
@@ -131,6 +132,7 @@ impl State {
             block_account_changes: HashMap::default(),
             account_state: HashMap::default(),
             startup_received_slot: HashMap::default(),
+            highest_startup_slot: 0,
             block_infos: HashMap::default(),
             confirmed_slots: HashMap::default(),
             last_sent_block: None,
@@ -160,6 +162,7 @@ impl State {
             block_account_changes: self.block_account_changes.clone(),
             account_state: self.account_state.clone(),
             startup_received_slot: self.startup_received_slot.clone(),
+            highest_startup_slot: self.highest_startup_slot,
             block_infos: self.block_infos.clone(),
             confirmed_slots: self.confirmed_slots.clone(),
             with_block: self.with_block,
@@ -318,9 +321,9 @@ impl State {
     pub fn set_confirmed_slot(&mut self, slot: u64, trace: bool) {
         if let Some(cursor) = self.cursor {
             if self.first_block_to_process.is_none() {
-                if slot >= cursor {
+                if slot >= cursor && slot > self.highest_startup_slot {
                     self.first_block_to_process = Some(slot);
-                    info!("setting first_block_to_process: {}", slot - 1);
+                    info!("setting first_block_to_process: {} (highest_startup_slot={})", slot, self.highest_startup_slot);
                 }
             }
         }
@@ -386,8 +389,9 @@ impl State {
             self.first_received_blockmeta = Some(slot);
             if self.cursor.is_none() {
                 // usually because the lib has been set from rpc
-                debug!("setting first_block_to_process to: {}", slot);
-                self.first_block_to_process = Some(slot);
+                let effective_slot = slot.max(self.highest_startup_slot + 1);
+                debug!("setting first_block_to_process to: {} (highest_startup_slot={})", effective_slot, self.highest_startup_slot);
+                self.first_block_to_process = Some(effective_slot);
 
                 // since we don't send these blocks, we apply their changes to the cache manually
                 self.apply_changes_upto(trace, slot - 1);
@@ -452,6 +456,10 @@ impl State {
         }
         self.startup_received_slot
             .insert(pub_key_fixed, composite_value);
+
+        if slot > self.highest_startup_slot {
+            self.highest_startup_slot = slot;
+        }
 
         // Check if there was a previous owner for this public key and clean up if changed
         if let Some((previous_owner, _)) = self.account_state.get(&pub_key_fixed) {
