@@ -10,8 +10,7 @@ use solana_rpc_client::rpc_client::RpcClient;
 
 type BlockAccountChanges = HashMap<u64, AccountChanges>;
 pub type AccountChanges = HashMap<[u8; 64], AccountWithWriteVersion>;
-pub type AccountDataHash = HashMap<[u8; 64], u64>; // owner(32) + pubkey(32)
-pub type AccountOwners = HashMap<[u8; 32], [u8; 32]>; // pubkey(32) -> owner(32)
+pub type AccountState = HashMap<[u8; 32], ([u8; 32], u64)>; // pubkey(32) -> (owner(32), data_hash)
 pub type StartupAccountReceivedSlot = HashMap<[u8; 32], u64>; // pubkey(32) -> composite value (slot << 25 + write_version)
 
 pub type Transactions = HashMap<u64, Vec<ConfirmTransactionWithIndex>>;
@@ -93,8 +92,7 @@ pub struct State {
 
     pub block_account_changes: BlockAccountChanges,
 
-    pub account_data_hash: AccountDataHash, // only updated when we print the block
-    pub account_owners: AccountOwners,      // only updated when we print the block
+    pub account_state: AccountState, // pubkey -> (owner, data_hash), only updated when we print the block
     pub startup_received_slot: StartupAccountReceivedSlot, // only used during startup phase
 
     pub block_infos: BlockInfoMap,
@@ -131,8 +129,7 @@ impl State {
             initialized: false,
 
             block_account_changes: HashMap::default(),
-            account_data_hash: HashMap::default(),
-            account_owners: HashMap::default(),
+            account_state: HashMap::default(),
             startup_received_slot: HashMap::default(),
             block_infos: HashMap::default(),
             confirmed_slots: HashMap::default(),
@@ -161,8 +158,7 @@ impl State {
             cursor: self.cursor,
             lib: self.lib,
             block_account_changes: self.block_account_changes.clone(),
-            account_data_hash: self.account_data_hash.clone(),
-            account_owners: self.account_owners.clone(),
+            account_state: self.account_state.clone(),
             startup_received_slot: self.startup_received_slot.clone(),
             block_infos: self.block_infos.clone(),
             confirmed_slots: self.confirmed_slots.clone(),
@@ -457,46 +453,18 @@ impl State {
         self.startup_received_slot
             .insert(pub_key_fixed, composite_value);
 
-        // Check if there was a previous owner for this public key
-        if let Some(previous_owner) = self.account_owners.get(&pub_key_fixed) {
+        // Check if there was a previous owner for this public key and clean up if changed
+        if let Some((previous_owner, _)) = self.account_state.get(&pub_key_fixed) {
             if previous_owner != &owner_fixed {
-                // Previous owner is different, so delete the old entry from account_data_hash
-                let mut previous_owner_account_key = [0u8; 64];
-                // SAFETY: previous_owner is 32 bytes and pub_key_fixed is 32 bytes
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        previous_owner.as_ptr(),
-                        previous_owner_account_key.as_mut_ptr(),
-                        32,
-                    );
-                    std::ptr::copy_nonoverlapping(
-                        pub_key_fixed.as_ptr(),
-                        previous_owner_account_key.as_mut_ptr().add(32),
-                        32,
-                    );
-                }
-                self.account_data_hash.remove(&previous_owner_account_key);
+                // Owner changed: the old entry (under the previous owner) must be removed
+                self.account_state.remove(&pub_key_fixed);
             }
         }
 
-        // Create owner+pubkey composite key (64 bytes total)
-        let mut owner_account_key = [0u8; 64];
-        // SAFETY: owner_fixed is 32 bytes and pub_key_fixed is 32 bytes
-        unsafe {
-            std::ptr::copy_nonoverlapping(owner_fixed.as_ptr(), owner_account_key.as_mut_ptr(), 32);
-            std::ptr::copy_nonoverlapping(
-                pub_key_fixed.as_ptr(),
-                owner_account_key.as_mut_ptr().add(32),
-                32,
-            );
-        }
-
         if deleted {
-            self.account_data_hash.remove(&owner_account_key);
-            self.account_owners.remove(&pub_key_fixed);
+            self.account_state.remove(&pub_key_fixed);
         } else {
-            self.account_data_hash.insert(owner_account_key, data_hash);
-            self.account_owners.insert(pub_key_fixed, owner_fixed);
+            self.account_state.insert(pub_key_fixed, (owner_fixed, data_hash));
         }
     }
 
@@ -666,8 +634,7 @@ impl State {
         for current_slot in first_slot..=slot {
             let (_, changes) = filter_account_changes(
                 self.block_account_changes.get(&current_slot),
-                &self.account_data_hash,
-                &self.account_owners,
+                &self.account_state,
                 current_slot,
                 trace,
             );
@@ -750,8 +717,7 @@ impl State {
 
             let (effective_account_changes, cache_changes) = filter_account_changes(
                 self.block_account_changes.get(&slot),
-                &self.account_data_hash,
-                &self.account_owners,
+                &self.account_state,
                 slot,
                 trace,
             );
@@ -796,15 +762,10 @@ impl State {
                         * (size_of::<(u64, AccountChanges)>() + 1)
                         + bac_inner_bytes;
 
-                    // account_data_hash: HashMap<[u8;64], u64>  — 72 bytes/entry data
-                    let adh_entries = self.account_data_hash.len();
+                    // account_state: HashMap<[u8;32], ([u8;32], u64)>  — 72 bytes/entry data
+                    let adh_entries = self.account_state.len();
                     let adh_bytes =
-                        self.account_data_hash.capacity() * (size_of::<([u8; 64], u64)>() + 1);
-
-                    // account_owners: HashMap<[u8;32], [u8;32]>  — 64 bytes/entry data
-                    let ao_entries = self.account_owners.len();
-                    let ao_bytes =
-                        self.account_owners.capacity() * (size_of::<([u8; 32], [u8; 32])>() + 1);
+                        self.account_state.capacity() * (size_of::<([u8; 32], ([u8; 32], u64))>() + 1);
 
                     // startup_received_slot: HashMap<[u8;32], u64>  — 40 bytes/entry data
                     let srs_entries = self.startup_received_slot.len();
@@ -834,8 +795,7 @@ impl State {
                     const MIB: usize = 1024 * 1024;
                     info!(
                         "RAM[slot={}] block_account_changes: {} outer / {} inner / {} MiB; \
-                        account_data_hash: {} / {} MiB; \
-                        account_owners: {} / {} MiB; \
+                        account_state: {} / {} MiB; \
                         startup_received_slot: {} / {} MiB; \
                         block_infos: {} / {} MiB; \
                         confirmed_slots: {} / {} MiB; \
@@ -847,8 +807,6 @@ impl State {
                         bac_bytes / MIB,
                         adh_entries,
                         adh_bytes / MIB,
-                        ao_entries,
-                        ao_bytes / MIB,
                         srs_entries,
                         srs_bytes / MIB,
                         bi_entries,
@@ -879,38 +837,25 @@ impl State {
     }
 
     pub fn get_hash_count(&self) -> usize {
-        self.account_data_hash.len()
+        self.account_state.len()
     }
 
     fn apply_cache_changes(&mut self, changes: Vec<StateChange>) {
         for change in changes {
-            let address_vec = change.address;
-            let owner_vec = change.owner;
-            let data_hash = change.data_hash;
-            let deleted = change.deleted;
-
-            // Convert to fixed-length arrays (assume exactly 32 bytes)
             let mut address_fixed = [0u8; 32];
             let mut owner_fixed = [0u8; 32];
 
-            address_fixed.copy_from_slice(&address_vec);
-            owner_fixed.copy_from_slice(&owner_vec);
+            address_fixed.copy_from_slice(&change.address);
+            owner_fixed.copy_from_slice(&change.owner);
 
-            // Create composite key (owner + address)
-            let mut owner_account_key = [0u8; 64];
-            owner_account_key[..32].copy_from_slice(&owner_fixed);
-            owner_account_key[32..].copy_from_slice(&address_fixed);
-
-            if deleted {
-                self.account_data_hash.remove(&owner_account_key);
-                if let Some(cached) = self.account_owners.get(&address_fixed) {
-                    if cached == &owner_fixed {
-                        self.account_owners.remove(&address_fixed);
+            if change.deleted {
+                if let Some((cached_owner, _)) = self.account_state.get(&address_fixed) {
+                    if cached_owner == &owner_fixed {
+                        self.account_state.remove(&address_fixed);
                     }
                 }
             } else {
-                self.account_data_hash.insert(owner_account_key, data_hash);
-                self.account_owners.insert(address_fixed, owner_fixed); // last one wins
+                self.account_state.insert(address_fixed, (owner_fixed, change.data_hash));
             }
         }
     }
@@ -925,15 +870,14 @@ struct StateChange {
 
 fn filter_account_changes(
     changes: Option<&HashMap<[u8; 64], AccountWithWriteVersion>>,
-    account_data_hash: &AccountDataHash,
-    account_owners: &AccountOwners,
+    account_state: &AccountState,
     slot: u64,
     trace: bool,
 ) -> (Vec<Account>, Vec<StateChange>) {
     let mut filtered_changes: Vec<AccountFixed> = Vec::new();
     let mut state_changes: Vec<StateChange> = Vec::new();
 
-    let mut in_block_owners = AccountOwners::default();
+    let mut in_block_owners: HashMap<[u8; 32], [u8; 32]> = HashMap::default();
     let mut ordered_changes: Vec<AccountWithWriteVersion> = Vec::new();
 
     if let Some(changes) = changes {
@@ -955,26 +899,28 @@ fn filter_account_changes(
     });
 
     for account_with_version in ordered_changes.into_iter() {
-        let owner_account_key_fixed = &account_with_version.owner_account_key.unwrap();
         let account = &account_with_version.account;
-        account_with_version.write_version;
 
         let mut should_include = false;
-        if let Some(cached_hash) = account_data_hash.get(owner_account_key_fixed) {
-            if *cached_hash != account_with_version.data_hash {
-                should_include = true;
-            }
-            if account.deleted {
-                should_include = true;
-            }
-        } else {
-            should_include = true;
-        }
 
         let cached_owner = in_block_owners
             .get(&account.address)
-            .or_else(|| account_owners.get(&account.address))
-            .copied();
+            .copied()
+            .or_else(|| account_state.get(&account.address).map(|(o, _)| *o));
+
+        // Check hash only if owner matches persisted state (and no in-block ownership change)
+        let cached_hash_for_owner = account_state
+            .get(&account.address)
+            .and_then(|(o, h)| if *o == account.owner { Some(*h) } else { None });
+
+        if let Some(cached_hash) = cached_hash_for_owner {
+            if cached_hash != account_with_version.data_hash || account.deleted {
+                should_include = true;
+            }
+        } else {
+            // No matching owner+pubkey in persisted state → new/changed account
+            should_include = true;
+        }
 
         let different_previous_owner = match cached_owner {
             None => None,
@@ -1128,11 +1074,10 @@ mod tests {
 
     #[test]
     fn test_filter_account_changes_empty_changes() {
-        let account_data_hash: AccountDataHash = HashMap::default();
-        let account_owners: AccountOwners = HashMap::default();
+        let account_state: AccountState = HashMap::default();
 
         let (filtered_changes, state_changes) =
-            filter_account_changes(None, &account_data_hash, &account_owners, 0, false);
+            filter_account_changes(None, &account_state, 0, false);
 
         assert!(filtered_changes.is_empty());
         assert!(state_changes.is_empty());
@@ -1141,8 +1086,7 @@ mod tests {
     #[test]
     fn test_filter_account_changes_new_account() {
         let mut changes = HashMap::default();
-        let account_data_hash = HashMap::default();
-        let account_owners = HashMap::default();
+        let account_state: AccountState = HashMap::default();
 
         let address = vec![
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
@@ -1161,8 +1105,7 @@ mod tests {
 
         let (filtered_changes, state_changes) = filter_account_changes(
             Some(&changes),
-            &account_data_hash,
-            &account_owners,
+            &account_state,
             0,
             false,
         );
@@ -1186,8 +1129,7 @@ mod tests {
     #[test]
     fn test_filter_account_changes_same_data_hash_not_deleted() {
         let mut changes = HashMap::default();
-        let mut account_data_hash: AccountDataHash = HashMap::default();
-        let account_owners: AccountOwners = HashMap::default();
+        let mut account_state: AccountState = HashMap::default();
 
         let address = vec![
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
@@ -1203,13 +1145,11 @@ mod tests {
 
         let owner_account_key = create_composite_key(&owner, &address);
         changes.insert(owner_account_key, account_with_version);
-        let owner_account_key_fixed = owner_account_key;
-        account_data_hash.insert(owner_account_key_fixed, 123); // Same hash
+        account_state.insert(vec_to_fixed_32(&address), (vec_to_fixed_32(&owner), 123)); // Same hash
 
         let (filtered_changes, state_changes) = filter_account_changes(
             Some(&changes),
-            &account_data_hash,
-            &account_owners,
+            &account_state,
             0,
             false,
         );
@@ -1222,8 +1162,7 @@ mod tests {
     #[test]
     fn test_filter_account_changes_different_data_hash() {
         let mut changes = HashMap::default();
-        let mut account_data_hash: AccountDataHash = HashMap::default();
-        let account_owners: AccountOwners = HashMap::default();
+        let mut account_state: AccountState = HashMap::default();
 
         let address = vec![
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
@@ -1239,13 +1178,11 @@ mod tests {
 
         let owner_account_key = create_composite_key(&owner, &address);
         changes.insert(owner_account_key, account_with_version);
-        let owner_account_key_fixed = owner_account_key;
-        account_data_hash.insert(owner_account_key_fixed, 456); // Different hash
+        account_state.insert(vec_to_fixed_32(&address), (vec_to_fixed_32(&owner), 456)); // Different hash
 
         let (filtered_changes, state_changes) = filter_account_changes(
             Some(&changes),
-            &account_data_hash,
-            &account_owners,
+            &account_state,
             0,
             false,
         );
@@ -1261,8 +1198,7 @@ mod tests {
     #[test]
     fn test_filter_account_changes_deleted_account() {
         let mut changes = HashMap::default();
-        let mut account_data_hash: AccountDataHash = HashMap::default();
-        let account_owners: AccountOwners = HashMap::default();
+        let mut account_state: AccountState = HashMap::default();
 
         let address = vec![
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
@@ -1278,13 +1214,11 @@ mod tests {
 
         let owner_account_key = create_composite_key(&owner, &address);
         changes.insert(owner_account_key, account_with_version);
-        let owner_account_key_fixed = owner_account_key;
-        account_data_hash.insert(owner_account_key_fixed, 123); // Same hash but account is deleted
+        account_state.insert(vec_to_fixed_32(&address), (vec_to_fixed_32(&owner), 123)); // Same hash but account is deleted
 
         let (filtered_changes, state_changes) = filter_account_changes(
             Some(&changes),
-            &account_data_hash,
-            &account_owners,
+            &account_state,
             0,
             false,
         );
@@ -1301,8 +1235,7 @@ mod tests {
     #[test]
     fn test_filter_account_changes_ownership_change() {
         let mut changes = HashMap::default();
-        let account_data_hash: AccountDataHash = HashMap::default();
-        let mut account_owners: AccountOwners = HashMap::default();
+        let mut account_state: AccountState = HashMap::default();
 
         let address = vec![
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
@@ -1324,12 +1257,11 @@ mod tests {
             create_composite_key(&new_owner, &address),
             account_with_version,
         );
-        account_owners.insert(vec_to_fixed_32(&address), vec_to_fixed_32(&old_owner)); // Different owner
+        account_state.insert(vec_to_fixed_32(&address), (vec_to_fixed_32(&old_owner), 0)); // Different owner
 
         let (filtered_changes, state_changes) = filter_account_changes(
             Some(&changes),
-            &account_data_hash,
-            &account_owners,
+            &account_state,
             0,
             false,
         );
@@ -1365,8 +1297,7 @@ mod tests {
     #[test]
     fn test_filter_account_changes_create_changeowner_delete() {
         let mut changes = HashMap::default();
-        let account_data_hash: AccountDataHash = HashMap::default();
-        let account_owners: AccountOwners = HashMap::default();
+        let account_state: AccountState = HashMap::default();
 
         let address = vec![
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
@@ -1394,8 +1325,7 @@ mod tests {
 
         let (mut filtered_changes, state_changes) = filter_account_changes(
             Some(&changes),
-            &account_data_hash,
-            &account_owners,
+            &account_state,
             0,
             false,
         );
@@ -1440,8 +1370,7 @@ mod tests {
     #[test]
     fn test_filter_account_changes_multiple_accounts_sorted() {
         let mut changes = HashMap::default();
-        let account_data_hash: AccountDataHash = HashMap::default();
-        let account_owners: AccountOwners = HashMap::default();
+        let account_state: AccountState = HashMap::default();
 
         // Create accounts with addresses that will test sorting
         let address1 = vec![
@@ -1486,8 +1415,7 @@ mod tests {
 
         let (filtered_changes, state_changes) = filter_account_changes(
             Some(&changes),
-            &account_data_hash,
-            &account_owners,
+            &account_state,
             0,
             false,
         );
@@ -1504,8 +1432,7 @@ mod tests {
     #[test]
     fn test_filter_account_changes_complex_scenario() {
         let mut changes = HashMap::default();
-        let mut account_data_hash: AccountDataHash = HashMap::default();
-        let mut account_owners: AccountOwners = HashMap::default();
+        let mut account_state: AccountState = HashMap::default();
 
         // Account 1: New account (should be included)
         let address1 = vec![
@@ -1536,7 +1463,7 @@ mod tests {
         let account_with_version2 = create_test_account_with_version(account2, 2, 222);
         let owner_account_key2 = create_composite_key(&owner2, &address2);
         changes.insert(owner_account_key2, account_with_version2);
-        account_data_hash.insert(owner_account_key2, 222); // Same hash
+        account_state.insert(vec_to_fixed_32(&address2), (vec_to_fixed_32(&owner2), 222)); // Same hash
 
         // Account 3: Ownership change (should include both old and new owner versions)
         let address3 = vec![
@@ -1557,7 +1484,7 @@ mod tests {
         let account_with_version3 = create_test_account_with_version(account3, 3, 333);
         let owner_account_key3 = create_composite_key(&new_owner3, &address3);
         changes.insert(owner_account_key3, account_with_version3);
-        account_owners.insert(vec_to_fixed_32(&address3), vec_to_fixed_32(&old_owner3));
+        account_state.insert(vec_to_fixed_32(&address3), (vec_to_fixed_32(&old_owner3), 0));
 
         // Account 4: Deleted account with same hash (should be included)
         let address4 = vec![
@@ -1573,12 +1500,11 @@ mod tests {
         let account_with_version4 = create_test_account_with_version(account4, 4, 444);
         let owner_account_key4 = create_composite_key(&owner4, &address4);
         changes.insert(owner_account_key4, account_with_version4);
-        account_data_hash.insert(owner_account_key4, 444); // Same hash but deleted
+        account_state.insert(vec_to_fixed_32(&address4), (vec_to_fixed_32(&owner4), 444)); // Same hash but deleted
 
         let (filtered_changes, state_changes) = filter_account_changes(
             Some(&changes),
-            &account_data_hash,
-            &account_owners,
+            &account_state,
             0,
             false,
         );
@@ -1605,8 +1531,7 @@ mod tests {
 
         state.apply_cache_changes(changes);
 
-        assert!(state.account_data_hash.is_empty());
-        assert!(state.account_owners.is_empty());
+        assert_eq!(state.get_hash_count(), 0);
     }
 
     #[test]
@@ -1631,17 +1556,7 @@ mod tests {
 
         state.apply_cache_changes(vec![change]);
 
-        // Check that account_owners is updated
-        let address_fixed = vec_to_fixed_32(&address);
-        let owner_fixed = vec_to_fixed_32(&owner);
-        assert_eq!(state.account_owners.get(&address_fixed), Some(&owner_fixed));
-
-        // Check that account_data_hash is updated with the combined key
-        let expected_key_fixed = create_composite_key(&owner, &address);
-        assert_eq!(
-            state.account_data_hash.get(&expected_key_fixed),
-            Some(&data_hash)
-        );
+        assert_in_state(&state, &address, &owner, data_hash);
     }
 
     #[test]
@@ -1657,37 +1572,25 @@ mod tests {
         ];
         let data_hash = 123u64;
 
-        // First add an account
-        let address_fixed = vec_to_fixed_32(&address);
-        let owner_fixed = vec_to_fixed_32(&owner);
-        let owner_account_key_fixed = create_composite_key(&owner, &address);
-
-        state.account_owners.insert(address_fixed, owner_fixed);
-        state
-            .account_data_hash
-            .insert(owner_account_key_fixed, data_hash);
-
-        // Verify it's there
-        assert!(state.account_owners.contains_key(&address_fixed));
-        assert!(state
-            .account_data_hash
-            .contains_key(&owner_account_key_fixed));
+        // Setup: add the account via apply_cache_changes
+        state.apply_cache_changes(vec![StateChange {
+            address: address.clone(),
+            owner: owner.clone(),
+            data_hash,
+            deleted: false,
+        }]);
+        assert_in_state(&state, &address, &owner, data_hash);
 
         // Now delete it
-        let change = StateChange {
+        state.apply_cache_changes(vec![StateChange {
             address: address.clone(),
             owner: owner.clone(),
             data_hash,
             deleted: true,
-        };
+        }]);
 
-        state.apply_cache_changes(vec![change]);
-
-        // Check that both are removed
-        assert!(!state.account_owners.contains_key(&address_fixed));
-        assert!(!state
-            .account_data_hash
-            .contains_key(&owner_account_key_fixed));
+        // Verify it was removed
+        assert_not_in_state(&state, &address, &owner, data_hash);
     }
 
     #[test]
@@ -1747,35 +1650,9 @@ mod tests {
 
         state.apply_cache_changes(changes);
 
-        // Check all accounts are added
-        let address1_fixed = vec_to_fixed_32(&address1);
-        let owner1_fixed = vec_to_fixed_32(&owner1);
-        let address2_fixed = vec_to_fixed_32(&address2);
-        let owner2_fixed = vec_to_fixed_32(&owner2);
-        let address3_fixed = vec_to_fixed_32(&address3);
-        let owner3_fixed = vec_to_fixed_32(&owner3);
-
-        assert_eq!(
-            state.account_owners.get(&address1_fixed),
-            Some(&owner1_fixed)
-        );
-        assert_eq!(
-            state.account_owners.get(&address2_fixed),
-            Some(&owner2_fixed)
-        );
-        assert_eq!(
-            state.account_owners.get(&address3_fixed),
-            Some(&owner3_fixed)
-        );
-
-        // Check all data hashes are added
-        let key1_fixed = create_composite_key(&owner1, &address1);
-        let key2_fixed = create_composite_key(&owner2, &address2);
-        let key3_fixed = create_composite_key(&owner3, &address3);
-
-        assert_eq!(state.account_data_hash.get(&key1_fixed), Some(&data_hash1));
-        assert_eq!(state.account_data_hash.get(&key2_fixed), Some(&data_hash2));
-        assert_eq!(state.account_data_hash.get(&key3_fixed), Some(&data_hash3));
+        assert_in_state(&state, &address1, &owner1, data_hash1);
+        assert_in_state(&state, &address2, &owner2, data_hash2);
+        assert_in_state(&state, &address3, &owner3, data_hash3);
     }
 
     #[test]
@@ -1803,17 +1680,10 @@ mod tests {
         ];
         let data_hash2 = 222u64;
 
-        let address1_fixed = vec_to_fixed_32(&address1);
-        let owner1_fixed = vec_to_fixed_32(&owner1);
-        let address2_fixed = vec_to_fixed_32(&address2);
-        let owner2_fixed = vec_to_fixed_32(&owner2);
-        let key1_fixed = create_composite_key(&owner1, &address1);
-        let key2_fixed = create_composite_key(&owner2, &address2);
-
-        state.account_owners.insert(address1_fixed, owner1_fixed);
-        state.account_data_hash.insert(key1_fixed, data_hash1);
-        state.account_owners.insert(address2_fixed, owner2_fixed);
-        state.account_data_hash.insert(key2_fixed, data_hash2);
+        state.apply_cache_changes(vec![
+            StateChange { address: address1.clone(), owner: owner1.clone(), data_hash: data_hash1, deleted: false },
+            StateChange { address: address2.clone(), owner: owner2.clone(), data_hash: data_hash2, deleted: false },
+        ]);
 
         // Now apply mixed changes: delete one, add one, update one
         let address3 = vec![
@@ -1852,26 +1722,15 @@ mod tests {
 
         state.apply_cache_changes(changes);
 
-        // Check address1 is deleted
-        assert!(!state.account_owners.contains_key(&address1_fixed));
-        assert!(!state.account_data_hash.contains_key(&key1_fixed));
+        // address1 was deleted
+        assert_not_in_state(&state, &address1, &owner1, data_hash1);
 
-        // Check address2 is updated
-        assert_eq!(
-            state.account_owners.get(&address2_fixed),
-            Some(&owner2_fixed)
-        );
-        assert_eq!(state.account_data_hash.get(&key2_fixed), Some(&999u64));
+        // address2 was updated with new hash
+        assert_not_in_state(&state, &address2, &owner2, data_hash2); // old hash no longer matches
+        assert_in_state(&state, &address2, &owner2, 999u64);          // new hash is captured
 
-        // Check address3 is added
-        let address3_fixed = vec_to_fixed_32(&address3);
-        let owner3_fixed = vec_to_fixed_32(&owner3);
-        assert_eq!(
-            state.account_owners.get(&address3_fixed),
-            Some(&owner3_fixed)
-        );
-        let key3_fixed = create_composite_key(&owner3, &address3);
-        assert_eq!(state.account_data_hash.get(&key3_fixed), Some(&data_hash3));
+        // address3 was added
+        assert_in_state(&state, &address3, &owner3, data_hash3);
     }
 
     #[test]
@@ -1893,12 +1752,12 @@ mod tests {
         let data_hash = 123u64;
 
         // Set up initial state with old owner
-        let address_fixed = vec_to_fixed_32(&address);
-        let old_owner_fixed = vec_to_fixed_32(&old_owner);
-        let old_key_fixed = create_composite_key(&old_owner, &address);
-
-        state.account_owners.insert(address_fixed, old_owner_fixed);
-        state.account_data_hash.insert(old_key_fixed, data_hash);
+        state.apply_cache_changes(vec![StateChange {
+            address: address.clone(),
+            owner: old_owner.clone(),
+            data_hash,
+            deleted: false,
+        }]);
 
         // Apply ownership change
         let change = StateChange {
@@ -1910,21 +1769,9 @@ mod tests {
 
         state.apply_cache_changes(vec![change]);
 
-        // Check that account_owners is updated to new owner
-        let new_owner_fixed = vec_to_fixed_32(&new_owner);
-        assert_eq!(
-            state.account_owners.get(&address_fixed),
-            Some(&new_owner_fixed)
-        );
-
-        // Check that new key is added
-        let new_key_fixed = create_composite_key(&new_owner, &address);
-        assert_eq!(
-            state.account_data_hash.get(&new_key_fixed),
-            Some(&data_hash)
-        );
-
-        // Note: the apply_cache should be called with a 'deleted: true' on the old state. we're testing an incomplete scenario
+        // New owner should now be in state
+        assert_in_state(&state, &address, &new_owner, data_hash);
+        // Note: old owner entry still present since we only applied incomplete scenario (no deleted:true for old owner)
     }
 
     #[test]
@@ -1964,22 +1811,8 @@ mod tests {
 
         state.apply_cache_changes(changes);
 
-        // Verify new account is added and old account with old owner is deleted
-        let address_fixed = vec_to_fixed_32(&address);
-        let owner2_fixed = vec_to_fixed_32(&owner2);
-        assert_eq!(
-            state.account_owners.get(&address_fixed),
-            Some(&owner2_fixed)
-        );
-
-        let new_key_fixed = create_composite_key(&owner2, &address);
-        let old_key_fixed = create_composite_key(&owner1, &address);
-
-        assert_eq!(
-            state.account_data_hash.get(&new_key_fixed),
-            Some(&data_hash2)
-        );
-        assert_eq!(state.account_data_hash.get(&old_key_fixed), None);
+        assert_in_state(&state, &address, &owner2, data_hash2);
+        assert_not_in_state(&state, &address, &owner1, data_hash1);
     }
 
     // Helper function to create a test State instance
@@ -2022,6 +1855,52 @@ mod tests {
             false,
             DevelopmentConfig::default(),
         )
+    }
+
+    /// Returns a create_account_block result for a given set of changes applied against
+    /// the current state. Use this to check what would be emitted rather than inspecting
+    /// internal maps directly.
+    fn account_block_for_changes(state: &State, slot_changes: AccountChanges) -> crate::pb::sf::solana::r#type::v1::AccountBlock {
+        let block_info = simple_block_info(0);
+        let (account_changes, _) = filter_account_changes(
+            Some(&slot_changes),
+            &state.account_state,
+            0,
+            false,
+        );
+        create_account_block(account_changes, &block_info)
+    }
+
+    /// Assert that this (owner, pubkey, data_hash) combination is already captured in
+    /// the state – i.e. create_account_block would NOT re-emit it (no change detected).
+    fn assert_in_state(state: &State, pubkey: &[u8], owner: &[u8], data_hash: u64) {
+        let mut changes: AccountChanges = HashMap::default();
+        let key = create_composite_key(owner, pubkey);
+        let account = create_test_account(pubkey.to_vec(), owner.to_vec(), vec![], false);
+        changes.insert(key, create_test_account_with_version(account, 1, data_hash));
+        let block = account_block_for_changes(state, changes);
+        assert!(
+            block.accounts.is_empty(),
+            "Expected account to already be in state (create_account_block should not re-emit it), but it was included. \
+             pubkey={:?} owner={:?} hash={}",
+            pubkey, owner, data_hash
+        );
+    }
+
+    /// Assert that this (owner, pubkey) is NOT captured in the state – i.e.
+    /// create_account_block WOULD emit it (new or changed account).
+    fn assert_not_in_state(state: &State, pubkey: &[u8], owner: &[u8], data_hash: u64) {
+        let mut changes: AccountChanges = HashMap::default();
+        let key = create_composite_key(owner, pubkey);
+        let account = create_test_account(pubkey.to_vec(), owner.to_vec(), vec![], false);
+        changes.insert(key, create_test_account_with_version(account, 1, data_hash));
+        let block = account_block_for_changes(state, changes);
+        assert!(
+            !block.accounts.is_empty(),
+            "Expected account to NOT be in state (create_account_block should emit it), but it was deduplicated. \
+             pubkey={:?} owner={:?}",
+            pubkey, owner
+        );
     }
 
     /// Assert that logs contain expected messages in order
@@ -2274,103 +2153,44 @@ mod tests {
         let data_hash_3 = gxhash64(b"data.1", 76);
         let data_hash_4 = gxhash64(b"data.4", 76);
 
-        let owner_account_key_fixed = create_composite_key(OWNER_KEY_1, PUB_KEY_1);
-        let pub_key_1_fixed = vec_to_fixed_32(PUB_KEY_1);
-
         state.first_block_to_process = Some(10);
 
         // set startup value with slot=8 -> must be set
         state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_1, 8, 1, false);
-
-        assert_eq!(
-            state
-                .account_data_hash
-                .get(&owner_account_key_fixed)
-                .unwrap(),
-            &data_hash_1
-        );
+        assert_in_state(&state, PUB_KEY_1, OWNER_KEY_1, data_hash_1);
 
         // set startup value with slot=7 -> unchanged
         state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_2, 7, 1, false);
-        assert_eq!(
-            state
-                .account_data_hash
-                .get(&owner_account_key_fixed)
-                .unwrap(),
-            &data_hash_1
-        );
+        assert_in_state(&state, PUB_KEY_1, OWNER_KEY_1, data_hash_1);
 
         // set startup value with slot=8, higher write_version -> changed
         state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_2, 8, 4, false);
-        assert_eq!(
-            state
-                .account_data_hash
-                .get(&owner_account_key_fixed)
-                .unwrap(),
-            &data_hash_2
-        );
+        assert_in_state(&state, PUB_KEY_1, OWNER_KEY_1, data_hash_2);
 
         // set startup value with slot=9, lower write_version -> changed
         state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_3, 9, 0, false);
-        assert_eq!(
-            state
-                .account_data_hash
-                .get(&owner_account_key_fixed)
-                .unwrap(),
-            &data_hash_3
-        );
+        assert_in_state(&state, PUB_KEY_1, OWNER_KEY_1, data_hash_3);
 
         // set startup value with slot=10, higher write_version, deleted=true -> all traces removed
         state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_4, 10, 1, true);
-
-        // verify all traces to the account are removed from hashes
-        assert!(state
-            .account_data_hash
-            .get(&owner_account_key_fixed)
-            .is_none());
-        assert!(state.account_owners.get(&pub_key_1_fixed).is_none());
+        assert_not_in_state(&state, PUB_KEY_1, OWNER_KEY_1, data_hash_4);
 
         // test with different owner: set up account with OWNER_KEY_1 again
         state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_1, 11, 0, false);
-        assert_eq!(
-            state
-                .account_data_hash
-                .get(&owner_account_key_fixed)
-                .unwrap(),
-            &data_hash_1
-        );
-        assert_eq!(
-            state.account_owners.get(&pub_key_1_fixed).unwrap(),
-            &vec_to_fixed_32(OWNER_KEY_1)
-        );
+        assert_in_state(&state, PUB_KEY_1, OWNER_KEY_1, data_hash_1);
 
         // set with different owner (OWNER_KEY_11111111111111111111111111111111) and deleted=true
         let different_owner = OWNER_KEY_11111111111111111111111111111111;
         state.set_account_on_startup(PUB_KEY_1, different_owner, data_hash_4, 12, 0, true);
-
-        // Verify previous values with the other owner are also gone
-        assert!(state
-            .account_data_hash
-            .get(&owner_account_key_fixed)
-            .is_none());
-        assert!(state.account_owners.get(&pub_key_1_fixed).is_none());
+        assert_not_in_state(&state, PUB_KEY_1, OWNER_KEY_1, data_hash_4);
 
         // set a value 'before' the block where it got deleted. it should remain deleted
         state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_1, 11, 0, false);
-        assert!(state
-            .account_data_hash
-            .get(&owner_account_key_fixed)
-            .is_none());
+        assert_not_in_state(&state, PUB_KEY_1, OWNER_KEY_1, data_hash_1);
 
-        // set a value 'after' the block where it got deleted. it should remain deleted
+        // set a value 'after' the block where it got deleted. it should now be present
         state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_1, 12, 1, false);
-        assert_eq!(
-            state
-                .account_data_hash
-                .get(&owner_account_key_fixed)
-                .unwrap(),
-            &data_hash_1
-        );
+        assert_in_state(&state, PUB_KEY_1, OWNER_KEY_1, data_hash_1);
     }
 
     #[test]
@@ -2394,46 +2214,12 @@ mod tests {
 
         // First call with owner1
         state.set_account_on_startup(PUB_KEY_1, owner1, data_hash1, slot1, 0, false);
-
-        // Verify owner1+pubkey entry exists in account_data_hash
-        let owner1_account_key_fixed = create_composite_key(owner1, PUB_KEY_1);
-        let pub_key_1_fixed = vec_to_fixed_32(PUB_KEY_1);
-        let owner1_fixed = vec_to_fixed_32(owner1);
-        assert_eq!(
-            state
-                .account_data_hash
-                .get(&owner1_account_key_fixed)
-                .unwrap(),
-            &data_hash1
-        );
-        assert_eq!(
-            state.account_owners.get(&pub_key_1_fixed).unwrap(),
-            &owner1_fixed
-        );
+        assert_in_state(&state, PUB_KEY_1, owner1, data_hash1);
 
         // Second call with owner2 and higher slot number
         state.set_account_on_startup(PUB_KEY_1, owner2, data_hash2, slot2, 0, false);
-
-        // Verify that owner1+pubkey entry is deleted from account_data_hash
-        assert!(state
-            .account_data_hash
-            .get(&owner1_account_key_fixed)
-            .is_none());
-
-        // Verify that owner2+pubkey entry exists in account_data_hash
-        let owner2_account_key_fixed = create_composite_key(owner2, PUB_KEY_1);
-        let owner2_fixed = vec_to_fixed_32(owner2);
-        assert_eq!(
-            state
-                .account_data_hash
-                .get(&owner2_account_key_fixed)
-                .unwrap(),
-            &data_hash2
-        );
-        assert_eq!(
-            state.account_owners.get(&pub_key_1_fixed).unwrap(),
-            &owner2_fixed
-        );
+        assert_not_in_state(&state, PUB_KEY_1, owner1, data_hash1); // old owner entry removed
+        assert_in_state(&state, PUB_KEY_1, owner2, data_hash2);     // new owner entry present
     }
 
     #[test]
@@ -2640,13 +2426,6 @@ mod tests {
         assert_logs_contain_ordered(expected_logs);
     }
 
-    fn concat_keys(owner: &[u8], account: &[u8]) -> [u8; 64] {
-        let mut result = [0u8; 64];
-        result[..32].copy_from_slice(owner);
-        result[32..].copy_from_slice(account);
-        result
-    }
-
     #[test]
     fn test_integration_cursor_after_start() {
         // Create state with noop BlockPrinter
@@ -2674,18 +2453,9 @@ mod tests {
             expected_logs.push(format!("printing account_block {} (noop mode)", slot));
         }
 
-        assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_1)],
-            12345
-        );
-        assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_2)],
-            23456
-        );
-        assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_3)],
-            34567
-        );
+        assert_in_state(&state, PUB_KEY_1, OWNER_KEY_1, 12345);
+        assert_in_state(&state, PUB_KEY_2, OWNER_KEY_1, 23456);
+        assert_in_state(&state, PUB_KEY_3, OWNER_KEY_1, 34567);
 
         // Validate captured logs
         assert_logs_contain_ordered(expected_logs);
@@ -2716,18 +2486,9 @@ mod tests {
             expected_logs.push(format!("printing account_block {} (noop mode)", slot));
         }
 
-        assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_1)],
-            12345
-        );
-        assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_2)],
-            23456
-        );
-        assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_3)],
-            34567
-        );
+        assert_in_state(&state, PUB_KEY_1, OWNER_KEY_1, 12345);
+        assert_in_state(&state, PUB_KEY_2, OWNER_KEY_1, 23456);
+        assert_in_state(&state, PUB_KEY_3, OWNER_KEY_1, 34567);
 
         // Validate captured logs
         assert_logs_contain_ordered(expected_logs);
@@ -2758,18 +2519,9 @@ mod tests {
             expected_logs.push(format!("printing account_block {} (noop mode)", slot));
         }
 
-        assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_1)],
-            12345
-        );
-        assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_2)],
-            23456
-        );
-        assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_3)],
-            34567
-        );
+        assert_in_state(&state, PUB_KEY_1, OWNER_KEY_1, 12345);
+        assert_in_state(&state, PUB_KEY_2, OWNER_KEY_1, 23456);
+        assert_in_state(&state, PUB_KEY_3, OWNER_KEY_1, 34567);
 
         // Validate captured logs
         assert_logs_contain_ordered(expected_logs);
@@ -2802,18 +2554,9 @@ mod tests {
         }
 
         // this should be inserted even if we don't actually SEND the block
-        assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_1)],
-            12345
-        );
-        assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_2)],
-            23456
-        );
-        assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_3)],
-            34567
-        );
+        assert_in_state(&state, PUB_KEY_1, OWNER_KEY_1, 12345);
+        assert_in_state(&state, PUB_KEY_2, OWNER_KEY_1, 23456);
+        assert_in_state(&state, PUB_KEY_3, OWNER_KEY_1, 34567);
 
         // Validate captured logs
         assert_logs_contain_ordered(expected_logs);
@@ -2848,18 +2591,9 @@ mod tests {
         }
 
         // this should be inserted even if we don't actually SEND the block
-        assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_1)],
-            12345
-        );
-        assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_2)],
-            23456
-        );
-        assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_3)],
-            34567
-        );
+        assert_in_state(&state, PUB_KEY_1, OWNER_KEY_1, 12345);
+        assert_in_state(&state, PUB_KEY_2, OWNER_KEY_1, 23456);
+        assert_in_state(&state, PUB_KEY_3, OWNER_KEY_1, 34567);
 
         // Validate captured logs
         assert_logs_contain_ordered(expected_logs);
