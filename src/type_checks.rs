@@ -82,6 +82,7 @@ fn check_reward() {
         post_balance: _,
         reward_type: _,
         commission: _,
+        commission_bps: _,
     } = reward;
 }
 
@@ -120,10 +121,10 @@ fn check_inner_instruction() {
 
 #[allow(dead_code, invalid_value)]
 fn check_transaction_return_data() {
-    let return_data: solana_transaction_context::TransactionReturnData =
+    let return_data: solana_transaction_context::transaction::TransactionReturnData =
         unsafe { std::mem::zeroed() };
 
-    let solana_transaction_context::TransactionReturnData {
+    let solana_transaction_context::transaction::TransactionReturnData {
         program_id: _,
         data: _,
     } = return_data;
@@ -131,9 +132,9 @@ fn check_transaction_return_data() {
 
 #[allow(dead_code, invalid_value)]
 fn check_loaded_addresses() {
-    let loaded: solana_sdk::message::v0::LoadedAddresses = unsafe { std::mem::zeroed() };
+    let loaded: solana_message::v0::LoadedAddresses = unsafe { std::mem::zeroed() };
 
-    let solana_sdk::message::v0::LoadedAddresses {
+    let solana_message::v0::LoadedAddresses {
         writable: _,
         readonly: _,
     } = loaded;
@@ -141,9 +142,9 @@ fn check_loaded_addresses() {
 
 #[allow(dead_code)]
 fn check_message_header() {
-    let header: solana_sdk::message::MessageHeader = unsafe { std::mem::zeroed() };
+    let header: solana_message::MessageHeader = unsafe { std::mem::zeroed() };
 
-    let solana_sdk::message::MessageHeader {
+    let solana_message::MessageHeader {
         num_required_signatures: _,
         num_readonly_signed_accounts: _,
         num_readonly_unsigned_accounts: _,
@@ -164,9 +165,9 @@ fn check_compiled_instruction() {
 
 #[allow(dead_code, invalid_value)]
 fn check_message_address_table_lookup() {
-    let lookup: solana_sdk::message::v0::MessageAddressTableLookup = unsafe { std::mem::zeroed() };
+    let lookup: solana_message::v0::MessageAddressTableLookup = unsafe { std::mem::zeroed() };
 
-    let solana_sdk::message::v0::MessageAddressTableLookup {
+    let solana_message::v0::MessageAddressTableLookup {
         account_key: _,
         writable_indexes: _,
         readonly_indexes: _,

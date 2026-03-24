@@ -3,7 +3,7 @@ members = [".", "logger"]
 
 [package]
 name = "firehose-geyser-plugin"
-version = "3.0.0"
+version = "4.0.0"
 edition = "2021"
 
 [lib]
@@ -22,23 +22,23 @@ prost = "0.11.9"
 rbase64 = "2.0.3"
 serde_json = "1.0.132"
 serde = { version = "1.0.215", features = ["derive"] }
-solana-sdk = "3.0.0"
-env_logger = "0.9.3"
+env_logger = "0.11"
 gxhash = "3.4.1"
 hex = "0.4.3"
+bs58 = "0.5"
+solana-hash = "4.2.0"
+solana-pubkey = "4.1.0"
+solana-signature = "3.3.0"
 
-# Needs to be bumped in sync (seems no version 3.0.9 has been published for those one yet)
-agave-geyser-plugin-interface = "=3.1.8"
-solana-rpc-client = "=3.1.8"
-solana-rpc-client-api = "=3.1.8"
-solana-transaction-status = "=3.1.8"
-solana-transaction-context = "=3.1.8"
-
-# Seems that those ones is not always following others ...
-solana-commitment-config = "3.0"
-solana-message = "3.0"
-solana-program = "3.0"
-solana-transaction = "3.0"
+agave-geyser-plugin-interface = "=4.0.0-beta.4"
+solana-rpc-client = "=4.0.0-beta.4"
+solana-rpc-client-api = "=4.0.0-beta.4"
+solana-transaction-status = "=4.0.0-beta.4"
+solana-transaction-context = "=4.0.0-beta.4"
+solana-commitment-config = "3.1.1"
+solana-message = "3.1.0"
+solana-program = "4.0.0"
+solana-transaction = "3.1.0"
 
 [dev-dependencies]
 tempfile = "3.10.1"
