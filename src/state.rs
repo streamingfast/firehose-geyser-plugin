@@ -21,10 +21,10 @@ type BlockInfoMap = HashMap<u64, BlockInfo>;
 type ConfirmedSlotsMap = HashMap<u64, bool>;
 use crate::pb::sf::solana::r#type::v1::{Block, BlockHeight, Reward, UnixTimestamp};
 use crate::plugins::{to_block_rewards, ConfirmTransactionWithIndex};
+use bs58;
 use log::{debug, error, info, warn};
 use solana_commitment_config::CommitmentConfig;
 use solana_rpc_client_api::config::RpcBlockConfig;
-use bs58;
 use solana_transaction_status::TransactionDetails;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -393,11 +393,13 @@ impl State {
                 debug!("setting first_block_to_process to: {}", slot);
                 self.first_block_to_process = Some(slot);
 
-                // since we don't send these blocks, we apply their changes to the cache manually
-                self.apply_changes_upto(trace, slot - 1);
+                if slot != 0 {
+                    // since we don't send these blocks, we apply their changes to the cache manually
+                    self.apply_changes_upto(trace, slot - 1);
 
-                debug!("deleting blocks up to: {}", slot - 1);
-                self.purge_blocks_up_to(slot - 1);
+                    debug!("deleting blocks up to: {}", slot - 1);
+                    self.purge_blocks_up_to(slot - 1);
+                }
             }
         }
         debug!(
@@ -709,7 +711,9 @@ impl State {
         };
 
         if self.last_sent_block.is_none() {
-            self.apply_changes_upto(trace, slot - 1);
+            if slot != 0 {
+                self.apply_changes_upto(trace, slot - 1);
+            }
             debug!("First being sent, now initialized");
             self.initialized = true;
         }
