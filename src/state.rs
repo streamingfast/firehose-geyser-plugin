@@ -399,11 +399,13 @@ impl State {
                 );
                 self.first_block_to_process = Some(effective_slot);
 
-                // since we don't send these blocks, we apply their changes to the cache manually
-                self.apply_changes_upto(trace, slot - 1);
+                if slot != 0 {
+                    // since we don't send these blocks, we apply their changes to the cache manually
+                    self.apply_changes_upto(trace, slot - 1);
 
-                debug!("deleting blocks up to: {}", slot - 1);
-                self.purge_blocks_up_to(slot - 1);
+                    debug!("deleting blocks up to: {}", slot - 1);
+                    self.purge_blocks_up_to(slot - 1);
+                }
             }
         }
         debug!(
@@ -691,7 +693,9 @@ impl State {
         };
 
         if self.last_sent_block.is_none() {
-            self.apply_changes_upto(trace, first_block_to_process - 1);
+            if first_block_to_process != 0 {
+                self.apply_changes_upto(trace, first_block_to_process - 1);
+            }
             debug!("First being sent, now initialized");
             self.initialized = true;
         }
