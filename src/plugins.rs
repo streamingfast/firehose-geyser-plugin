@@ -25,12 +25,12 @@ use solana_rpc_client::rpc_client::RpcClient;
 
 use crate::block_printer::BlockPrinter;
 
-use solana_sdk::hash::Hash;
-use solana_sdk::message::v0::LoadedAddresses;
-use solana_sdk::message::AccountKeys;
-use solana_sdk::{bs58, pubkey::Pubkey};
+use solana_hash::Hash;
+use solana_message::v0::LoadedAddresses;
+use solana_message::AccountKeys;
+use solana_pubkey::Pubkey;
 use solana_transaction::versioned::VersionedTransaction;
-use solana_transaction_context::TransactionReturnData;
+use solana_transaction_context::transaction::TransactionReturnData;
 use std::fmt;
 use std::fs::OpenOptions;
 use std::str::FromStr;
@@ -665,6 +665,7 @@ fn to_transaction_meta_status(
             .collect(),
         return_data: to_return_data(&status.return_data),
         compute_units_consumed: status.compute_units_consumed,
+        cost_units: status.cost_units,
     }
 }
 
@@ -777,7 +778,7 @@ fn to_return_data(d: &Option<TransactionReturnData>) -> Option<ReturnData> {
 }
 
 fn to_transaction(
-    tx: &solana_sdk::transaction::SanitizedTransaction,
+    tx: &solana_transaction::sanitized::SanitizedTransaction,
     loaded_addresses: &LoadedAddresses,
 ) -> Transaction {
     Transaction {
@@ -796,7 +797,7 @@ fn versioned_to_transaction(
     }
 }
 
-fn to_signature(signatures: &[solana_sdk::signature::Signature]) -> Vec<Vec<u8>> {
+fn to_signature(signatures: &[solana_signature::Signature]) -> Vec<Vec<u8>> {
     signatures
         .iter()
         .map(|signature| signature.as_ref().to_vec())
@@ -851,7 +852,7 @@ fn versioned_to_account_keys(keys: &[Pubkey], loaded_addresses: &LoadedAddresses
 }
 
 fn to_message(
-    msg: &solana_sdk::message::SanitizedMessage,
+    msg: &solana_message::SanitizedMessage,
     loaded_addresses: &LoadedAddresses,
 ) -> Message {
     Message {
@@ -865,7 +866,7 @@ fn to_message(
 }
 
 fn to_address_table_lookups(
-    addresses: &[solana_sdk::message::v0::MessageAddressTableLookup],
+    addresses: &[solana_message::v0::MessageAddressTableLookup],
 ) -> Vec<MessageAddressTableLookup> {
     addresses
         .iter()
@@ -908,7 +909,7 @@ fn to_account_keys(keys: AccountKeys, loaded_addresses: &LoadedAddresses) -> Vec
         .map(|key| key.to_bytes().to_vec())
         .collect()
 }
-fn to_header(h: &solana_sdk::message::MessageHeader) -> MessageHeader {
+fn to_header(h: &solana_message::MessageHeader) -> MessageHeader {
     MessageHeader {
         num_required_signatures: h.num_required_signatures as u32,
         num_readonly_signed_accounts: h.num_readonly_signed_accounts as u32,

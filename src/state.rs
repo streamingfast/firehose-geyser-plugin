@@ -2,17 +2,17 @@ use crate::block_printer::BlockPrinter;
 use crate::config::DevelopmentConfig;
 use crate::pb;
 use crate::utils::{convert_sol_timestamp, create_account_block};
-use hashbrown::HashMap;
 use lazy_static::lazy_static;
 use pb::sf::solana::r#type::v1::Account;
 use prost_types::Timestamp;
+use rustc_hash::FxHashMap as HashMap;
 use solana_rpc_client::rpc_client::RpcClient;
 
 type BlockAccountChanges = HashMap<u64, AccountChanges>;
 pub type AccountChanges = HashMap<[u8; 64], AccountWithWriteVersion>;
 pub type AccountDataHash = HashMap<[u8; 64], u64>; // owner(32) + pubkey(32)
 pub type AccountOwners = HashMap<[u8; 32], [u8; 32]>; // pubkey(32) -> owner(32)
-pub type StartupAccountReceivedSlot = HashMap<[u8; 32], (u64, u64)>; // pubkey(32)
+pub type StartupAccountReceivedSlot = HashMap<[u8; 32], u64>; // pubkey(32) -> composite value (slot << 25 + write_version)
 
 pub type Transactions = HashMap<u64, Vec<ConfirmTransactionWithIndex>>;
 type ProcessedSlot = HashMap<u64, bool>;
@@ -21,10 +21,10 @@ type BlockInfoMap = HashMap<u64, BlockInfo>;
 type ConfirmedSlotsMap = HashMap<u64, bool>;
 use crate::pb::sf::solana::r#type::v1::{Block, BlockHeight, Reward, UnixTimestamp};
 use crate::plugins::{to_block_rewards, ConfirmTransactionWithIndex};
+use bs58;
 use log::{debug, error, info, warn};
 use solana_commitment_config::CommitmentConfig;
 use solana_rpc_client_api::config::RpcBlockConfig;
-use solana_sdk::bs58;
 use solana_transaction_status::TransactionDetails;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -130,16 +130,16 @@ impl State {
             lib: None,
             initialized: false,
 
-            block_account_changes: HashMap::new(),
-            account_data_hash: HashMap::new(),
-            account_owners: HashMap::new(),
-            startup_received_slot: HashMap::new(),
-            block_infos: HashMap::new(),
-            confirmed_slots: HashMap::new(),
+            block_account_changes: HashMap::default(),
+            account_data_hash: HashMap::default(),
+            account_owners: HashMap::default(),
+            startup_received_slot: HashMap::default(),
+            block_infos: HashMap::default(),
+            confirmed_slots: HashMap::default(),
             last_sent_block: None,
 
-            transactions: HashMap::new(),
-            processed_slots: HashMap::new(),
+            transactions: HashMap::default(),
+            processed_slots: HashMap::default(),
 
             local_rpc_client: Some(local_rpc_client),
             remote_rpc_client: Some(remote_rpc_client),
@@ -393,11 +393,13 @@ impl State {
                 debug!("setting first_block_to_process to: {}", slot);
                 self.first_block_to_process = Some(slot);
 
-                // since we don't send these blocks, we apply their changes to the cache manually
-                self.apply_changes_upto(trace, slot - 1);
+                if slot != 0 {
+                    // since we don't send these blocks, we apply their changes to the cache manually
+                    self.apply_changes_upto(trace, slot - 1);
 
-                debug!("deleting blocks up to: {}", slot - 1);
-                self.purge_blocks_up_to(slot - 1);
+                    debug!("deleting blocks up to: {}", slot - 1);
+                    self.purge_blocks_up_to(slot - 1);
+                }
             }
         }
         debug!(
@@ -434,36 +436,62 @@ impl State {
         let mut pub_key_fixed = [0u8; 32];
         let mut owner_fixed = [0u8; 32];
 
-        pub_key_fixed[..32].copy_from_slice(&pub_key[..32]);
-        owner_fixed[..32].copy_from_slice(&owner[..32]);
+        // SAFETY: Both pub_key and owner are guaranteed to be 32 bytes (Solana pubkey size)
+        // and pub_key_fixed/owner_fixed are also 32 bytes, so this is safe
+        unsafe {
+            std::ptr::copy_nonoverlapping(pub_key.as_ptr(), pub_key_fixed.as_mut_ptr(), 32);
+            std::ptr::copy_nonoverlapping(owner.as_ptr(), owner_fixed.as_mut_ptr(), 32);
+        }
 
-        if let Some((existing_slot, existing_write_version)) =
-            self.startup_received_slot.get(&pub_key_fixed)
-        {
-            if *existing_slot > slot
-                || (*existing_slot == slot && *existing_write_version > write_version)
-            {
+        // Using left shift by 25 bits to pack slot and write_version into a u64:
+        // 1) Assumed max write_version: 2^25 - 1 = 33,554,431 (~33.5M)
+        //    This is well above the observed max of ~10K write_versions per slot
+        // 2) Max slot considering u64: (2^64 - 1) >> 25 = 2^39 - 1 = 549,755,813,887 (~549B slots)
+        //    At 400ms per slot, this supports ~6,900 years of blockchain history
+        let composite_value = (slot << 25) | write_version;
+
+        // Check if we already have this account with a newer version
+        if let Some(&existing_composite) = self.startup_received_slot.get(&pub_key_fixed) {
+            if existing_composite >= composite_value {
                 return;
             }
         }
         self.startup_received_slot
-            .insert(pub_key_fixed, (slot, write_version));
+            .insert(pub_key_fixed, composite_value);
 
         // Check if there was a previous owner for this public key
         if let Some(previous_owner) = self.account_owners.get(&pub_key_fixed) {
             if previous_owner != &owner_fixed {
                 // Previous owner is different, so delete the old entry from account_data_hash
                 let mut previous_owner_account_key = [0u8; 64];
-                previous_owner_account_key[..32].copy_from_slice(previous_owner);
-                previous_owner_account_key[32..].copy_from_slice(&pub_key_fixed);
+                // SAFETY: previous_owner is 32 bytes and pub_key_fixed is 32 bytes
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        previous_owner.as_ptr(),
+                        previous_owner_account_key.as_mut_ptr(),
+                        32,
+                    );
+                    std::ptr::copy_nonoverlapping(
+                        pub_key_fixed.as_ptr(),
+                        previous_owner_account_key.as_mut_ptr().add(32),
+                        32,
+                    );
+                }
                 self.account_data_hash.remove(&previous_owner_account_key);
             }
         }
 
         // Create owner+pubkey composite key (64 bytes total)
         let mut owner_account_key = [0u8; 64];
-        owner_account_key[..32].copy_from_slice(&owner_fixed);
-        owner_account_key[32..].copy_from_slice(&pub_key_fixed);
+        // SAFETY: owner_fixed is 32 bytes and pub_key_fixed is 32 bytes
+        unsafe {
+            std::ptr::copy_nonoverlapping(owner_fixed.as_ptr(), owner_account_key.as_mut_ptr(), 32);
+            std::ptr::copy_nonoverlapping(
+                pub_key_fixed.as_ptr(),
+                owner_account_key.as_mut_ptr().add(32),
+                32,
+            );
+        }
 
         if deleted {
             self.account_data_hash.remove(&owner_account_key);
@@ -475,7 +503,7 @@ impl State {
     }
 
     pub fn delete_startup_info(&mut self) {
-        self.startup_received_slot = HashMap::new();
+        self.startup_received_slot = HashMap::default();
     }
 
     // set_account populates the caches for set_account
@@ -498,8 +526,15 @@ impl State {
 
         //create a unique key from owner and account addresses
         let mut owner_account_key = [0u8; 64];
-        owner_account_key[..32].copy_from_slice(owner);
-        owner_account_key[32..].copy_from_slice(pub_key);
+        // SAFETY: Both owner and pub_key are guaranteed to be 32 bytes (Solana pubkey size)
+        unsafe {
+            std::ptr::copy_nonoverlapping(owner.as_ptr(), owner_account_key.as_mut_ptr(), 32);
+            std::ptr::copy_nonoverlapping(
+                pub_key.as_ptr(),
+                owner_account_key.as_mut_ptr().add(32),
+                32,
+            );
+        }
 
         // purge tail data on initialization
         if !self.block_account_changes.contains_key(&slot) {
@@ -514,7 +549,7 @@ impl State {
         let slot_entries = self
             .block_account_changes
             .entry(slot)
-            .or_insert_with(HashMap::new);
+            .or_insert_with(HashMap::default);
 
         // skip if new change version exists
         if let Some(prev) = slot_entries.get(&owner_account_key) {
@@ -537,8 +572,11 @@ impl State {
         let mut address = [0u8; 32];
         let mut owner_array = [0u8; 32];
 
-        address.copy_from_slice(pub_key);
-        owner_array.copy_from_slice(owner);
+        // SAFETY: Both pub_key and owner are guaranteed to be 32 bytes (Solana pubkey size)
+        unsafe {
+            std::ptr::copy_nonoverlapping(pub_key.as_ptr(), address.as_mut_ptr(), 32);
+            std::ptr::copy_nonoverlapping(owner.as_ptr(), owner_array.as_mut_ptr(), 32);
+        }
 
         let fixed_account = AccountFixed {
             address,
@@ -673,7 +711,9 @@ impl State {
         };
 
         if self.last_sent_block.is_none() {
-            self.apply_changes_upto(trace, slot - 1);
+            if slot != 0 {
+                self.apply_changes_upto(trace, slot - 1);
+            }
             debug!("First being sent, now initialized");
             self.initialized = true;
         }
@@ -809,7 +849,7 @@ fn filter_account_changes(
     let mut filtered_changes: Vec<AccountFixed> = Vec::new();
     let mut state_changes: Vec<StateChange> = Vec::new();
 
-    let mut in_block_owners = AccountOwners::new();
+    let mut in_block_owners = AccountOwners::default();
     let mut ordered_changes: Vec<AccountWithWriteVersion> = Vec::new();
 
     if let Some(changes) = changes {
@@ -1004,8 +1044,8 @@ mod tests {
 
     #[test]
     fn test_filter_account_changes_empty_changes() {
-        let account_data_hash: AccountDataHash = HashMap::new();
-        let account_owners: AccountOwners = HashMap::new();
+        let account_data_hash: AccountDataHash = HashMap::default();
+        let account_owners: AccountOwners = HashMap::default();
 
         let (filtered_changes, state_changes) =
             filter_account_changes(None, &account_data_hash, &account_owners, 0, false);
@@ -1016,9 +1056,9 @@ mod tests {
 
     #[test]
     fn test_filter_account_changes_new_account() {
-        let mut changes = HashMap::new();
-        let account_data_hash = HashMap::new();
-        let account_owners = HashMap::new();
+        let mut changes = HashMap::default();
+        let account_data_hash = HashMap::default();
+        let account_owners = HashMap::default();
 
         let address = vec![
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
@@ -1061,9 +1101,9 @@ mod tests {
 
     #[test]
     fn test_filter_account_changes_same_data_hash_not_deleted() {
-        let mut changes = HashMap::new();
-        let mut account_data_hash: AccountDataHash = HashMap::new();
-        let account_owners: AccountOwners = HashMap::new();
+        let mut changes = HashMap::default();
+        let mut account_data_hash: AccountDataHash = HashMap::default();
+        let account_owners: AccountOwners = HashMap::default();
 
         let address = vec![
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
@@ -1097,9 +1137,9 @@ mod tests {
 
     #[test]
     fn test_filter_account_changes_different_data_hash() {
-        let mut changes = HashMap::new();
-        let mut account_data_hash: AccountDataHash = HashMap::new();
-        let account_owners: AccountOwners = HashMap::new();
+        let mut changes = HashMap::default();
+        let mut account_data_hash: AccountDataHash = HashMap::default();
+        let account_owners: AccountOwners = HashMap::default();
 
         let address = vec![
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
@@ -1136,9 +1176,9 @@ mod tests {
 
     #[test]
     fn test_filter_account_changes_deleted_account() {
-        let mut changes = HashMap::new();
-        let mut account_data_hash: AccountDataHash = HashMap::new();
-        let account_owners: AccountOwners = HashMap::new();
+        let mut changes = HashMap::default();
+        let mut account_data_hash: AccountDataHash = HashMap::default();
+        let account_owners: AccountOwners = HashMap::default();
 
         let address = vec![
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
@@ -1176,9 +1216,9 @@ mod tests {
 
     #[test]
     fn test_filter_account_changes_ownership_change() {
-        let mut changes = HashMap::new();
-        let account_data_hash: AccountDataHash = HashMap::new();
-        let mut account_owners: AccountOwners = HashMap::new();
+        let mut changes = HashMap::default();
+        let account_data_hash: AccountDataHash = HashMap::default();
+        let mut account_owners: AccountOwners = HashMap::default();
 
         let address = vec![
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
@@ -1240,9 +1280,9 @@ mod tests {
 
     #[test]
     fn test_filter_account_changes_create_changeowner_delete() {
-        let mut changes = HashMap::new();
-        let account_data_hash: AccountDataHash = HashMap::new();
-        let account_owners: AccountOwners = HashMap::new();
+        let mut changes = HashMap::default();
+        let account_data_hash: AccountDataHash = HashMap::default();
+        let account_owners: AccountOwners = HashMap::default();
 
         let address = vec![
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
@@ -1315,9 +1355,9 @@ mod tests {
 
     #[test]
     fn test_filter_account_changes_multiple_accounts_sorted() {
-        let mut changes = HashMap::new();
-        let account_data_hash: AccountDataHash = HashMap::new();
-        let account_owners: AccountOwners = HashMap::new();
+        let mut changes = HashMap::default();
+        let account_data_hash: AccountDataHash = HashMap::default();
+        let account_owners: AccountOwners = HashMap::default();
 
         // Create accounts with addresses that will test sorting
         let address1 = vec![
@@ -1379,9 +1419,9 @@ mod tests {
 
     #[test]
     fn test_filter_account_changes_complex_scenario() {
-        let mut changes = HashMap::new();
-        let mut account_data_hash: AccountDataHash = HashMap::new();
-        let mut account_owners: AccountOwners = HashMap::new();
+        let mut changes = HashMap::default();
+        let mut account_data_hash: AccountDataHash = HashMap::default();
+        let mut account_owners: AccountOwners = HashMap::default();
 
         // Account 1: New account (should be included)
         let address1 = vec![

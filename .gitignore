@@ -1,4 +1,7 @@
 build/
 dist/
 /target
+/fifo-bench/target
+/logger/target
 .idea
+.claude

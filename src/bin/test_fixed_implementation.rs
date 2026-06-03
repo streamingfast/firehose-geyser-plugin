@@ -1,4 +1,4 @@
-use hashbrown::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 // Fixed-length key types (as implemented in main code)
 type AccountDataHash = HashMap<[u8; 64], u64>; // owner(32) + pubkey(32)
@@ -16,9 +16,9 @@ pub struct State {
 impl State {
     pub fn new() -> Self {
         Self {
-            account_data_hash: HashMap::new(),
-            account_owners: HashMap::new(),
-            startup_received_slot: HashMap::new(),
+            account_data_hash: HashMap::default(),
+            account_owners: HashMap::default(),
+            startup_received_slot: HashMap::default(),
         }
     }
 
