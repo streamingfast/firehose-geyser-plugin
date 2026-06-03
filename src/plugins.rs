@@ -764,6 +764,9 @@ fn to_pb_reward_type(reward_type: Option<solana_transaction_status::RewardType>)
         Some(solana_transaction_status::RewardType::Rent) => RewardType::Rent,
         Some(solana_transaction_status::RewardType::Voting) => RewardType::Voting,
         Some(solana_transaction_status::RewardType::Staking) => RewardType::Staking,
+        Some(solana_transaction_status::RewardType::DeactivatedStake) => {
+            RewardType::DeactivatedStake
+        }
     }
 }
 
@@ -831,6 +834,20 @@ fn versioned_to_message(
                 instructions: to_compiled_instructions(msg.instructions()),
                 versioned: true,
                 address_table_lookups: to_address_table_lookups(&v0_msg.address_table_lookups),
+            };
+        }
+        solana_message::VersionedMessage::V1(v1_msg) => {
+            // V1 is the new transaction message format introduced in solana-message 4.x.
+            // It carries its address-table state in `config` rather than explicit
+            // address_table_lookups, and renames `recent_blockhash` to `lifetime_specifier`.
+            // Best-effort mapping onto the existing firehose proto shape.
+            return Message {
+                header: Some(to_header(&v1_msg.header)),
+                account_keys: versioned_to_account_keys(&v1_msg.account_keys, loaded_addresses),
+                recent_blockhash: to_recent_block_hash(&v1_msg.lifetime_specifier),
+                instructions: to_compiled_instructions(&v1_msg.instructions),
+                versioned: true,
+                address_table_lookups: vec![],
             };
         }
     }
