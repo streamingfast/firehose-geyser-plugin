@@ -231,6 +231,7 @@ pub enum RewardType {
     Rent = 2,
     Staking = 3,
     Voting = 4,
+    DeactivatedStake = 5,
 }
 impl RewardType {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -244,6 +245,7 @@ impl RewardType {
             RewardType::Rent => "Rent",
             RewardType::Staking => "Staking",
             RewardType::Voting => "Voting",
+            RewardType::DeactivatedStake => "DeactivatedStake",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -254,6 +256,7 @@ impl RewardType {
             "Rent" => Some(Self::Rent),
             "Staking" => Some(Self::Staking),
             "Voting" => Some(Self::Voting),
+            "DeactivatedStake" => Some(Self::DeactivatedStake),
             _ => None,
         }
     }

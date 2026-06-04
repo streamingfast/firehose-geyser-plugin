@@ -30,15 +30,15 @@ solana-hash = "4.2.0"
 solana-pubkey = "4.1.0"
 solana-signature = "3.3.0"
 
-agave-geyser-plugin-interface = "=4.0.0"
-solana-rpc-client = "=4.0.0"
-solana-rpc-client-api = "=4.0.0"
-solana-transaction-status = "=4.0.0"
-solana-transaction-context = "=4.0.0"
+agave-geyser-plugin-interface = "=4.1.0-beta.2"
+solana-rpc-client = "=4.1.0-beta.2"
+solana-rpc-client-api = "=4.1.0-beta.2"
+solana-transaction-status = "=4.1.0-beta.2"
+solana-transaction-context = "=4.1.0-beta.2"
 solana-commitment-config = "3.1.1"
-solana-message = "3.1.0"
-solana-program = "4.0.0"
-solana-transaction = "3.1.0"
+solana-message = "4.2.0"
+solana-program = "=4.0.0" # not upgraded to 4.1.x yet
+solana-transaction = "4.1.2"
 
 [dev-dependencies]
 tempfile = "3.10.1"
