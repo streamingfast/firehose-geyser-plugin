@@ -56,9 +56,9 @@ dependencies = [
 
 [[package]]
 name = "agave-feature-set"
-version = "4.1.0-beta.2"
+version = "4.1.0-beta.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9ad3c2045583499cfbbfd4889b01ca418b6fb4bdce1d44f2ee9c0a044e03504"
+checksum = "aa1d672e0cd0e0b33ea67afae53d1a13ea6800ec51ef825e246997a072008c62"
 dependencies = [
  "ahash",
  "solana-epoch-schedule",
@@ -71,9 +71,9 @@ dependencies = [
 
 [[package]]
 name = "agave-geyser-plugin-interface"
-version = "4.1.0-beta.2"
+version = "4.1.0-beta.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "935d9c75887c631729cf3e071d29c3c57df5ed36b2f403b74cd42986136e1996"
+checksum = "bd5a0efe18c47aac276e20b7886557b1786ade01ab6c03082c15de56c44f19b8"
 dependencies = [
  "log",
  "solana-clock",
@@ -87,9 +87,9 @@ dependencies = [
 
 [[package]]
 name = "agave-reserved-account-keys"
-version = "4.1.0-beta.2"
+version = "4.1.0-beta.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e2c936ed08fd3de78724dd3c6afd8107e3827b5ff7684fb799c590fccdd32b9"
+checksum = "32f75b2ee9024877ae599089d4787c9f6ff2821eef54120ca2f689ad5eb91537"
 dependencies = [
  "agave-feature-set",
  "solana-pubkey 4.2.0",
@@ -1082,7 +1082,7 @@ checksum = "3a3076410a55c90011c298b04d0cfa770b00fa04e1e3c97d3f6c9de105a03844"
 
 [[package]]
 name = "firehose-geyser-plugin"
-version = "4.0.1"
+version = "4.1.0-beta.3"
 dependencies = [
  "agave-geyser-plugin-interface",
  "ahash",
@@ -1612,7 +1612,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "tokio",
  "tower-service",
  "tracing",
@@ -2363,7 +2363,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -2400,7 +2400,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -3019,9 +3019,9 @@ dependencies = [
 
 [[package]]
 name = "solana-account-decoder"
-version = "4.1.0-beta.2"
+version = "4.1.0-beta.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b787c48442e9e3579d0ffcc06c4c563fbf2933b167b9bb860e2b9666904619d"
+checksum = "1a8e6c1e2b6bed22e8cea7f45aa0527369f6fcfc5e776555987ed97c49cf5489"
 dependencies = [
  "Inflector",
  "base64 0.22.1",
@@ -3061,9 +3061,9 @@ dependencies = [
 
 [[package]]
 name = "solana-account-decoder-client-types"
-version = "4.1.0-beta.2"
+version = "4.1.0-beta.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "732b7b64baf923ec5d98ebbdecf09337cdf277355958fb9e9f77f040cc84eb3f"
+checksum = "aa3971fc28a628c34d3036061b4a622f2e174252797ca14994362ec8de55e793"
 dependencies = [
  "base64 0.22.1",
  "bs58",
@@ -3705,9 +3705,9 @@ dependencies = [
 
 [[package]]
 name = "solana-rpc-client"
-version = "4.1.0-beta.2"
+version = "4.1.0-beta.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6985e7786e16a901557923172cce1e119f1331cec1acd9d5d23f94d9bff9e819"
+checksum = "d9641a520e9a9349b7a011a121150ad6f9147c784a84a136ee696e0a73c86c09"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3745,9 +3745,9 @@ dependencies = [
 
 [[package]]
 name = "solana-rpc-client-api"
-version = "4.1.0-beta.2"
+version = "4.1.0-beta.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "360b849f5a33d463bcc898c013db30c3b643d203b66a8fe2301db53698273d2c"
+checksum = "126830dfcf2861cfdaf73def41a857cd32fc283bdd6f0f9aecb7b70f57fd8653"
 dependencies = [
  "anyhow",
  "jsonrpc-core",
@@ -3765,9 +3765,9 @@ dependencies = [
 
 [[package]]
 name = "solana-rpc-client-types"
-version = "4.1.0-beta.2"
+version = "4.1.0-beta.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6023d965622a51ddc6b0dd41372c7ba872ee60059bda5e123f1cc1c6652e9221"
+checksum = "3d7e9e4d39b1433b7228604f688bf84406d4d578864ccd2099bbdaa70a20be28"
 dependencies = [
  "base64 0.22.1",
  "bs58",
@@ -3984,9 +3984,9 @@ dependencies = [
 
 [[package]]
 name = "solana-svm-feature-set"
-version = "4.1.0-beta.2"
+version = "4.1.0-beta.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5500d0dcb2f31a53b255d6b92aa0dbfd7a19669917f20c489119deb639b18b25"
+checksum = "a039f09ec29dddcbb6797dfa6607d9d79c3d47274030bcec2da693bfb6a9e4da"
 
 [[package]]
 name = "solana-system-interface"
@@ -4087,9 +4087,9 @@ dependencies = [
 
 [[package]]
 name = "solana-transaction-context"
-version = "4.1.0-beta.2"
+version = "4.1.0-beta.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88cdcaaa5bdbdf7758b4a053e4e2f9bf32c2500ad76b18a706292e09fb9dc232"
+checksum = "b12f1cbf59ffe3ca310520f1b53fe52f0846f17ae51b29b666b031563633cfaf"
 dependencies = [
  "bincode",
  "serde",
@@ -4116,9 +4116,9 @@ dependencies = [
 
 [[package]]
 name = "solana-transaction-status"
-version = "4.1.0-beta.2"
+version = "4.1.0-beta.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e2232bac641b6b0ce219208414670846122d2ac6faf9bcce56db97d869b2488"
+checksum = "94f92e5797e18aec84e1c654fe07a708069a63e9c71388d15884cf544adc609d"
 dependencies = [
  "Inflector",
  "agave-reserved-account-keys",
@@ -4159,9 +4159,9 @@ dependencies = [
 
 [[package]]
 name = "solana-transaction-status-client-types"
-version = "4.1.0-beta.2"
+version = "4.1.0-beta.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f1d26e5e8234f11760a3e68347ba89c161399cfa0785b2bf10dc3c8e7eef99b"
+checksum = "1939900b1f7fae73a3acff99308509380d054ee33f7955d8a3d874f643f2891e"
 dependencies = [
  "base64 0.22.1",
  "bincode",
@@ -4183,9 +4183,9 @@ dependencies = [
 
 [[package]]
 name = "solana-version"
-version = "4.1.0-beta.2"
+version = "4.1.0-beta.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c714d4224b39db5dd8c2af310950da5d951a9235bb6de572286e46a446a7bba"
+checksum = "3de9e9589e411fdb7c1f038b0678de0ac0725b21b179b7ab827efcc9eb63432e"
 dependencies = [
  "agave-feature-set",
  "rand 0.9.4",
