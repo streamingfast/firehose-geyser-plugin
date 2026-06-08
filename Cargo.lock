@@ -56,9 +56,9 @@ dependencies = [
 
 [[package]]
 name = "agave-feature-set"
-version = "4.0.0"
+version = "4.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dde74a2d1f2f99a3ea59938d1533c7973c344e47d24c1b645ee81e958c54226a"
+checksum = "c090477303f71070364446c91055717de720fac212f0cf9919725b22b0df48a8"
 dependencies = [
  "ahash",
  "solana-epoch-schedule",
@@ -66,14 +66,28 @@ dependencies = [
  "solana-keypair",
  "solana-pubkey 4.1.0",
  "solana-sha256-hasher",
- "solana-svm-feature-set",
+ "solana-svm-feature-set 4.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "agave-feature-set"
+version = "4.0.2"
+source = "git+https://github.com/anza-xyz/agave.git?tag=v4.0.2#1845f4261ec54e6539c88c6661e5268377aa69cc"
+dependencies = [
+ "ahash",
+ "solana-epoch-schedule",
+ "solana-hash 4.2.0",
+ "solana-keypair",
+ "solana-pubkey 4.1.0",
+ "solana-sha256-hasher",
+ "solana-svm-feature-set 4.0.2 (git+https://github.com/anza-xyz/agave.git?tag=v4.0.2)",
 ]
 
 [[package]]
 name = "agave-geyser-plugin-interface"
-version = "4.0.0"
+version = "4.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "576ea415982b71940a6773f53ce6073317fbc390a3c13ec75ec044a185e4251b"
+checksum = "7effc6f7f7980ab10ebcb6df0bf051b78279c68bc97b480f51b5b3b62e43e4f6"
 dependencies = [
  "log",
  "solana-clock",
@@ -86,11 +100,11 @@ dependencies = [
 
 [[package]]
 name = "agave-reserved-account-keys"
-version = "4.0.0"
+version = "4.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "798e559c514af005950ea81586a3856f9297ecb80a7359057c19bf6717f5f537"
+checksum = "dc9c465c08efe6c072da8965770f6690ffe94ebca8aca7cea85ff22d8d5a0108"
 dependencies = [
- "agave-feature-set",
+ "agave-feature-set 4.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "solana-pubkey 4.1.0",
  "solana-sdk-ids",
 ]
@@ -1046,7 +1060,7 @@ checksum = "3a3076410a55c90011c298b04d0cfa770b00fa04e1e3c97d3f6c9de105a03844"
 
 [[package]]
 name = "firehose-geyser-plugin"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "agave-geyser-plugin-interface",
  "ahash",
@@ -2970,9 +2984,8 @@ dependencies = [
 
 [[package]]
 name = "solana-account-decoder"
-version = "4.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff1acff600a621d4445e0610fa71a53bef5390a5e349cfbd30651917593fb57d"
+version = "4.0.2"
+source = "git+https://github.com/anza-xyz/agave.git?tag=v4.0.2#1845f4261ec54e6539c88c6661e5268377aa69cc"
 dependencies = [
  "Inflector",
  "base64 0.22.1",
@@ -3012,9 +3025,8 @@ dependencies = [
 
 [[package]]
 name = "solana-account-decoder-client-types"
-version = "4.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb23fe4d32da6381b9a2b1b285c28fb5c9dc29cbbab40c9c1de24d8a2c5086bd"
+version = "4.0.2"
+source = "git+https://github.com/anza-xyz/agave.git?tag=v4.0.2#1845f4261ec54e6539c88c6661e5268377aa69cc"
 dependencies = [
  "base64 0.22.1",
  "bs58",
@@ -3656,9 +3668,8 @@ dependencies = [
 
 [[package]]
 name = "solana-rpc-client"
-version = "4.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10dd50b329ce569340c1deab3667d21e26a41e65cc6460e8a5bb8b57aff8420d"
+version = "4.0.2"
+source = "git+https://github.com/anza-xyz/agave.git?tag=v4.0.2#1845f4261ec54e6539c88c6661e5268377aa69cc"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3696,9 +3707,8 @@ dependencies = [
 
 [[package]]
 name = "solana-rpc-client-api"
-version = "4.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5055bd3bcd46c870ca1a13f06675c1ff0a45f93604e0f88e5c748bcb01dd42fc"
+version = "4.0.2"
+source = "git+https://github.com/anza-xyz/agave.git?tag=v4.0.2#1845f4261ec54e6539c88c6661e5268377aa69cc"
 dependencies = [
  "anyhow",
  "jsonrpc-core",
@@ -3717,9 +3727,8 @@ dependencies = [
 
 [[package]]
 name = "solana-rpc-client-types"
-version = "4.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2268718c3aed042982b46e2db2ec9bdff704a1030f639410e96065e9a8c621fd"
+version = "4.0.2"
+source = "git+https://github.com/anza-xyz/agave.git?tag=v4.0.2#1845f4261ec54e6539c88c6661e5268377aa69cc"
 dependencies = [
  "base64 0.22.1",
  "bs58",
@@ -3937,9 +3946,14 @@ dependencies = [
 
 [[package]]
 name = "solana-svm-feature-set"
-version = "4.0.0"
+version = "4.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24ea15c0d91403375e3d017cc09780cf138b629abba4ccaaa7cf66b1afea1059"
+checksum = "979bce8c92b72acb832586950a000247f6045d905955ef4a0527abb3cec32ba2"
+
+[[package]]
+name = "solana-svm-feature-set"
+version = "4.0.2"
+source = "git+https://github.com/anza-xyz/agave.git?tag=v4.0.2#1845f4261ec54e6539c88c6661e5268377aa69cc"
 
 [[package]]
 name = "solana-system-interface"
@@ -4071,9 +4085,8 @@ dependencies = [
 
 [[package]]
 name = "solana-transaction-context"
-version = "4.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ecefe8b30e334e2891ca82da35becd9a3f4c16021d9ca782e2a82adf31084fa3"
+version = "4.0.2"
+source = "git+https://github.com/anza-xyz/agave.git?tag=v4.0.2#1845f4261ec54e6539c88c6661e5268377aa69cc"
 dependencies = [
  "bincode",
  "serde",
@@ -4100,9 +4113,9 @@ dependencies = [
 
 [[package]]
 name = "solana-transaction-status"
-version = "4.0.0"
+version = "4.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9d6012dad70ac080f5ccc4a0799ce9e919a8efea98ec06876752fc5334bd44e"
+checksum = "3d49b26dd573e5aa1ed28c414020018dbe49b926df681ba14741d905d8b39753"
 dependencies = [
  "Inflector",
  "agave-reserved-account-keys",
@@ -4143,9 +4156,8 @@ dependencies = [
 
 [[package]]
 name = "solana-transaction-status-client-types"
-version = "4.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea6886b7bb8fbba5937b4a38fa67ed442d7971629244b8fbd95c7963b2126bc9"
+version = "4.0.2"
+source = "git+https://github.com/anza-xyz/agave.git?tag=v4.0.2#1845f4261ec54e6539c88c6661e5268377aa69cc"
 dependencies = [
  "base64 0.22.1",
  "bincode",
@@ -4167,11 +4179,10 @@ dependencies = [
 
 [[package]]
 name = "solana-version"
-version = "4.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47b881755f678e9e88512feb096b9c0b341e4d682eb609f131225907826e684d"
+version = "4.0.2"
+source = "git+https://github.com/anza-xyz/agave.git?tag=v4.0.2#1845f4261ec54e6539c88c6661e5268377aa69cc"
 dependencies = [
- "agave-feature-set",
+ "agave-feature-set 4.0.2 (git+https://github.com/anza-xyz/agave.git?tag=v4.0.2)",
  "rand 0.9.2",
  "semver",
  "serde",

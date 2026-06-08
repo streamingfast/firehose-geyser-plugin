@@ -3,7 +3,7 @@ members = [".", "logger"]
 
 [package]
 name = "firehose-geyser-plugin"
-version = "4.0.1"
+version = "4.0.2"
 edition = "2021"
 
 [lib]
@@ -30,15 +30,26 @@ solana-hash = "4.2.0"
 solana-pubkey = "4.1.0"
 solana-signature = "3.3.0"
 
-agave-geyser-plugin-interface = "=4.0.0"
-solana-rpc-client = "=4.0.0"
-solana-rpc-client-api = "=4.0.0"
-solana-transaction-status = "=4.0.0"
-solana-transaction-context = "=4.0.0"
+agave-geyser-plugin-interface = "=4.0.2"
+solana-rpc-client = { git = "https://github.com/anza-xyz/agave.git", tag = "v4.0.2" }
+solana-rpc-client-api = { git = "https://github.com/anza-xyz/agave.git", tag = "v4.0.2" }
+solana-transaction-status = "=4.0.2"
+solana-transaction-context = { version = "=4.0.2", features = ["agave-unstable-api"] }
 solana-commitment-config = "3.1.1"
 solana-message = "3.1.0"
 solana-program = "4.0.0"
 solana-transaction = "3.1.0"
+
+# rpc-client/rpc-client-api never shipped a 4.0.2 on crates.io, so they're
+# sourced from the agave git repo at the v4.0.2 tag. These patches force the
+# shared leaf crates to resolve to that same git source, otherwise crates.io
+# (via transaction-status) and git (via rpc-client-api) pull two copies and
+# their types (Reward, UiTokenAmount, ...) become incompatible.
+[patch.crates-io]
+solana-transaction-status-client-types = { git = "https://github.com/anza-xyz/agave.git", tag = "v4.0.2" }
+solana-account-decoder-client-types = { git = "https://github.com/anza-xyz/agave.git", tag = "v4.0.2" }
+solana-transaction-context = { git = "https://github.com/anza-xyz/agave.git", tag = "v4.0.2" }
+solana-account-decoder = { git = "https://github.com/anza-xyz/agave.git", tag = "v4.0.2" }
 
 [dev-dependencies]
 tempfile = "3.10.1"
