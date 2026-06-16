@@ -1,5 +1,5 @@
 # Define build arguments for image tags (must be before FROM statements)
-ARG SOLANA_TAG=v4.0.2-novote
+ARG SOLANA_TAG=v4.0.3-novote
 ARG FIREHOSE_CORE_TAG=v1.14.5
 
 # Stage 1: Build the Geyser plugin
