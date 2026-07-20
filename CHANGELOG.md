@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * Bumped to [Agave 4.2.0-beta.1](https://github.com/anza-xyz/agave/releases/tag/v4.2.0-beta.1).
 * Aligned the Rust toolchain to 1.96.1 to match the Agave 4.2 validator (a Geyser plugin must be built with the same toolchain as the validator it loads into).
 * Aligned the Docker image's Solana validator to [`v4.2.0-beta.1-novote`](https://github.com/streamingfast/solana/pkgs/container/solana) (was `v4.1.0-novote`), matching the Agave 4.2 plugin.
+* Behavior change (upstream, no plugin code change): account exhibits emit fewer `deleted: true` entries than 4.1. Agave [#13079](https://github.com/anza-xyz/agave/pull/13079) ("perf: skip writing untouched accounts") makes `collect_accounts_to_store` skip write-locked accounts a transaction left unmodified (`touched_flags`), so they no longer trigger a Geyser `notify_account_update`. Previously every writable account of a transaction was notified even when unchanged, producing spurious `deleted: true` events for already-dead (0-lamport) accounts. The plugin's notification path is unchanged; it simply receives fewer updates. Expected/benign diff versus 4.1 golden exhibits — same class as the 4.1.0 bump diff.
 
 ## v3.1.8-1
 
