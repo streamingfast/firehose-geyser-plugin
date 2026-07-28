@@ -8,3 +8,11 @@ updates:
     groups:
       all:
         patterns: ["*"]
+    ignore:
+      # The Agave/Solana crates are pinned to match the validator build this
+      # plugin is loaded into (see the "Chain Update" section of AGENTS.md and
+      # the SOLANA_TAG argument in the Dockerfile). Bumping them independently
+      # of the validator image silently breaks that alignment and nothing in CI
+      # catches it, so they must only move as part of a deliberate chain update.
+      - dependency-name: "agave-*"
+      - dependency-name: "solana-*"
