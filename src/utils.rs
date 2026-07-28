@@ -1,7 +1,7 @@
 use crate::pb::sf::solana::r#type::v1::{Account, AccountBlock};
 use crate::state::BlockInfo;
 use prost_types::Timestamp as ProstTimestamp;
-use solana_program::clock::UnixTimestamp;
+use solana_clock::UnixTimestamp;
 
 pub fn convert_sol_timestamp(sol_timestamp: UnixTimestamp) -> ProstTimestamp {
     let seconds = sol_timestamp as i64;
