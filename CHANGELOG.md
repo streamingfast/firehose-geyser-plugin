@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v4.2.0-rc.0
+
+* Bumped to [Agave 4.2.0-rc.0](https://github.com/anza-xyz/agave/releases/tag/v4.2.0-rc.0).
+* Aligned the Docker image's Solana validator to [`v4.2.0-rc.0-fh3.0`](https://github.com/streamingfast/solana/pkgs/container/solana) (was `v4.2.0-beta.1-novote`). Note the tag suffix changed from `-novote` to `-fh3.0`: our Solana fork now uses the Firehose protocol suffix, matching the convention of the other StreamingFast chain forks. The novote behaviour itself is unchanged.
+* No plugin code change was required: the Geyser plugin interface is identical between Agave `4.2.0-beta.1` and `4.2.0-rc.0` (no trait signature changes, no field changes on `ReplicaAccountInfo*`, `ReplicaTransactionInfo*`, `ReplicaBlockInfo*` or `TransactionStatusMeta`, no notification-semantics changes). The upstream range is 9 commits, all `accounts-db`, `runtime`, `status_cache` and XDP performance backports.
+* The Rust toolchain stays at 1.96.1, matching the Agave 4.2 validator (a Geyser plugin must be built with the same toolchain as the validator it loads into).
+* Pinned `solana-hash` (4.4.0), `solana-message` (4.2.3) and `solana-transaction` (4.1.4) to the exact versions the Agave 4.2.0-rc.0 validator itself compiles. They previously floated one minor/patch ahead. Since the plugin is a `cdylib` loaded into the validator process, these crates supply types that cross the plugin boundary, and two independently resolved copies of a struct is the one place where semver compatibility is not a layout guarantee.
+* Removed the `solana-program` dependency. It was pinned at `=4.0.0` with a stale `not upgraded to 4.1.x yet` note (no 4.1.x was ever published; 4.0.0 is the latest), and was used for a single import, `clock::UnixTimestamp`. That now comes from `solana-clock`, which the Geyser plugin interface already pulls in.
+* Refreshed the declared minimum versions of `solana-hash`, `solana-pubkey`, `solana-signature`, `solana-message` and `solana-transaction` so they state what actually resolves instead of trailing it.
+
 ## v4.2.0-beta.1-2
 
 * Stamped the `cap_net_admin,cap_net_raw+ep` file capabilities onto `/app/agave-validator` in the Docker image. Starting with agave-validator v4.2.0 (alpenglow client), the validator requires `CAP_NET_ADMIN` and `CAP_NET_RAW` to manage its UDP sockets, otherwise it aborts at startup. The image runs non-root, so `cap_add` alone only fills the bounding set; file capabilities grant them effective at exec. Requires the deployer (sf-operator) to add `NET_ADMIN` and `NET_RAW` to `cap_add`.
