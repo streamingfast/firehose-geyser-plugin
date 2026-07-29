@@ -7,11 +7,15 @@ This plugin prints "blocks" and "account-blocks" into two different linux named 
 
 ## Build the plugin
 
-# MAKE SURE THAT BOTH BATTLEFIELD PROGRAM and VALIDATOR are compile using the same toolchain.
+# MAKE SURE THAT BOTH the plugin and VALIDATOR are compiled using the same toolchain.
 
-* From the linux machine that will run agave-validator:
+* gxhash (account hashing) needs AES-NI + SSE2. Prefer an explicit portable feature set over `target-cpu=native` so the `.so` does not pick up AVX-512 (or other) opcodes from the build machine and then `SIGILL` on older production CPUs:
 
 ```
+# Portable (recommended for release artifacts / Docker images):
+RUSTFLAGS="-C target-feature=+aes,+sse2" cargo build --release
+
+# Local-only, max perf on the same machine that will run the validator:
 RUSTFLAGS="-C target-cpu=native" cargo build --release
 ```
 

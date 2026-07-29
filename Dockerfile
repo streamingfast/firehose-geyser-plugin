@@ -23,8 +23,14 @@ WORKDIR /build
 # Copy the entire project
 COPY . .
 
-# Build the plugin with native CPU optimizations
-RUN RUSTFLAGS="-C target-cpu=native" cargo build --release
+# Build a portable x86_64 plugin. Do NOT use target-cpu=native here: the image is
+# built on CI runners whose ISA may be newer than production hosts (e.g. multichain
+# nodes). native can emit AVX-512/other opcodes that trap as SIGILL
+# ("trap invalid opcode ... in libfirehose_geyser_plugin.so") on solBankNotif.
+# gxhash requires AES-NI + SSE2; enable only those features so the .so runs on any
+# AES-capable server without host-specific instructions.
+# See: https://github.com/ogxd/gxhash (RUSTFLAGS="-C target-feature=+aes,+sse2")
+RUN RUSTFLAGS="-C target-feature=+aes,+sse2" cargo build --release
 
 # Stage 2: Extract Solana binaries
 FROM ghcr.io/streamingfast/solana:${SOLANA_TAG} AS solana
