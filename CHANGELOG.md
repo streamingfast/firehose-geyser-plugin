@@ -7,7 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+* CI: build and push Docker images on pushes to `release/**` (not only on tags).
+* CI: extract release notes for the exact tag section in CHANGELOG (avoids substring matches like `v4.2.0-rc.0` → `v4.2.0-rc.0-fh3.0-1`).
+* CI: clarify GitHub release Docker blurb — image is for solana-devnet only; production should use a native build for host-optimal instructions.
+* CHANGELOG: backfilled missing sections for `v4.2.0-rc.0-fh3.0-1`, `v4.2.0-rc.0-fh3.0`, `v4.2.0-beta.1-3`, and `v4.2.0-beta.1-1`.
+
+## v4.2.0-rc.0-fh3.0-1
+
 * Fixed silent validator death on solana-devnet (`trap invalid opcode` / SIGILL in `libfirehose_geyser_plugin.so` on the `solBankNotif` thread). Docker/CI built the plugin with `RUSTFLAGS=-C target-cpu=native`, so the `.so` could contain instructions from the builder CPU (e.g. AVX-512) that production hosts do not implement. Release builds now use portable `RUSTFLAGS=-C target-feature=+aes,+sse2` (the minimum gxhash requires) instead of `native`.
+
+## v4.2.0-rc.0-fh3.0
+
+* Added post-startup diagnostic breadcrumbs for silent exits on solana-devnet. Surfaces stage, duration, and real error context around account-cache apply, first-send `process_upto`, and block FIFO writes so the next unexpected stop leaves a clear trail instead of a silent EOF.
 
 ## v4.2.0-rc.0
 
@@ -19,10 +30,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * Removed the `solana-program` dependency. It was pinned at `=4.0.0` with a stale `not upgraded to 4.1.x yet` note (no 4.1.x was ever published; 4.0.0 is the latest), and was used for a single import, `clock::UnixTimestamp`. That now comes from `solana-clock`, which the Geyser plugin interface already pulls in.
 * Refreshed the declared minimum versions of `solana-hash`, `solana-pubkey`, `solana-signature`, `solana-message` and `solana-transaction` so they state what actually resolves instead of trailing it.
 
+## v4.2.0-beta.1-3
+
+* Documentation-only: explained fewer `deleted: true` account events versus 4.1 (upstream Agave [#13079](https://github.com/anza-xyz/agave/pull/13079)); see `v4.2.0-beta.1`. No plugin code change.
+
 ## v4.2.0-beta.1-2
 
 * Stamped the `cap_net_admin,cap_net_raw+ep` file capabilities onto `/app/agave-validator` in the Docker image. Starting with agave-validator v4.2.0 (alpenglow client), the validator requires `CAP_NET_ADMIN` and `CAP_NET_RAW` to manage its UDP sockets, otherwise it aborts at startup. The image runs non-root, so `cap_add` alone only fills the bounding set; file capabilities grant them effective at exec. Requires the deployer (sf-operator) to add `NET_ADMIN` and `NET_RAW` to `cap_add`.
 * Added `libcap2-bin` to the final image stage to provide `setcap`.
+
+## v4.2.0-beta.1-1
+
+* First release through the GitHub Actions Release workflow: on a `v*` tag, builds and pushes the Docker image to ghcr.io and publishes a GitHub release with CHANGELOG notes and a `docker pull` link (no `.so` asset attached).
+* Fixed the CHANGELOG section header for the 4.2.0-beta.1 line (was incorrectly labeled `v4.2.0-rc.1`).
 
 ## v4.2.0-beta.1
 
