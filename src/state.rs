@@ -332,8 +332,8 @@ impl State {
         self.confirmed_slots.insert(slot, true);
 
         if self.is_ready(slot) {
-            if self.process_upto(trace, slot).is_err() {
-                panic!("poisoned mutex")
+            if let Err(e) = self.process_upto(trace, slot) {
+                panic!("process_upto failed after set_confirmed_slot({}): {}", slot, e)
             }
         }
     }
@@ -388,16 +388,23 @@ impl State {
         }
         if self.first_received_blockmeta.is_none() {
             self.first_received_blockmeta = Some(slot);
+            info!(
+                "first blockmeta received at slot {}, cursor={:?}, lib={:?}, account_hash_count={}",
+                slot,
+                self.cursor,
+                self.lib,
+                self.account_data_hash.len()
+            );
             if self.cursor.is_none() {
                 // usually because the lib has been set from rpc
-                debug!("setting first_block_to_process to: {}", slot);
+                info!("setting first_block_to_process to: {} (no cursor)", slot);
                 self.first_block_to_process = Some(slot);
 
                 if slot != 0 {
                     // since we don't send these blocks, we apply their changes to the cache manually
                     self.apply_changes_upto(trace, slot - 1);
 
-                    debug!("deleting blocks up to: {}", slot - 1);
+                    info!("purging blocks up to {} after first blockmeta", slot - 1);
                     self.purge_blocks_up_to(slot - 1);
                 }
             }
@@ -416,8 +423,8 @@ impl State {
         }
 
         if self.is_ready(slot) {
-            if self.process_upto(trace, slot).is_err() {
-                panic!("poisoned mutex")
+            if let Err(e) = self.process_upto(trace, slot) {
+                panic!("process_upto failed after set_block_info({}): {}", slot, e)
             }
         }
     }
@@ -617,8 +624,8 @@ impl State {
         }
 
         if self.is_ready(slot) {
-            if self.process_upto(trace, slot).is_err() {
-                panic!("poisoned mutex")
+            if let Err(e) = self.process_upto(trace, slot) {
+                panic!("process_upto failed after set_transaction(slot={}): {}", slot, e)
             }
         }
     }
@@ -659,11 +666,30 @@ impl State {
             .copied()
             .unwrap_or(slot);
 
+        if first_slot > slot {
+            info!(
+                "applying account cache changes: empty range (first_slot={} > upto={})",
+                first_slot, slot
+            );
+            return;
+        }
+
+        let started = std::time::Instant::now();
+        let pending_slots = self
+            .block_account_changes
+            .keys()
+            .filter(|&&s| s >= first_slot && s <= slot)
+            .count();
         info!(
-            "applying account cache changes for slots from {} to: {}",
-            first_slot, slot
+            "applying account cache changes for slots from {} to: {} ({} slots with pending account changes, hash_count={})",
+            first_slot,
+            slot,
+            pending_slots,
+            self.account_data_hash.len()
         );
 
+        let mut slots_applied = 0u64;
+        let mut changes_applied = 0usize;
         // Loop through each slot from first_slot to slot (inclusive)
         for current_slot in first_slot..=slot {
             let (_, changes) = filter_account_changes(
@@ -673,8 +699,20 @@ impl State {
                 current_slot,
                 trace,
             );
+            changes_applied += changes.len();
             self.apply_cache_changes(changes);
+            slots_applied += 1;
         }
+
+        info!(
+            "finished applying account cache changes for slots {}..={} ({} slots, {} state changes) in {:?} (hash_count={})",
+            first_slot,
+            slot,
+            slots_applied,
+            changes_applied,
+            started.elapsed(),
+            self.account_data_hash.len()
+        );
     }
 
     pub fn process_upto(
@@ -710,15 +748,44 @@ impl State {
             }
         };
 
-        if self.last_sent_block.is_none() {
+        let is_first_send = self.last_sent_block.is_none();
+        if is_first_send {
+            info!(
+                "process_upto first-send path: upto={} first_block_to_process={} lib={} first_blockmeta={:?} confirmed_slots={} account_hash_count={}",
+                slot,
+                first_block_to_process,
+                lib,
+                self.first_received_blockmeta,
+                self.confirmed_slots.len(),
+                self.account_data_hash.len()
+            );
             if slot != 0 {
                 self.apply_changes_upto(trace, slot - 1);
             }
-            debug!("First being sent, now initialized");
+            info!("process_upto: first-send init complete, marking initialized");
             self.initialized = true;
         }
 
-        for slot in self.ordered_confirmed_slots_upto(slot) {
+        let confirmed_slots = self.ordered_confirmed_slots_upto(slot);
+        if is_first_send {
+            info!(
+                "process_upto: considering {} confirmed slot(s) up to {}: {:?}",
+                confirmed_slots.len(),
+                slot,
+                if confirmed_slots.len() <= 20 {
+                    format!("{:?}", confirmed_slots)
+                } else {
+                    format!(
+                        "[{}..{}] ({} total)",
+                        confirmed_slots.first().copied().unwrap_or(0),
+                        confirmed_slots.last().copied().unwrap_or(0),
+                        confirmed_slots.len()
+                    )
+                }
+            );
+        }
+
+        for slot in confirmed_slots {
             let must_send = slot >= first_block_to_process || self.dev_config.force_send;
 
             let block_info = match self.block_infos.get(&slot) {
@@ -761,6 +828,20 @@ impl State {
             );
 
             if must_send {
+                let tx_count = self
+                    .transactions
+                    .get(&slot)
+                    .map(|t| t.len())
+                    .unwrap_or(0);
+                info!(
+                    "process_upto: preparing to send slot {} (account_changes={}, txs={}, parent={}, lib={})",
+                    slot,
+                    effective_account_changes.len(),
+                    tx_count,
+                    block_info.parent_slot,
+                    lib
+                );
+
                 let acc_block = create_account_block(effective_account_changes, &block_info);
 
                 let mut transactions_with_index =
@@ -772,10 +853,11 @@ impl State {
 
                 let printer = &mut self.block_printer;
                 let result = printer.print(&block_info, lib, block, acc_block, &self.cursor_path);
-                if !result.is_ok() {
-                    info!("Error printing block at {}", slot);
-                    return Err("Error printing block".into());
+                if let Err(e) = result {
+                    error!("Error printing block at {}: {}", slot, e);
+                    return Err(format!("Error printing block at {}: {}", slot, e).into());
                 }
+                info!("process_upto: print scheduled for slot {}", slot);
                 self.last_sent_block = Some(block_info.slot);
             } else {
                 info!(
@@ -788,8 +870,26 @@ impl State {
             self.purge_blocks_up_to(slot);
 
             if BLOCK_MUTEX.is_poisoned() || ACC_MUTEX.is_poisoned() {
-                return Err("mutex poisoned".into());
+                error!(
+                    "process_upto: output mutex poisoned after slot {} (BLOCK_MUTEX poisoned={}, ACC_MUTEX poisoned={})",
+                    slot,
+                    BLOCK_MUTEX.is_poisoned(),
+                    ACC_MUTEX.is_poisoned()
+                );
+                return Err(format!(
+                    "mutex poisoned after processing slot {} (block={}, acc={})",
+                    slot,
+                    BLOCK_MUTEX.is_poisoned(),
+                    ACC_MUTEX.is_poisoned()
+                )
+                .into());
             }
+        }
+        if is_first_send {
+            info!(
+                "process_upto first-send path done: last_sent_block={:?}",
+                self.last_sent_block
+            );
         }
         Ok(())
     }
