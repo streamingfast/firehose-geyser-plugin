@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+* Fixed silent validator death on solana-devnet (`trap invalid opcode` / SIGILL in `libfirehose_geyser_plugin.so` on the `solBankNotif` thread). Docker/CI built the plugin with `RUSTFLAGS=-C target-cpu=native`, so the `.so` could contain instructions from the builder CPU (e.g. AVX-512) that production hosts do not implement. Release builds now use portable `RUSTFLAGS=-C target-feature=+aes,+sse2` (the minimum gxhash requires) instead of `native`.
+* Added INFO-level stage breadcrumbs around post-startup account-cache apply, first-send `process_upto`, and block/account FIFO encode/write so the next failure leaves a clearer trail.
+
 ## v4.2.0-rc.0
 
 * Bumped to [Agave 4.2.0-rc.0](https://github.com/anza-xyz/agave/releases/tag/v4.2.0-rc.0).
