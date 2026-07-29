@@ -342,16 +342,18 @@ impl GeyserPlugin for Plugin {
     }
 
     fn notify_end_of_startup(&self) -> PluginResult<()> {
+        let hash_count = self
+            .state
+            .as_ref()
+            .expect("cannot get state while getting hash count (state is None)")
+            .read()
+            .expect("cannot get state while getting hash count (poisoned)")
+            .get_hash_count();
+        info!("preloaded account data hash count: {}", hash_count);
         info!(
-            "preloaded account data hash count: {}",
-            self.state
-                .as_ref()
-                .expect("cannot get state while getting hash count (state is None)")
-                .read()
-                .expect("cannot get state while getting hash count (poisoned)")
-                .get_hash_count()
+            "end of startup (with_block={}, with_account={}, send_processed={}, trace={})",
+            self.with_block, self.with_account, self.send_processed, self.trace
         );
-        info!("end of startup");
 
         let mut lock_state = self
             .state
@@ -360,6 +362,7 @@ impl GeyserPlugin for Plugin {
             .write()
             .expect("cannot get RW lock for notify_end_of_startup (poisoned)");
         lock_state.delete_startup_info();
+        info!("startup_received_slot cache released after end of startup");
         Ok(())
     }
 
@@ -373,7 +376,13 @@ impl GeyserPlugin for Plugin {
         status: &SlotStatus,
     ) -> PluginResult<()> {
         if ACC_MUTEX.is_poisoned() || BLOCK_MUTEX.is_poisoned() {
-            panic!("poisoned mutex")
+            panic!(
+                "output mutex poisoned before update_slot_status(slot={}, status={:?}): block={}, acc={}",
+                slot,
+                status,
+                BLOCK_MUTEX.is_poisoned(),
+                ACC_MUTEX.is_poisoned()
+            )
         }
         match status {
             SlotStatus::Processed => match self.send_processed {
@@ -494,7 +503,11 @@ impl GeyserPlugin for Plugin {
     // * calls state.set_block_info (which will fill in missing block info from confirmed_slots from RPC)
     fn notify_block_metadata(&self, block_info: ReplicaBlockInfoVersions<'_>) -> PluginResult<()> {
         if ACC_MUTEX.is_poisoned() || BLOCK_MUTEX.is_poisoned() {
-            panic!("poisoned mutex")
+            panic!(
+                "output mutex poisoned before notify_block_metadata: block={}, acc={}",
+                BLOCK_MUTEX.is_poisoned(),
+                ACC_MUTEX.is_poisoned()
+            )
         }
 
         let block_info = match block_info {
