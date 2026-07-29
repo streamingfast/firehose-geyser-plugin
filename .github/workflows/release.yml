@@ -2,6 +2,8 @@ name: Release
 
 on:
   push:
+    branches:
+      - 'release/**'
     tags:
       - 'v*'
 
@@ -39,6 +41,11 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=ref,event=tag
+            type=ref,event=branch
+            type=sha,prefix=
+          flavor: |
+            # Only promote :latest on non-prerelease tags (no beta/rc).
+            latest=${{ startsWith(github.ref, 'refs/tags/') && !contains(github.ref, 'beta') && !contains(github.ref, 'rc') }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
@@ -70,8 +77,14 @@ jobs:
           curl -L https://github.com/streamingfast/sfreleaser/releases/download/v0.13.1/sfreleaser_linux_x86_64.tar.gz | tar -xz
           chmod +x sfreleaser
 
+          # sfreleaser's default version pattern is a substring match
+          # (^## .*version.*), which incorrectly resolves e.g. v4.2.0-rc.0 to
+          # the section ## v4.2.0-rc.0-fh3.0-1. Force an exact header match.
+          escaped_version=$(python3 -c 'import re,sys; print(re.escape(sys.argv[1]))' "$RELEASE_VERSION")
+
           ./sfreleaser changelog extract-section \
-            github://token:${{ github.token }}@${{ github.repository }}/$GITHUB_SHA/CHANGELOG.md \
+            "github://token:${{ github.token }}@${{ github.repository }}/$GITHUB_SHA/CHANGELOG.md" \
+            --start-header-regex="^## ${escaped_version}$" \
             --github-output="changelog:$GITHUB_OUTPUT"
 
       - name: Build release notes
@@ -84,11 +97,16 @@ jobs:
             echo ""
             echo "### Docker image"
             echo ""
-            echo "This release is published as a Docker image (usable for devnet):"
+            echo "This release is published as a Docker image **for solana-devnet only**:"
             echo ""
             echo '```'
             echo "docker pull ${IMAGE}"
             echo '```'
+            echo ""
+            echo "For production workloads, build the plugin natively on the target host"
+            echo "(or with matching CPU features) so the \`.so\` can use host-optimal"
+            echo "instructions. The image is built with a portable feature set and is not"
+            echo "intended as the production binary."
           } > RELEASE_NOTES.md
 
       - name: Release
@@ -96,3 +114,4 @@ jobs:
         with:
           body_path: RELEASE_NOTES.md
           prerelease: ${{ contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
+          # No release assets: the architecture-specific plugin is built manually for production.
