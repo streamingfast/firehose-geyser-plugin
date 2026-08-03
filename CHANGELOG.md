@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v4.2.0-rc.1-fh3.0
 
 * Bumped to [Agave 4.2.0-rc.1](https://github.com/anza-xyz/agave/releases/tag/v4.2.0-rc.1) (`agave-geyser-plugin-interface`, `solana-rpc-client`, `solana-rpc-client-api`, `solana-transaction-status`, `solana-transaction-context`).
 * Aligned the Docker image's Solana validator to [`v4.2.0-rc.1-fh3.0`](https://github.com/streamingfast/solana/pkgs/container/solana) (was `v4.2.0-rc.0-fh3.0`).
