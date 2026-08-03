@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+* Bumped to [Agave 4.2.0-rc.1](https://github.com/anza-xyz/agave/releases/tag/v4.2.0-rc.1) (`agave-geyser-plugin-interface`, `solana-rpc-client`, `solana-rpc-client-api`, `solana-transaction-status`, `solana-transaction-context`).
+* Aligned the Docker image's Solana validator to [`v4.2.0-rc.1-fh3.0`](https://github.com/streamingfast/solana/pkgs/container/solana) (was `v4.2.0-rc.0-fh3.0`).
+* No plugin code change was required: the upstream range between `4.2.0-rc.0` and `4.2.0-rc.1` is 5 commits touching only `core` (vote listener, slot supporters, replay stage) and `ledger` (blockstore processor). The Geyser plugin interface is untouched — no trait signature changes, no field changes on `ReplicaAccountInfo*`, `ReplicaTransactionInfo*`, `ReplicaBlockInfo*` or `TransactionStatusMeta`.
+* The standalone `solana-*` crates (`solana-hash` 4.4.0, `solana-pubkey` 4.2.0, `solana-signature` 3.4.1, `solana-clock` 3.1.1, `solana-commitment-config` 3.1.1, `solana-message` 4.2.3, `solana-transaction` 4.1.4) are unchanged: Agave 4.2.0-rc.1 resolves the same versions the plugin already pins.
+* Validated against the `solana-battlefield` test suite (run locally), on top of the workspace unit tests.
 * CI: build and push Docker images on pushes to `release/**` (not only on tags).
 * CI: extract release notes for the exact tag section in CHANGELOG (avoids substring matches like `v4.2.0-rc.0` → `v4.2.0-rc.0-fh3.0-1`).
 * CI: clarify GitHub release Docker blurb — image is for solana-devnet only; production should use a native build for host-optimal instructions.
