@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v4.2.0-fh3.0
+
+* Bumped to [Agave 4.2.0](https://github.com/anza-xyz/agave/releases/tag/v4.2.0) (`agave-geyser-plugin-interface`, `solana-rpc-client`, `solana-rpc-client-api`, `solana-transaction-status`, `solana-transaction-context`).
+* Aligned the Docker image's Solana validator to [`v4.2.0-fh3.0`](https://github.com/streamingfast/solana/pkgs/container/solana) (was `v4.2.0-rc.1-fh3.0`).
+* No plugin code change was required: the upstream range between `4.2.0-rc.1` and `4.2.0` is 10 commits touching `account-decoder`/`transaction-status` (SPL Token-2022 instruction parsing), `poh`, `gossip`, `runtime`, `rpc` and `snapshots`. The Geyser plugin interface is untouched — no trait signature changes, no field changes on `ReplicaAccountInfo*`, `ReplicaTransactionInfo*`, `ReplicaBlockInfo*` or `TransactionStatusMeta`. The `transaction-status` changes are confined to the human-readable instruction parsers (`parse_token`, new `permissioned_burn` extension), which the plugin does not use — it consumes the raw `TransactionStatusMeta`, `InnerInstructions` and `Rewards` types.
+* Transitive dependency moves pulled in by Agave 4.2.0: `spl-token-2022-interface` 2.1.0 → 3.1.1, `spl-token-metadata-interface` 0.8.0 → 1.0.1, `spl-token-confidential-transfer-proof-extraction` 0.5.1 → 0.6.1, `solana-curve25519` 3.1.2 → 4.0.1, and `solana-zk-sdk` replaced by `solana-zk-sdk-pod`.
+* The standalone `solana-*` crates (`solana-hash` 4.4.0, `solana-pubkey` 4.2.0, `solana-signature` 3.4.1, `solana-clock` 3.1.1, `solana-commitment-config` 3.1.1, `solana-message` 4.2.3, `solana-transaction` 4.1.4) are unchanged: Agave 4.2.0 resolves the same versions the plugin already pins.
+* Validated against the `solana-battlefield` test suite (run locally against an Agave 4.2.0 `solana-test-validator`), on top of the workspace unit tests.
+
 ## v4.2.0-rc.1-fh3.0
 
 * Bumped to [Agave 4.2.0-rc.1](https://github.com/anza-xyz/agave/releases/tag/v4.2.0-rc.1) (`agave-geyser-plugin-interface`, `solana-rpc-client`, `solana-rpc-client-api`, `solana-transaction-status`, `solana-transaction-context`).
