@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v4.3.0-beta.2-fh3.0
+
+* Bumped to [Agave 4.3.0-beta.2](https://github.com/anza-xyz/agave/releases/tag/v4.3.0-beta.2) (`agave-geyser-plugin-interface`, `solana-rpc-client`, `solana-rpc-client-api`, `solana-transaction-status`, `solana-transaction-context`). This moves the plugin from the `4.2` release line to `4.3`. `v4.3.0-beta.2` is the most recent upstream tag with published, unyanked crates and it is live on devnet and testnet (`v4.3.0-beta.1` crates were yanked after a `cargo audit` failure on RUSTSEC-2026-0258).
+* Aligned the Docker image's Solana validator to `v4.3.0-beta.2-fh3.0` (was `v4.2.1-fh3.0`).
+* Bumped `rust-toolchain.toml` to `1.97.1` to match Agave 4.3 (was `1.96.1`).
+* No plugin code change was required. Agave 4.3 is an Alpenglow release and reworks the Geyser plugin interface, but backwards-compatibly: `update_account`, `notify_transaction`, `notify_entry` and `notify_block_metadata` are deprecated in favour of `update_account_from_snapshot`, `update_account_for_bank`, `notify_transaction_for_bank`, `notify_entry_for_bank` and `notify_block_metadata_for_bank`, which carry a `BankId`. Every new callback has a default implementation delegating to the old one, so the plugin's existing implementations keep receiving all events.
+* `update_slot_status` is now only called directly for statuses with no bank (`FirstShredReceived`, `Completed`, `Dead`); bank-scoped statuses (`Confirmed`, `Processed`, `Rooted`, `CreatedBank`) go to the new `update_bank_status`, whose default delegates to `update_slot_status`. The plugin does not override it, so slot handling is unchanged. The `SlotStatus` enum itself is unchanged and the plugin's match remains exhaustive.
+* New Alpenglow callbacks left unimplemented (defaults are no-ops): `notify_block_footer` (gated on `block_footer_notifications_enabled`, which stays `false`), `notify_entry_update_parent` and `notify_deshred_update_parent`.
+* The `transaction-status` changes in this range are confined to the human-readable token extension parsers (`confidential_transfer`, `confidential_mint_burn`, `permissioned_burn`), which the plugin does not use — it consumes the raw `TransactionStatusMeta`, `InnerInstructions` and `Rewards` types.
+* Standalone `solana-*` crates realigned to what Agave 4.3 resolves: `solana-hash` 4.4.0 → 4.6.0, `solana-pubkey` 4.2.1 → 4.3.0, `solana-signature` 3.4.1 → 3.5.2, `solana-clock` 3.1.1 → 3.2.0, `solana-message` 4.2.3 → 4.5.0, `solana-transaction` 4.1.4 → 4.2.0. `solana-commitment-config` stays at 3.1.1.
+* Validated against the `solana-battlefield` test suite (run locally against an Agave 4.3.0-beta.2 `solana-test-validator` built from the fork), on top of the workspace unit tests.
+
 ## v4.2.1-fh3.0
 
 * Bumped to [Agave 4.2.1](https://github.com/anza-xyz/agave/releases/tag/v4.2.1)
