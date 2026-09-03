@@ -46,16 +46,50 @@ pub struct Message {
     pub header: ::core::option::Option<MessageHeader>,
     #[prost(bytes="vec", repeated, tag="2")]
     pub account_keys: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
+    /// The blockhash that determines when the transaction expires. A v1 message calls
+    /// this the lifetime specifier; it is carried here unchanged.
     #[prost(bytes="vec", tag="3")]
     pub recent_blockhash: ::prost::alloc::vec::Vec<u8>,
     /// Top-level instructions
     /// T instructions (?)
     #[prost(message, repeated, tag="4")]
     pub instructions: ::prost::alloc::vec::Vec<CompiledInstruction>,
+    /// True for any message that carries a version prefix, which is every message
+    /// except a legacy one. Read `version` to tell the versions apart.
     #[prost(bool, tag="5")]
     pub versioned: bool,
+    /// Only a v0 message uses address lookup tables. Always empty for legacy and v1
+    /// messages.
     #[prost(message, repeated, tag="6")]
     pub address_table_lookups: ::prost::alloc::vec::Vec<MessageAddressTableLookup>,
+    /// The transaction version as it appears on the wire: 0 for a v0 message, 1 for a
+    /// v1 message. Unset for a legacy message, which carries no version prefix.
+    #[prost(uint32, optional, tag="7")]
+    pub version: ::core::option::Option<u32>,
+    /// The compute budget carried inline in a v1 message. Unset for legacy and v0
+    /// messages, which request the same settings through ComputeBudget program
+    /// instructions instead.
+    #[prost(message, optional, tag="8")]
+    pub transaction_config: ::core::option::Option<TransactionConfig>,
+}
+/// Compute budget settings carried inline in the message of a v1 transaction.
+/// Every field is unset when the transaction leaves it out, in which case the
+/// runtime default noted on the field applies.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct TransactionConfig {
+    /// Priority fee in lamports. Unset means no priority fee.
+    #[prost(uint64, optional, tag="1")]
+    pub priority_fee: ::core::option::Option<u64>,
+    /// Maximum compute units. Unset means 0.
+    #[prost(uint32, optional, tag="2")]
+    pub compute_unit_limit: ::core::option::Option<u32>,
+    /// Maximum bytes of account data that may be loaded. Unset means 0.
+    #[prost(uint32, optional, tag="3")]
+    pub loaded_accounts_data_size_limit: ::core::option::Option<u32>,
+    /// Heap size in bytes, always a multiple of 1024. Unset means 32768.
+    #[prost(uint32, optional, tag="4")]
+    pub heap_size: ::core::option::Option<u32>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
