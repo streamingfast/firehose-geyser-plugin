@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v4.3.0-beta.2-fh3.0-1
 
 * Emit the `version` and `transaction_config` fields added to `sf.solana.type.v1.Message` in [firehose-solana v1.4.0](https://github.com/streamingfast/firehose-solana/releases/tag/v1.4.0), for Solana transaction v1 (SIMD-0296, SIMD-0385). Transaction v1 activated on devnet at slot 492480000 and reaches mainnet around September 9.
 * `version` carries the wire version, so 0 for a v0 message and 1 for a v1 message, and stays unset for a legacy message. The plugin already decoded a v1 message but reported it through the `versioned` boolean, which cannot distinguish v0 from v1. `versioned` is unchanged.
