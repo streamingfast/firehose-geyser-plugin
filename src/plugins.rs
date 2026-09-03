@@ -14,7 +14,7 @@ use {
 use crate::pb::sf::solana::r#type::v1::{
     CompiledInstruction, ConfirmedTransaction, InnerInstruction, InnerInstructions, Message,
     MessageAddressTableLookup, MessageHeader, ReturnData, Reward, RewardType, TokenBalance,
-    Transaction, TransactionError, TransactionStatusMeta, UiTokenAmount,
+    Transaction, TransactionConfig, TransactionError, TransactionStatusMeta, UiTokenAmount,
 };
 
 use crate::state::{ACC_MUTEX, BLOCK_MUTEX};
@@ -836,7 +836,9 @@ fn versioned_to_message(
                 recent_blockhash: to_recent_block_hash(&legacy_msg.recent_blockhash),
                 instructions: to_compiled_instructions(&legacy_msg.instructions),
                 versioned: false,
+                version: None,
                 address_table_lookups: vec![],
+                transaction_config: None,
             }
         }
         solana_message::VersionedMessage::V0(v0_msg) => {
@@ -846,24 +848,56 @@ fn versioned_to_message(
                 recent_blockhash: to_recent_block_hash(msg.recent_blockhash()),
                 instructions: to_compiled_instructions(msg.instructions()),
                 versioned: true,
+                version: Some(0),
                 address_table_lookups: to_address_table_lookups(&v0_msg.address_table_lookups),
+                transaction_config: None,
             };
         }
         solana_message::VersionedMessage::V1(v1_msg) => {
-            // V1 is the new transaction message format introduced in solana-message 4.x.
-            // It carries its address-table state in `config` rather than explicit
-            // address_table_lookups, and renames `recent_blockhash` to `lifetime_specifier`.
-            // Best-effort mapping onto the existing firehose proto shape.
+            // A v1 message has no address lookup tables, and it names its blockhash the
+            // lifetime specifier. Its compute budget travels inline in `config` instead of
+            // in ComputeBudget program instructions.
             return Message {
                 header: Some(to_header(&v1_msg.header)),
                 account_keys: versioned_to_account_keys(&v1_msg.account_keys, loaded_addresses),
                 recent_blockhash: to_recent_block_hash(&v1_msg.lifetime_specifier),
                 instructions: to_compiled_instructions(&v1_msg.instructions),
                 versioned: true,
+                version: Some(1),
                 address_table_lookups: vec![],
+                transaction_config: to_transaction_config(&v1_msg.config),
             };
         }
     }
+}
+
+/// Maps the compute budget a v1 message carries inline. Returns `None` when the
+/// transaction requests nothing, so that an absent config and an all-default one look
+/// the same to a consumer.
+fn to_transaction_config(
+    config: &solana_message::v1::TransactionConfig,
+) -> Option<TransactionConfig> {
+    let solana_message::v1::TransactionConfig {
+        priority_fee,
+        compute_unit_limit,
+        loaded_accounts_data_size_limit,
+        heap_size,
+    } = config;
+
+    if priority_fee.is_none()
+        && compute_unit_limit.is_none()
+        && loaded_accounts_data_size_limit.is_none()
+        && heap_size.is_none()
+    {
+        return None;
+    }
+
+    Some(TransactionConfig {
+        priority_fee: *priority_fee,
+        compute_unit_limit: *compute_unit_limit,
+        loaded_accounts_data_size_limit: *loaded_accounts_data_size_limit,
+        heap_size: *heap_size,
+    })
 }
 
 fn versioned_to_account_keys(keys: &[Pubkey], loaded_addresses: &LoadedAddresses) -> Vec<Vec<u8>> {
@@ -891,7 +925,24 @@ fn to_message(
         recent_blockhash: to_recent_block_hash(msg.recent_blockhash()),
         instructions: to_compiled_instructions(msg.instructions()),
         versioned: msg.legacy_message().is_none(),
+        version: to_message_version(msg),
         address_table_lookups: to_address_table_lookups(msg.message_address_table_lookups()),
+        transaction_config: match msg {
+            solana_message::SanitizedMessage::V1(cached_msg) => {
+                to_transaction_config(&cached_msg.message.config)
+            }
+            _ => None,
+        },
+    }
+}
+
+/// The transaction version as it appears on the wire. A legacy message carries no version
+/// prefix and maps to `None`.
+fn to_message_version(msg: &solana_message::SanitizedMessage) -> Option<u32> {
+    match msg {
+        solana_message::SanitizedMessage::Legacy(_) => None,
+        solana_message::SanitizedMessage::V0(_) => Some(0),
+        solana_message::SanitizedMessage::V1(_) => Some(1),
     }
 }
 
