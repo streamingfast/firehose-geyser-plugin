@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+* Emit the `version` and `transaction_config` fields added to `sf.solana.type.v1.Message` in [firehose-solana v1.4.0](https://github.com/streamingfast/firehose-solana/releases/tag/v1.4.0), for Solana transaction v1 (SIMD-0296, SIMD-0385). Transaction v1 activated on devnet at slot 492480000 and reaches mainnet around September 9.
+* `version` carries the wire version, so 0 for a v0 message and 1 for a v1 message, and stays unset for a legacy message. The plugin already decoded a v1 message but reported it through the `versioned` boolean, which cannot distinguish v0 from v1. `versioned` is unchanged.
+* `transaction_config` carries the compute budget a v1 message holds inline, which the plugin previously dropped. Legacy and v0 messages request the same settings through ComputeBudget program instructions and leave the field unset, as does a v1 message that requests nothing. Both the `ReplicaTransactionInfoV3` and `ReplicaTransactionInfoV2` paths fill in the two fields.
+* Added a type check over `solana_message::v1::TransactionConfig` so that a field added upstream fails the build rather than being silently dropped.
+* Repinned the `buf.build/streamingfast/firehose-solana` dependency to the commit carrying the new fields.
+
 ## v4.3.0-beta.2-fh3.0
 
 * Bumped to [Agave 4.3.0-beta.2](https://github.com/anza-xyz/agave/releases/tag/v4.3.0-beta.2) (`agave-geyser-plugin-interface`, `solana-rpc-client`, `solana-rpc-client-api`, `solana-transaction-status`, `solana-transaction-context`). This moves the plugin from the `4.2` release line to `4.3`. `v4.3.0-beta.2` is the most recent upstream tag with published, unyanked crates and it is live on devnet and testnet (`v4.3.0-beta.1` crates were yanked after a `cargo audit` failure on RUSTSEC-2026-0258).

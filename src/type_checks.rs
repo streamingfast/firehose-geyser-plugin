@@ -175,6 +175,18 @@ fn check_message_address_table_lookup() {
     } = lookup;
 }
 
+#[allow(dead_code, invalid_value)]
+fn check_v1_transaction_config() {
+    let config: solana_message::v1::TransactionConfig = unsafe { std::mem::zeroed() };
+
+    let solana_message::v1::TransactionConfig {
+        priority_fee: _,
+        compute_unit_limit: _,
+        loaded_accounts_data_size_limit: _,
+        heap_size: _,
+    } = config;
+}
+
 #[allow(dead_code)]
 fn check_versioned_message() {
     let msg: solana_message::VersionedMessage = unsafe { std::mem::zeroed() };
