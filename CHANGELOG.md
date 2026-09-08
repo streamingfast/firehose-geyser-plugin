@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## v4.2.2-fh3.0
 
+* Bumped to [Agave 4.2.2](https://github.com/anza-xyz/agave/releases/tag/v4.2.2) (`agave-geyser-plugin-interface`, `solana-rpc-client`, `solana-rpc-client-api`, `solana-transaction-status`, `solana-transaction-context`).
+* Aligned the Docker image's Solana validator to `v4.2.2-fh3.0` (was `v4.2.1-fh3.0`).
+* No plugin code change was required for the Agave bump: the upstream range between `4.2.1` and `4.2.2` is 4 commits — a `cargo audit` ignore for RUSTSEC-2026-0258, `tpu-client-next` dropping QUIC datagram support, `storage-proto` reconstructing v1 messages instead of downgrading them to v0, and the version bump itself. The Geyser plugin interface is untouched, and the plugin does not use `tpu-client-next` or `storage-proto`.
+* The standalone `solana-*` crates (`solana-hash` 4.4.0, `solana-pubkey` 4.2.1, `solana-signature` 3.4.1, `solana-clock` 3.1.1, `solana-commitment-config` 3.1.1, `solana-message` 4.2.3, `solana-transaction` 4.1.4) are unchanged: Agave 4.2.2 resolves the same versions the plugin already pins, and `solana-pubkey` has no 4.2.2 release.
 * Emit the `version` and `transaction_config` fields added to `sf.solana.type.v1.Message` in [firehose-solana v1.4.0](https://github.com/streamingfast/firehose-solana/releases/tag/v1.4.0), for Solana transaction v1 (SIMD-0296, SIMD-0385). Transaction v1 activated on devnet at slot 492480000 and reaches mainnet around September 9.
 * `version` carries the wire version, so 0 for a v0 message and 1 for a v1 message, and stays unset for a legacy message. The plugin already decoded a v1 message but reported it through the `versioned` boolean, which cannot distinguish v0 from v1. `versioned` is unchanged.
 * `transaction_config` carries the compute budget a v1 message holds inline, which the plugin previously dropped. Legacy and v0 messages request the same settings through ComputeBudget program instructions and leave the field unset, as does a v1 message that requests nothing. Both the `ReplicaTransactionInfoV3` and `ReplicaTransactionInfoV2` paths fill in the two fields.
