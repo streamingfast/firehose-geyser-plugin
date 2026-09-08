@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v4.3.0-rc.0-fh3.0
+
+* Bumped to [Agave 4.3.0-rc.0](https://github.com/anza-xyz/agave/releases/tag/v4.3.0-rc.0) (`agave-geyser-plugin-interface`, `solana-rpc-client`, `solana-rpc-client-api`, `solana-transaction-status`, `solana-transaction-context`), which is 16 upstream commits past `v4.3.0-beta.2` and covers the `v4.3.0-beta.3` and `v4.3.0-rc.0` releases. All five crates are published and unyanked.
+* Aligned the Docker image's Solana validator to `v4.3.0-rc.0-fh3.0` (was `v4.3.0-beta.2-fh3.0`).
+* No plugin code change was required. The Geyser plugin interface is untouched in this range, as are `transaction-status`, `transaction-context` and the `rpc-client` crates — no trait signature changes, no field changes on `ReplicaAccountInfo*`, `ReplicaTransactionInfo*`, `ReplicaBlockInfo*` or `TransactionStatusMeta`.
+* `rust-toolchain.toml` stays at `1.97.1` and the standalone `solana-*` pins are unchanged: Agave 4.3.0-rc.0 resolves the same `solana-hash` 4.6.0, `solana-pubkey` 4.3.0, `solana-signature` 3.5.2, `solana-clock` 3.2.0, `solana-commitment-config` 3.1.1, `solana-message` 4.5.0 and `solana-transaction` 4.2.0. The `Cargo.lock` change is limited to the 35 Agave-versioned crates; no transitive dependency moved.
+* Upstream fixed the same class of bug the transaction v1 work addressed, on a path the plugin does not use: `storage-proto` was reading every stored V1 message back as a V0, dropping its inline compute budget, because it branched on `versioned`, which is true for V0 and V1 alike ([#14874](https://github.com/anza-xyz/agave/pull/14874)). That is the Bigtable decode path. The plugin builds its protobuf straight from `VersionedMessage` and reads the V1 config directly, so it was never affected.
+* Validated against the `solana-battlefield` test suite (run locally against an Agave 4.3.0-rc.0 `solana-test-validator` built from the fork), on top of the workspace unit tests.
+
 ## v4.3.0-beta.2-fh3.0-1
 
 * Emit the `version` and `transaction_config` fields added to `sf.solana.type.v1.Message` in [firehose-solana v1.4.0](https://github.com/streamingfast/firehose-solana/releases/tag/v1.4.0), for Solana transaction v1 (SIMD-0296, SIMD-0385). Transaction v1 activated on devnet at slot 492480000 and reaches mainnet around September 9.
