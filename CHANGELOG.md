@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+* Raised `max_supported_transaction_version` to 1 on the RPC block-info fallback. The setting is inert today because that call asks for `TransactionDetails::Signatures`, which `getBlock` encodes without checking the version, but at 0 the call would start failing on blocks holding a v1 transaction if the request ever asked for full transactions.
+
 ## v4.3.0-rc.0-fh3.0
 
 * Bumped to [Agave 4.3.0-rc.0](https://github.com/anza-xyz/agave/releases/tag/v4.3.0-rc.0) (`agave-geyser-plugin-interface`, `solana-rpc-client`, `solana-rpc-client-api`, `solana-transaction-status`, `solana-transaction-context`), which is 16 upstream commits past `v4.3.0-beta.2` and covers the `v4.3.0-beta.3` and `v4.3.0-rc.0` releases. All five crates are published and unyanked.
