@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * `transaction_config` carries the compute budget a v1 message holds inline, which the plugin previously dropped. Legacy and v0 messages request the same settings through ComputeBudget program instructions and leave the field unset, as does a v1 message that requests nothing. Both the `ReplicaTransactionInfoV3` and `ReplicaTransactionInfoV2` paths fill in the two fields.
 * Added a type check over `solana_message::v1::TransactionConfig` so that a field added upstream fails the build rather than being silently dropped.
 * Repinned the `buf.build/streamingfast/firehose-solana` dependency to the commit carrying the new fields.
+* Raised `max_supported_transaction_version` to 1 on the RPC block-info fallback. The setting is inert today because that call asks for `TransactionDetails::Signatures`, which `getBlock` encodes without checking the version, but at 0 the call would start failing on blocks holding a v1 transaction if the request ever asked for full transactions.
 
 ## v4.2.1-fh3.0
 

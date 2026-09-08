@@ -77,7 +77,8 @@ const DEFAULT_RPC_BLOCK_CONFIG: RpcBlockConfig = RpcBlockConfig {
     transaction_details: Some(TransactionDetails::Signatures),
     rewards: Some(true),
     commitment: Some(CommitmentConfig::confirmed()),
-    max_supported_transaction_version: Some(0),
+    // Only enforced by getBlock when transaction_details asks for Full or Accounts.
+    max_supported_transaction_version: Some(1),
 };
 
 pub struct State {
