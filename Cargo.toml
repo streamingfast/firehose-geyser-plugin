@@ -3,7 +3,7 @@ members = [".", "logger"]
 
 [package]
 name = "firehose-geyser-plugin"
-version = "4.3.0-beta.2"
+version = "4.3.0-rc.0"
 edition = "2021"
 
 [lib]
@@ -30,11 +30,11 @@ solana-hash = "4.6.0"
 solana-pubkey = "4.3.0"
 solana-signature = "3.5.2"
 
-agave-geyser-plugin-interface = "=4.3.0-beta.2"
-solana-rpc-client = "=4.3.0-beta.2"
-solana-rpc-client-api = "=4.3.0-beta.2"
-solana-transaction-status = "=4.3.0-beta.2"
-solana-transaction-context = "=4.3.0-beta.2"
+agave-geyser-plugin-interface = "=4.3.0-rc.0"
+solana-rpc-client = "=4.3.0-rc.0"
+solana-rpc-client-api = "=4.3.0-rc.0"
+solana-transaction-status = "=4.3.0-rc.0"
+solana-transaction-context = "=4.3.0-rc.0"
 solana-clock = "3.2.0"
 solana-commitment-config = "3.1.1"
 solana-message = "4.5.0"
