@@ -8,7 +8,11 @@ use {
         ReplicaEntryInfoVersions, ReplicaTransactionInfoVersions, Result as PluginResult,
     },
     gxhash::gxhash64,
-    std::{concat, env, sync::RwLock},
+    std::{
+        concat, env,
+        sync::{RwLock, RwLockWriteGuard},
+        time::Instant,
+    },
 };
 
 use crate::pb::sf::solana::r#type::v1::{
@@ -18,6 +22,9 @@ use crate::pb::sf::solana::r#type::v1::{
 };
 
 use crate::state::{ACC_MUTEX, BLOCK_MUTEX};
+use crate::stats::{
+    NOTIFY_BLOCK_METADATA, NOTIFY_TRANSACTION, STATE_LOCK_WAIT, UPDATE_ACCOUNT, UPDATE_SLOT_STATUS,
+};
 use crate::utils::convert_sol_timestamp;
 use env_logger::Target;
 use log::{debug, error, info, LevelFilter};
@@ -100,6 +107,18 @@ impl Plugin {
         self.send_processed
     }
 
+    fn write_state(&self, context: &str) -> RwLockWriteGuard<'_, State> {
+        let started = Instant::now();
+        let guard = self
+            .state
+            .as_ref()
+            .unwrap_or_else(|| panic!("cannot get RW lock for {} (state is None)", context))
+            .write()
+            .unwrap_or_else(|_| panic!("cannot get RW lock for {} (poisoned)", context));
+        STATE_LOCK_WAIT.record_since(started);
+        guard
+    }
+
     /// Returns a copy of the State object at time of calling, refer
     /// to [State::internal_copy] for details on what is copied.
     pub fn state_copy(&self) -> State {
@@ -129,12 +148,7 @@ impl Plugin {
             return;
         }
 
-        let mut lock_state = self
-            .state
-            .as_ref()
-            .expect("cannot get RW lock for set_account (state is None)")
-            .write()
-            .expect("cannot get RW lock for set_account (poisoned)");
+        let mut lock_state = self.write_state("set_account");
 
         let data_hash = if data.len() == 0 {
             0
@@ -300,6 +314,7 @@ impl GeyserPlugin for Plugin {
         if !self.with_account {
             return Ok(());
         }
+        let _timing = UPDATE_ACCOUNT.start();
         match account {
             ReplicaAccountInfoVersions::V0_0_1(account) => {
                 self.set_account(
@@ -355,12 +370,7 @@ impl GeyserPlugin for Plugin {
             self.with_block, self.with_account, self.send_processed, self.trace
         );
 
-        let mut lock_state = self
-            .state
-            .as_ref()
-            .expect("cannot get RW lock for notify_end_of_startup (state is None)")
-            .write()
-            .expect("cannot get RW lock for notify_end_of_startup (poisoned)");
+        let mut lock_state = self.write_state("notify_end_of_startup");
         lock_state.delete_startup_info();
         info!("startup_received_slot cache released after end of startup");
         Ok(())
@@ -375,6 +385,7 @@ impl GeyserPlugin for Plugin {
         _parent: Option<u64>,
         status: &SlotStatus,
     ) -> PluginResult<()> {
+        let _timing = UPDATE_SLOT_STATUS.start();
         if ACC_MUTEX.is_poisoned() || BLOCK_MUTEX.is_poisoned() {
             panic!(
                 "output mutex poisoned before update_slot_status(slot={}, status={:?}): block={}, acc={}",
@@ -392,12 +403,7 @@ impl GeyserPlugin for Plugin {
                         slot,
                         _parent.unwrap_or_default()
                     );
-                    let mut lock_state = self
-                        .state
-                        .as_ref()
-                        .expect("cannot get RW lock for update_slot_status (state is None)")
-                        .write()
-                        .expect("cannot get RW lock for update_slot_status (poisoned)");
+                    let mut lock_state = self.write_state("update_slot_status");
                     lock_state.set_confirmed_slot(slot, self.trace);
                 }
                 false => {
@@ -410,12 +416,7 @@ impl GeyserPlugin for Plugin {
             },
             SlotStatus::Rooted => {
                 debug!("slot rooted {}", slot);
-                self.state
-                    .as_ref()
-                    .expect("cannot get RW lock for set_lib (state is None)")
-                    .write()
-                    .expect("cannot get RW lock for set_lib (poisoned)")
-                    .set_lib(slot);
+                self.write_state("set_lib").set_lib(slot);
             }
             SlotStatus::Completed => {}
             SlotStatus::FirstShredReceived => {}
@@ -435,12 +436,7 @@ impl GeyserPlugin for Plugin {
                         slot,
                         _parent.unwrap_or_default()
                     );
-                    let mut lock_state = self
-                        .state
-                        .as_ref()
-                        .expect("cannot get RW lock for set_confirmed_slot (state is None)")
-                        .write()
-                        .expect("cannot get RW lock for set_confirmed_slot (poisoned)");
+                    let mut lock_state = self.write_state("set_confirmed_slot");
                     lock_state.set_confirmed_slot(slot, self.trace);
                 }
             },
@@ -461,6 +457,7 @@ impl GeyserPlugin for Plugin {
         if !self.with_block {
             return Ok(());
         }
+        let _timing = NOTIFY_TRANSACTION.start();
 
         let index;
         let compiled_transaction = match transaction {
@@ -482,12 +479,7 @@ impl GeyserPlugin for Plugin {
             transaction: compiled_transaction,
         };
 
-        let mut lock_state = self
-            .state
-            .as_ref()
-            .expect("cannot get RW lock for notify_transaction (state is None)")
-            .write()
-            .expect("cannot get RW lock for notify_transaction (poisoned)");
+        let mut lock_state = self.write_state("notify_transaction");
 
         lock_state.set_transaction(slot, tx, self.trace);
         Ok(())
@@ -502,6 +494,7 @@ impl GeyserPlugin for Plugin {
     // * decodes the blockinfo version
     // * calls state.set_block_info (which will fill in missing block info from confirmed_slots from RPC)
     fn notify_block_metadata(&self, block_info: ReplicaBlockInfoVersions<'_>) -> PluginResult<()> {
+        let _timing = NOTIFY_BLOCK_METADATA.start();
         if ACC_MUTEX.is_poisoned() || BLOCK_MUTEX.is_poisoned() {
             panic!(
                 "output mutex poisoned before notify_block_metadata: block={}, acc={}",
@@ -547,12 +540,7 @@ impl GeyserPlugin for Plugin {
                 transaction_count: blockinfo.executed_transaction_count,
             },
         };
-        let mut lock_state = self
-            .state
-            .as_ref()
-            .expect("state is None while updating slot status")
-            .write()
-            .expect("rw mutex poisoned while updating slot status");
+        let mut lock_state = self.write_state("notify_block_metadata");
 
         lock_state.set_block_info(block_info, self.trace);
 

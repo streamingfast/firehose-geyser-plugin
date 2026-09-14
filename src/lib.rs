@@ -3,6 +3,7 @@ mod config;
 mod pb;
 pub mod plugins;
 mod state;
+mod stats;
 mod type_checks;
 mod utils;
 
