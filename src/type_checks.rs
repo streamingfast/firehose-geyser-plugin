@@ -97,6 +97,7 @@ fn check_reward_type() {
         solana_transaction_status::RewardType::Voting => {}
         solana_transaction_status::RewardType::Staking => {}
         solana_transaction_status::RewardType::DeactivatedStake => {}
+        solana_transaction_status::RewardType::VATDebit => {}
     }
 }
 
