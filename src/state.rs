@@ -109,10 +109,19 @@ pub struct State {
     pub cursor_path: String,
     pub dev_config: DevelopmentConfig,
 
+    /// Slot of the last `memory stats` log line.
+    pub last_stats_slot: u64,
+    /// Transactions received for a slot at or below `last_sent_block`, which are never sent.
+    pub late_transactions: u64,
+    /// Account updates received for a slot at or below `last_sent_block`.
+    pub late_account_updates: u64,
+
     local_rpc_client: Option<RpcClient>,
     remote_rpc_client: Option<RpcClient>,
     block_printer: BlockPrinter,
 }
+
+const MEMORY_STATS_INTERVAL_SLOTS: u64 = 100;
 
 impl State {
     pub fn new(
@@ -141,6 +150,10 @@ impl State {
 
             transactions: HashMap::default(),
             processed_slots: HashMap::default(),
+
+            last_stats_slot: 0,
+            late_transactions: 0,
+            late_account_updates: 0,
 
             local_rpc_client: Some(local_rpc_client),
             remote_rpc_client: Some(remote_rpc_client),
@@ -172,6 +185,9 @@ impl State {
             processed_slots: self.processed_slots.clone(),
             cursor_path: self.cursor_path.clone(),
             dev_config: self.dev_config.clone(),
+            last_stats_slot: self.last_stats_slot,
+            late_transactions: self.late_transactions,
+            late_account_updates: self.late_account_updates,
 
             // Cannot clone those
             local_rpc_client: None,
@@ -217,6 +233,12 @@ impl State {
     }
 
     pub fn cache_block_from_rpc(&mut self, slot: u64, trace: bool) {
+        let started = std::time::Instant::now();
+        self.fetch_block_from_rpc(slot, trace);
+        crate::stats::RPC_BLOCK_FETCH.record_since(started);
+    }
+
+    fn fetch_block_from_rpc(&mut self, slot: u64, trace: bool) {
         match self
             .local_rpc_client
             .as_ref()
@@ -334,7 +356,10 @@ impl State {
 
         if self.is_ready(slot) {
             if let Err(e) = self.process_upto(trace, slot) {
-                panic!("process_upto failed after set_confirmed_slot({}): {}", slot, e)
+                panic!(
+                    "process_upto failed after set_confirmed_slot({}): {}",
+                    slot, e
+                )
             }
         }
     }
@@ -383,6 +408,10 @@ impl State {
 
     pub fn set_block_info(&mut self, block_info: BlockInfo, trace: bool) {
         let slot = block_info.slot;
+        if slot >= self.last_stats_slot + MEMORY_STATS_INTERVAL_SLOTS {
+            self.last_stats_slot = slot;
+            self.log_memory_stats(slot);
+        }
         if self.lib.is_none() {
             // this may set the cursor to none
             self.set_last_finalized_block_from_rpc();
@@ -528,6 +557,7 @@ impl State {
     ) {
         if let Some(last_sent) = self.last_sent_block {
             if last_sent >= slot {
+                self.late_account_updates += 1;
                 error!("Received account data for slot {} which is older than the last sent block {} (owner: {:?}, account: {:?})", slot, last_sent,  bs58::encode(pub_key).into_string(), bs58::encode(owner).into_string());
             }
         }
@@ -614,6 +644,12 @@ impl State {
                 slot
             );
         }
+        if self
+            .last_sent_block
+            .is_some_and(|last_sent| slot <= last_sent)
+        {
+            self.late_transactions += 1;
+        }
 
         if let Some(txs) = self.transactions.get_mut(&slot) {
             txs.push(transaction);
@@ -626,7 +662,10 @@ impl State {
 
         if self.is_ready(slot) {
             if let Err(e) = self.process_upto(trace, slot) {
-                panic!("process_upto failed after set_transaction(slot={}): {}", slot, e)
+                panic!(
+                    "process_upto failed after set_transaction(slot={}): {}",
+                    slot, e
+                )
             }
         }
     }
@@ -829,11 +868,7 @@ impl State {
             );
 
             if must_send {
-                let tx_count = self
-                    .transactions
-                    .get(&slot)
-                    .map(|t| t.len())
-                    .unwrap_or(0);
+                let tx_count = self.transactions.get(&slot).map(|t| t.len()).unwrap_or(0);
                 info!(
                     "process_upto: preparing to send slot {} (account_changes={}, txs={}, parent={}, lib={})",
                     slot,
@@ -893,6 +928,79 @@ impl State {
             );
         }
         Ok(())
+    }
+
+    /// Logs the size of every map the plugin keeps between notifications, plus the
+    /// fifo writes still in flight, so memory growth can be attributed to one of them.
+    pub fn log_memory_stats(&self, slot: u64) {
+        use crate::stats::{
+            NOTIFY_BLOCK_METADATA, NOTIFY_TRANSACTION, PENDING_ACCOUNT_BLOCK_WRITES,
+            PENDING_BLOCK_WRITES, PENDING_WRITE_BYTES, RPC_BLOCK_FETCH, STATE_LOCK_WAIT,
+            UPDATE_ACCOUNT, UPDATE_SLOT_STATUS,
+        };
+        use std::sync::atomic::Ordering;
+
+        let mut account_changes = 0usize;
+        let mut account_data_bytes = 0usize;
+        for changes in self.block_account_changes.values() {
+            account_changes += changes.len();
+            account_data_bytes += changes
+                .values()
+                .map(|c| c.account.data.len())
+                .sum::<usize>();
+        }
+
+        // Counts only: this runs under the state lock, and the map can hold transactions of
+        // fork slots that are never purged, so per-transaction work would grow without bound.
+        let transactions: usize = self.transactions.values().map(Vec::len).sum();
+        let stale_transaction_slots = self.last_sent_block.map_or(0, |last_sent| {
+            self.transactions
+                .keys()
+                .filter(|&&s| s <= last_sent)
+                .count()
+        });
+
+        info!(
+            "memory stats at slot {}: last_sent_block={:?} lib={:?} \
+             block_account_changes(slots={} min_slot={:?} accounts={} data_bytes={}) \
+             transactions(slots={} min_slot={:?} stale_slots={} count={}) \
+             block_infos={} confirmed_slots={} processed_slots={} \
+             account_data_hash={} account_owners={} startup_received_slot={} \
+             late_transactions={} late_account_updates={} \
+             pending_writes(blocks={} account_blocks={} base64_bytes={})",
+            slot,
+            self.last_sent_block,
+            self.lib,
+            self.block_account_changes.len(),
+            self.block_account_changes.keys().min(),
+            account_changes,
+            account_data_bytes,
+            self.transactions.len(),
+            self.transactions.keys().min(),
+            stale_transaction_slots,
+            transactions,
+            self.block_infos.len(),
+            self.confirmed_slots.len(),
+            self.processed_slots.len(),
+            self.account_data_hash.len(),
+            self.account_owners.len(),
+            self.startup_received_slot.len(),
+            self.late_transactions,
+            self.late_account_updates,
+            PENDING_BLOCK_WRITES.load(Ordering::Relaxed),
+            PENDING_ACCOUNT_BLOCK_WRITES.load(Ordering::Relaxed),
+            PENDING_WRITE_BYTES.load(Ordering::Relaxed),
+        );
+        info!(
+            "callback timings since previous stats at slot {}: {} {} {} {} {} {}",
+            slot,
+            UPDATE_ACCOUNT.take(),
+            NOTIFY_TRANSACTION.take(),
+            NOTIFY_BLOCK_METADATA.take(),
+            UPDATE_SLOT_STATUS.take(),
+            STATE_LOCK_WAIT.take(),
+            RPC_BLOCK_FETCH.take(),
+        );
     }
 
     pub fn get_hash_count(&self) -> usize {
