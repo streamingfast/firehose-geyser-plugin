@@ -266,6 +266,8 @@ pub enum RewardType {
     Staking = 3,
     Voting = 4,
     DeactivatedStake = 5,
+    /// Burn of the validator admission ticket. The reward carries a negative lamports value.
+    VatDebit = 6,
 }
 impl RewardType {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -280,6 +282,7 @@ impl RewardType {
             RewardType::Staking => "Staking",
             RewardType::Voting => "Voting",
             RewardType::DeactivatedStake => "DeactivatedStake",
+            RewardType::VatDebit => "VATDebit",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -291,6 +294,7 @@ impl RewardType {
             "Staking" => Some(Self::Staking),
             "Voting" => Some(Self::Voting),
             "DeactivatedStake" => Some(Self::DeactivatedStake),
+            "VATDebit" => Some(Self::VatDebit),
             _ => None,
         }
     }

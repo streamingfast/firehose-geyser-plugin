@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 * Raised `max_supported_transaction_version` to 1 on the RPC block-info fallback. The setting is inert today because that call asks for `TransactionDetails::Signatures`, which `getBlock` encodes without checking the version, but at 0 the call would start failing on blocks holding a v1 transaction if the request ever asked for full transactions.
+* Bumped to [Agave 4.3.0-rc.1](https://github.com/anza-xyz/agave/releases/tag/v4.3.0-rc.1) (`agave-geyser-plugin-interface`, `solana-rpc-client`, `solana-rpc-client-api`, `solana-transaction-status`, `solana-transaction-context`), 5 upstream commits past `v4.3.0-rc.0`. The Geyser plugin interface, `transaction-status`, `transaction-context` and the `rpc-client` crates are untouched in this range.
+* Agave 4.3.0-rc.1 moves `solana-reward-info` from 6.3.0 to 7.0.0, which adds `RewardType::VATDebit` for the validator admission ticket burn (the reward carries a negative `lamports` value). The plugin maps it to the new `VATDebit = 6` value of `sf.solana.type.v1.RewardType`, and the reward type check covers it. Repinned the `buf.build/streamingfast/firehose-solana` dependency to the commit carrying that value.
+* The Docker image's Solana validator stays at `v4.3.0-rc.0-fh3.0`, as the fork has no `v4.3.0-rc.1-fh3.0` image yet. `rust-toolchain.toml` and the standalone `solana-*` pins are unchanged: Agave 4.3.0-rc.1 resolves the same versions as rc.0.
 
 ## v4.3.0-rc.0-fh3.0
 

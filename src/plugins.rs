@@ -780,6 +780,7 @@ fn to_pb_reward_type(reward_type: Option<solana_transaction_status::RewardType>)
         Some(solana_transaction_status::RewardType::DeactivatedStake) => {
             RewardType::DeactivatedStake
         }
+        Some(solana_transaction_status::RewardType::VATDebit) => RewardType::VatDebit,
     }
 }
 
