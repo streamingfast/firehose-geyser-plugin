@@ -1,10 +1,12 @@
 use crate::pb::sf::solana::r#type::v1::{AccountBlock, Block};
 use crate::state::{BlockInfo, ACC_MUTEX, BLOCK_MUTEX, CURSOR_MUTEX};
+use crate::stats::{PENDING_ACCOUNT_BLOCK_WRITES, PENDING_BLOCK_WRITES, PENDING_WRITE_BYTES};
 use log::{debug, error, info, warn};
 use prost::Message;
 use rbase64;
 use std::fs::File;
 use std::io::Write;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 pub struct BlockPrinter {
@@ -91,16 +93,20 @@ impl BlockPrinter {
                 info!("printing block {} (noop mode)", slot);
                 write_cursor(&cursor_path, slot);
             } else {
+                PENDING_BLOCK_WRITES.fetch_add(1, Ordering::Relaxed);
                 std::thread::spawn(move || {
                     let started = Instant::now();
                     info!(
                         "printing block {} {} with transaction count of {} (encode starting)",
-                        block.slot, block_hash, block.transactions.len()
+                        block.slot,
+                        block_hash,
+                        block.transactions.len()
                     );
                     let encoded_block = block.encode_to_vec();
                     let encoded_len = encoded_block.len();
                     let base64_encoded_block = rbase64::encode(&encoded_block);
                     let payload = base64_encoded_block;
+                    PENDING_WRITE_BYTES.fetch_add(payload.len(), Ordering::Relaxed);
                     info!(
                         "block_printer: encoded block {} (protobuf_bytes={}, base64_bytes={}) in {:?}",
                         slot,
@@ -112,10 +118,7 @@ impl BlockPrinter {
                     let _lock = match BLOCK_MUTEX.lock() {
                         Ok(lock) => lock,
                         Err(e) => {
-                            error!(
-                                "block_mutex poisoned while writing block {}: {}",
-                                slot, e
-                            );
+                            error!("block_mutex poisoned while writing block {}: {}", slot, e);
                             // Re-panic so callers detect poison on next check, but after a clear log line.
                             panic!("block_mutex lock poisoned while writing block {}", slot);
                         }
@@ -133,6 +136,8 @@ impl BlockPrinter {
                         // Keep previous fail-fast behavior so poison is visible upstream.
                         panic!("cannot write to out_block for slot {}: {}", slot, e);
                     }
+                    PENDING_WRITE_BYTES.fetch_sub(payload.len(), Ordering::Relaxed);
+                    PENDING_BLOCK_WRITES.fetch_sub(1, Ordering::Relaxed);
                     info!(
                         "block_printer: wrote block {} to fifo in {:?}",
                         slot,
@@ -161,6 +166,7 @@ impl BlockPrinter {
                 info!("printing account_block {} (noop mode)", slot);
                 write_cursor(&cursor_path, slot);
             } else {
+                PENDING_ACCOUNT_BLOCK_WRITES.fetch_add(1, Ordering::Relaxed);
                 std::thread::spawn(move || {
                     let started = Instant::now();
                     info!(
@@ -171,6 +177,7 @@ impl BlockPrinter {
                     let encoded_len = encoded_account_block.len();
                     let base64_encoded_block = rbase64::encode(&encoded_account_block);
                     let payload = base64_encoded_block;
+                    PENDING_WRITE_BYTES.fetch_add(payload.len(), Ordering::Relaxed);
                     info!(
                         "block_printer: encoded account_block {} (protobuf_bytes={}, base64_bytes={}) in {:?}",
                         slot,
@@ -204,6 +211,8 @@ impl BlockPrinter {
                         );
                         panic!("cannot write to out_account for slot {}: {}", slot, e);
                     }
+                    PENDING_WRITE_BYTES.fetch_sub(payload.len(), Ordering::Relaxed);
+                    PENDING_ACCOUNT_BLOCK_WRITES.fetch_sub(1, Ordering::Relaxed);
                     info!(
                         "block_printer: wrote account_block {} to fifo in {:?}",
                         slot,
@@ -232,7 +241,10 @@ fn write_cursor(cursor_file: &str, cursor: u64) {
     let mut last = match CURSOR_MUTEX.lock() {
         Ok(lock) => lock,
         Err(e) => {
-            error!("cursor_mutex poisoned while writing cursor {}: {}", cursor, e);
+            error!(
+                "cursor_mutex poisoned while writing cursor {}: {}",
+                cursor, e
+            );
             panic!("cursor_mutex lock poisoned while writing cursor {}", cursor);
         }
     };
@@ -242,14 +254,8 @@ fn write_cursor(cursor_file: &str, cursor: u64) {
     }
     if *last == cursor {
         if let Err(e) = std::fs::write(cursor_file, cursor.to_string()) {
-            error!(
-                "cannot write cursor {} to {}: {}",
-                cursor, cursor_file, e
-            );
-            panic!(
-                "cannot write cursor {} to {}: {}",
-                cursor, cursor_file, e
-            );
+            error!("cannot write cursor {} to {}: {}", cursor, cursor_file, e);
+            panic!("cannot write cursor {} to {}: {}", cursor, cursor_file, e);
         }
         debug!("wrote cursor {} to {}", cursor, cursor_file);
     } else {

@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+* Every 100 slots the plugin now logs two diagnostic lines. `memory stats` gives the size of each map it holds between notifications (pending account changes and data bytes, pending and stale transaction slots, block infos, confirmed and processed slots, account caches), the number of transactions and account updates received for a slot at or below the last sent block, and the number and bytes of block writes still waiting on the fifos. `callback timings` gives, since the previous line, the call count, total and max time of `update_account`, `notify_transaction`, `notify_block_metadata` and `update_slot_status`, of waiting for the state lock, and of blocking `getBlock` RPC fallback calls. Together they show whether a lagging validator is waiting on the plugin and which part of it.
 * Raised `max_supported_transaction_version` to 1 on the RPC block-info fallback. The setting is inert today because that call asks for `TransactionDetails::Signatures`, which `getBlock` encodes without checking the version, but at 0 the call would start failing on blocks holding a v1 transaction if the request ever asked for full transactions.
 
 ## v4.3.0-rc.0-fh3.0
