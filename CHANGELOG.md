@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v4.3.0-fh3.0
+
+* Bumped to [Agave 4.3.0](https://github.com/anza-xyz/agave/releases/tag/v4.3.0) (`agave-geyser-plugin-interface`, `solana-rpc-client`, `solana-rpc-client-api`, `solana-transaction-status`, `solana-transaction-context`), 5 upstream commits past `v4.3.0-rc.1`. The Geyser plugin interface, `transaction-status`, `transaction-context` and the `rpc-client` crates are untouched in this range, so no plugin code change was required.
+* Aligned the Docker image's Solana validator to `v4.3.0-fh3.0` (was `v4.3.0-rc.1-fh3.0`).
+* The `logger` test plugin now pins `agave-geyser-plugin-interface` to `=4.3.0` like the main crate, and the crate version is `4.3.0` (it had stayed at `4.3.0-rc.0` through the rc.1 bump).
+* `rust-toolchain.toml` and the standalone `solana-*` pins are unchanged. The `Cargo.lock` change is limited to the 34 Agave-versioned crates; no transitive dependency moved.
+* Validated against the `solana-battlefield` test suite (run locally against an Agave 4.3.0 `solana-test-validator` built from the fork), on top of the workspace unit tests.
+
 ## v4.3.0-rc.1-fh3.0
 
 * Every 100 slots the plugin now logs two diagnostic lines. `memory stats` gives the size of each map it holds between notifications (pending account changes and data bytes, pending and stale transaction slots, block infos, confirmed and processed slots, account caches), the number of transactions and account updates received for a slot at or below the last sent block, and the number and bytes of block writes still waiting on the fifos. `callback timings` gives, since the previous line, the call count, total and max time of `update_account`, `notify_transaction`, `notify_block_metadata` and `update_slot_status`, of waiting for the state lock, and of blocking `getBlock` RPC fallback calls. Together they show whether a lagging validator is waiting on the plugin and which part of it.
