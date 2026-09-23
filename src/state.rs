@@ -1488,8 +1488,11 @@ impl State {
                 self.confirmed_slots.len(),
                 self.account_cache.len()
             );
-            if slot != 0 {
-                self.apply_changes_upto(trace, slot - 1);
+            // Only the slots that are not sent: the loop below filters each sent slot against
+            // the cache before applying its changes, so they must not be in it already
+            let catch_up_to = slot.min(first_block_to_process);
+            if catch_up_to != 0 {
+                self.apply_changes_upto(trace, catch_up_to - 1);
             }
             info!("process_upto: first-send init complete, marking initialized");
             self.initialized = true;
@@ -3702,6 +3705,35 @@ mod tests {
 
         // Validate captured logs
         assert_logs_contain_ordered(expected_logs);
+    }
+
+    #[test]
+    fn test_first_send_keeps_changes_of_every_sent_slot() {
+        let mut state =
+            new_test_state(Some(100), setup_noop_block_printer_with_logging(true, true));
+
+        state.set_account(100, PUB_KEY_1, DATA_1, OWNER_KEY_1, 1, false, 12345, false);
+        state.set_account(101, PUB_KEY_2, DATA_2, OWNER_KEY_1, 1, false, 23456, false);
+        state.set_account(102, PUB_KEY_3, DATA_3, OWNER_KEY_1, 1, false, 34567, false);
+
+        // Slots confirmed before the LIB is known pile up and go out in the first send
+        state.set_block_info(simple_block_info(100), false);
+        state.set_confirmed_slot(100, false);
+        state.set_block_info(simple_block_info(101), false);
+        state.set_confirmed_slot(101, false);
+        assert_eq!(state.last_sent_block, None);
+
+        state.set_lib(90);
+        state.set_block_info(simple_block_info(102), false);
+        state.set_confirmed_slot(102, false);
+        assert_eq!(state.last_sent_block, Some(102));
+
+        assert_logs_contain_ordered(
+            [100, 101, 102]
+                .iter()
+                .map(|slot| format!("preparing to send slot {} (account_changes=1,", slot))
+                .collect(),
+        );
     }
 
     fn filter_account_changes_owned(

@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+* Fixed the first account blocks after startup missing entries. When several confirmed slots went out together in the first send, for example because they were confirmed before the LIB was known, their changes were applied to the account cache before they were sent, so all but the last one dropped every change that was not a deletion.
 * Cut the memory used by the account cache from about 300 GB to about 97 GB on mainnet (1.18 billion accounts), and at startup from about 385 GB to about 116 GB. Output is unchanged.
   * The cache keeps one packed 44-byte entry per account, keyed by pubkey, instead of two maps (owner + pubkey to data hash, and pubkey to owner). Owners are stored once and referenced by index.
   * The cache is split in 256 shards that grow one at a time. A single map briefly holds both its old and new tables while growing, which at this size meant tens of GB more.
