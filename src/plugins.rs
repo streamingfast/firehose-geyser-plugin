@@ -4,12 +4,13 @@ use agave_geyser_plugin_interface::geyser_plugin_interface::{
 use {
     crate::{config::Config as PluginConfig, state::BlockInfo, state::State},
     agave_geyser_plugin_interface::geyser_plugin_interface::{
-        GeyserPlugin, ReplicaAccountInfoVersions, ReplicaBlockInfoVersions,
+        GeyserPlugin, GeyserPluginError, ReplicaAccountInfoVersions, ReplicaBlockInfoVersions,
         ReplicaEntryInfoVersions, ReplicaTransactionInfoVersions, Result as PluginResult,
     },
     gxhash::gxhash64,
     std::{
-        concat, env,
+        alloc::{handle_alloc_error, GlobalAlloc, Layout, System},
+        concat, env, io,
         sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
         time::Instant,
     },
@@ -237,14 +238,8 @@ impl Plugin {
     }
 }
 
-impl GeyserPlugin for Plugin {
-    fn name(&self) -> &'static str {
-        let n = concat!(env!("CARGO_PKG_NAME"), "-", env!("CARGO_PKG_VERSION"));
-        info!("name called: returning {}", n);
-        n
-    }
-
-    fn on_load(&mut self, config_file: &str, _is_reload: bool) -> PluginResult<()> {
+impl Plugin {
+    fn load_inner(&mut self, config_file: &str) -> PluginResult<()> {
         let plugin_config = PluginConfig::load_from_file(config_file)?;
         let filter_level =
             LevelFilter::from_str(plugin_config.log.level.as_str()).unwrap_or(LevelFilter::Info);
@@ -347,6 +342,26 @@ impl GeyserPlugin for Plugin {
         info!("cursor: {:?}", cursor);
 
         Ok(())
+    }
+}
+
+impl GeyserPlugin for Plugin {
+    fn name(&self) -> &'static str {
+        let n = concat!(env!("CARGO_PKG_NAME"), "-", env!("CARGO_PKG_VERSION"));
+        info!("name called: returning {}", n);
+        n
+    }
+
+    fn on_load(&mut self, config_file: &str, _is_reload: bool) -> PluginResult<()> {
+        // Agave drops the returned error with its own allocator, so it must not own heap memory
+        self.load_inner(config_file).map_err(|err| {
+            error!("plugin load failed: {}", err);
+            let kind = match &err {
+                GeyserPluginError::ConfigFileOpenError(e) => e.kind(),
+                _ => io::ErrorKind::InvalidData,
+            };
+            GeyserPluginError::ConfigFileOpenError(kind.into())
+        })
     }
 
     // NOOP
@@ -666,9 +681,15 @@ pub fn to_block_rewards(rewards: &Option<solana_transaction_status::Rewards>) ->
 pub unsafe extern "C" fn _create_plugin() -> *mut dyn GeyserPlugin {
     println!("creating plugin");
     let plugin = Plugin::new(false, false);
-    let plugin: Box<dyn GeyserPlugin> = Box::new(plugin);
+    // Agave frees this allocation with its own allocator, so it must come from the system malloc
+    let layout = Layout::new::<Plugin>();
+    let ptr = System.alloc(layout) as *mut Plugin;
+    if ptr.is_null() {
+        handle_alloc_error(layout);
+    }
+    ptr.write(plugin);
     println!("plugin created");
-    Box::into_raw(plugin)
+    ptr
 }
 
 // Below are just transformation functions to help with decoding different versions of the data sent to the plugin
