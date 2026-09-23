@@ -1004,6 +1004,14 @@ impl State {
                 }
             }
         }
+
+        // A slot at or below the LIB that is not confirmed by now never will be, and
+        // `add_missing_slots_to_confirmed_slots` only walks back to the last sent block, so
+        // the transactions of fork slots below both are never read.
+        if let (Some(lib), Some(last_sent)) = (self.lib, self.last_sent_block) {
+            let cutoff = lib.min(last_sent);
+            self.transactions.retain(|&slot, _| slot > cutoff);
+        }
     }
 
     fn apply_changes_upto(&mut self, trace: bool, slot: u64) {
@@ -3309,6 +3317,29 @@ mod tests {
             accounts.iter().map(FilteredAccount::to_account).collect(),
             state_changes,
         )
+    }
+
+    #[test]
+    fn test_purge_drops_transactions_below_lib_and_last_sent() {
+        let mut state = create_test_state();
+        let transaction = || ConfirmTransactionWithIndex {
+            index: 0,
+            transaction: crate::pb::sf::solana::r#type::v1::ConfirmedTransaction::default(),
+        };
+        for slot in [50, 90, 95, 101, 150] {
+            state.transactions.insert(slot, vec![transaction()]);
+        }
+
+        // Without a sent block, missing parents may still be confirmed from any slot
+        state.lib = Some(90);
+        state.purge_blocks_up_to(100);
+        assert_eq!(state.transactions.len(), 5);
+
+        state.last_sent_block = Some(100);
+        state.purge_blocks_up_to(100);
+        let mut kept: Vec<u64> = state.transactions.keys().copied().collect();
+        kept.sort();
+        assert_eq!(kept, vec![95, 101, 150]);
     }
 
     fn split_key(key: &[u8; 64]) -> ([u8; 32], [u8; 32]) {

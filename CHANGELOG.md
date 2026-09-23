@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   * The cache is split in 256 shards that grow one at a time. A single map briefly holds both its old and new tables while growing, which at this size meant tens of GB more.
   * During startup, the newest snapshot version of each account is kept in its cache entry instead of in a second map keyed by pubkey.
   * In the `memory stats` log line, `account_data_hash=` and `account_owners=` are replaced by `account_cache=`.
+* Transactions of fork slots are dropped once the slot is at or below both the LIB and the last sent block. They were kept until restart (188 slots and about 200k transactions on a mainnet node).
 * Account updates hold the state lock for less time: the data is hashed and copied before taking it, and pending account data is copied once when a block is sent instead of three times.
 
 ## v4.3.0-fh3.0-1
