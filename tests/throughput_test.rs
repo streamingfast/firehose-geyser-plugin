@@ -2,6 +2,8 @@
 //! Ignored by default; run with:
 //!
 //! cargo test --release --test throughput_test -- --ignored --nocapture
+//!
+//! `THROUGHPUT_SLOTS` overrides the number of slots sent after startup.
 
 use agave_geyser_plugin_interface::geyser_plugin_interface::{
     GeyserPlugin, ReplicaAccountInfoV3, ReplicaAccountInfoVersions, ReplicaBlockInfoV4,
@@ -18,7 +20,7 @@ use tempfile::NamedTempFile;
 
 const STARTUP_ACCOUNTS: u64 = 20_000_000;
 const OWNERS: u64 = 2_000;
-const SLOTS: u64 = 300;
+const DEFAULT_SLOTS: u64 = 300;
 const UPDATE_THREADS: u64 = 8;
 const UPDATES_PER_THREAD_PER_SLOT: u64 = 300;
 const TRANSACTIONS_PER_SLOT: u64 = 1_000;
@@ -149,25 +151,35 @@ fn test_throughput() {
     let rss_before = rss_mb();
 
     let started = Instant::now();
-    for i in 0..STARTUP_ACCOUNTS {
-        let r = splitmix(i);
-        // Mostly small accounts at startup, like the snapshot
-        let data = &data[(r % 256) as usize];
-        let data = if data.len() > 1_000 {
-            &data[..165]
-        } else {
-            data
-        };
-        update_account(
-            &plugin,
-            r % 1_000,
-            &pubkey(i),
-            &owners[(r >> 16) as usize % owners.len()],
-            data,
-            r >> 40,
-            true,
-        );
-    }
+    // Snapshot accounts arrive from one thread per CPU, like Agave's index generation
+    std::thread::scope(|scope| {
+        for thread in 0..UPDATE_THREADS {
+            let plugin = &plugin;
+            let data = &data;
+            let owners = &owners;
+            scope.spawn(move || {
+                for i in (thread..STARTUP_ACCOUNTS).step_by(UPDATE_THREADS as usize) {
+                    let r = splitmix(i);
+                    // Mostly small accounts at startup, like the snapshot
+                    let data = &data[(r % 256) as usize];
+                    let data = if data.len() > 1_000 {
+                        &data[..165]
+                    } else {
+                        data
+                    };
+                    update_account(
+                        plugin,
+                        r % 1_000,
+                        &pubkey(i),
+                        &owners[(r >> 16) as usize % owners.len()],
+                        data,
+                        r >> 40,
+                        true,
+                    );
+                }
+            });
+        }
+    });
     let startup_load = started.elapsed();
     let startup_rss = rss_mb() - rss_before;
     let started = Instant::now();
@@ -189,11 +201,17 @@ fn test_throughput() {
     let transaction = VersionedTransaction::default();
     let meta = TransactionStatusMeta::default();
 
+    let slots = std::env::var("THROUGHPUT_SLOTS")
+        .map(|slots| slots.parse().expect("THROUGHPUT_SLOTS is a number"))
+        .unwrap_or(DEFAULT_SLOTS);
     let mut replay_time = Duration::ZERO;
     let mut block_time = Duration::ZERO;
+    // The second half, once startup effects such as freeing its memory have settled
+    let mut steady_replay_time = Duration::ZERO;
+    let mut steady_block_time = Duration::ZERO;
     let cpu_before = cpu_seconds();
     let started = Instant::now();
-    for slot in first_slot..first_slot + SLOTS {
+    for slot in first_slot..first_slot + slots {
         let updates_started = Instant::now();
         std::thread::scope(|scope| {
             for thread in 0..UPDATE_THREADS {
@@ -247,7 +265,11 @@ fn test_throughput() {
                 });
             }
         });
-        replay_time += updates_started.elapsed();
+        let replay_elapsed = updates_started.elapsed();
+        replay_time += replay_elapsed;
+        if slot >= first_slot + slots / 2 {
+            steady_replay_time += replay_elapsed;
+        }
 
         let block_started = Instant::now();
         let blockhash = format!("hash{}", slot);
@@ -272,13 +294,17 @@ fn test_throughput() {
         plugin
             .update_bank_status(slot, Some(slot - 1), &SlotStatus::Confirmed, 0)
             .unwrap();
-        block_time += block_started.elapsed();
+        let block_elapsed = block_started.elapsed();
+        block_time += block_elapsed;
+        if slot >= first_slot + slots / 2 {
+            steady_block_time += block_elapsed;
+        }
     }
     let live = started.elapsed();
     // Let the printer threads of the last blocks finish
     std::thread::sleep(Duration::from_secs(1));
     let live_cpu = cpu_seconds() - cpu_before;
-    let callbacks = SLOTS * (UPDATE_THREADS * UPDATES_PER_THREAD_PER_SLOT + TRANSACTIONS_PER_SLOT);
+    let callbacks = slots * (UPDATE_THREADS * UPDATES_PER_THREAD_PER_SLOT + TRANSACTIONS_PER_SLOT);
 
     println!(
         "THROUGHPUT startup_load={:.2?} ({:.0} ns/account) end_of_startup={:.2?} startup_rss_mb={} running_rss_mb={}",
@@ -295,7 +321,13 @@ fn test_throughput() {
         replay_time,
         replay_time.as_nanos() as f64 / callbacks as f64,
         block_time,
-        block_time / SLOTS as u32,
+        block_time / slots as u32,
         rss_mb() - rss_before,
+    );
+    let steady_slots = slots - slots / 2;
+    println!(
+        "THROUGHPUT second_half replay={:.0} ns/callback blocks={:.2?}/slot",
+        steady_replay_time.as_nanos() as f64 / (callbacks / slots * steady_slots) as f64,
+        steady_block_time / steady_slots as u32,
     );
 }

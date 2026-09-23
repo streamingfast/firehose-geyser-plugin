@@ -168,14 +168,7 @@ impl Plugin {
         };
 
         if is_startup {
-            self.write_state("set_account").set_account_on_startup(
-                pub_key,
-                owner,
-                data_hash,
-                slot,
-                write_version,
-                deleted,
-            );
+            self.set_account_on_startup(slot, pub_key, owner, write_version, deleted, data_hash);
         } else {
             let data = data.to_vec();
             let attempt = self.read_state("set_account").try_set_account(
@@ -206,6 +199,39 @@ impl Plugin {
             debug!(
                 "slot: {}, pub_key: {:?}, owner: {:?}, write_version: {}, deleted: {}, data_hash: {}, is_startup: {}",
                 slot, bs58::encode(pub_key).into_string(), bs58::encode(owner).into_string(), write_version, deleted, data_hash, is_startup
+            );
+        }
+    }
+}
+
+impl Plugin {
+    // Out of line so the startup path stays out of the per-transaction account update path
+    #[inline(never)]
+    fn set_account_on_startup(
+        &self,
+        slot: u64,
+        pub_key: &[u8],
+        owner: &[u8],
+        write_version: u64,
+        deleted: bool,
+        data_hash: u64,
+    ) {
+        let recorded = self.read_state("set_account").try_set_account_on_startup(
+            pub_key,
+            owner,
+            data_hash,
+            slot,
+            write_version,
+            deleted,
+        );
+        if !recorded {
+            self.write_state("set_account").set_account_on_startup(
+                pub_key,
+                owner,
+                data_hash,
+                slot,
+                write_version,
+                deleted,
             );
         }
     }
