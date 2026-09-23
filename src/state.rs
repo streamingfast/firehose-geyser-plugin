@@ -612,7 +612,8 @@ pub struct State {
 
     pub with_block: bool,
     //with_account: bool,
-    pub transactions: Transactions,
+    /// Filled under the shared state lock by `try_set_transaction`.
+    pub transactions: Mutex<Transactions>,
     pub processed_slots: ProcessedSlot,
 
     pub cursor_path: String,
@@ -621,7 +622,7 @@ pub struct State {
     /// Slot of the last `memory stats` log line.
     pub last_stats_slot: u64,
     /// Transactions received for a slot at or below `last_sent_block`, which are never sent.
-    pub late_transactions: u64,
+    pub late_transactions: AtomicU64,
     /// Account updates received for a slot at or below `last_sent_block`.
     pub late_account_updates: AtomicU64,
 
@@ -655,11 +656,11 @@ impl State {
             confirmed_slots: HashMap::default(),
             last_sent_block: None,
 
-            transactions: HashMap::default(),
+            transactions: Mutex::new(HashMap::default()),
             processed_slots: HashMap::default(),
 
             last_stats_slot: 0,
-            late_transactions: 0,
+            late_transactions: AtomicU64::new(0),
             late_account_updates: AtomicU64::new(0),
 
             local_rpc_client: Some(local_rpc_client),
@@ -686,12 +687,12 @@ impl State {
             block_infos: self.block_infos.clone(),
             confirmed_slots: self.confirmed_slots.clone(),
             with_block: self.with_block,
-            transactions: self.transactions.clone(),
+            transactions: Mutex::new(self.transactions.lock().unwrap().clone()),
             processed_slots: self.processed_slots.clone(),
             cursor_path: self.cursor_path.clone(),
             dev_config: self.dev_config.clone(),
             last_stats_slot: self.last_stats_slot,
-            late_transactions: self.late_transactions,
+            late_transactions: AtomicU64::new(self.late_transactions.load(AtomicOrdering::Relaxed)),
             late_account_updates: AtomicU64::new(
                 self.late_account_updates.load(AtomicOrdering::Relaxed),
             ),
@@ -885,7 +886,7 @@ impl State {
                 if !self.with_block {
                     return true; // if we only track account changes, we don't need to count the transactions
                 }
-                if let Some(trxs) = self.transactions.get(&slot) {
+                if let Some(trxs) = self.transactions.lock().unwrap().get(&slot) {
                     if blk.transaction_count == trxs.len() as u64 {
                         true
                     } else {
@@ -1122,6 +1123,34 @@ impl State {
         transaction: ConfirmTransactionWithIndex,
         trace: bool,
     ) {
+        self.record_transaction(slot, transaction);
+
+        if self.is_ready(slot) {
+            if let Err(e) = self.process_upto(trace, slot) {
+                panic!(
+                    "process_upto failed after set_transaction(slot={}): {}",
+                    slot, e
+                )
+            }
+        }
+    }
+
+    /// `set_transaction` under the shared state lock, so transactions from several threads
+    /// are recorded in parallel. Gives the transaction back when its slot is already
+    /// confirmed: it may complete the block, which `set_transaction` then sends.
+    pub fn try_set_transaction(
+        &self,
+        slot: u64,
+        transaction: ConfirmTransactionWithIndex,
+    ) -> Result<(), ConfirmTransactionWithIndex> {
+        if self.confirmed_slots.contains_key(&slot) {
+            return Err(transaction);
+        }
+        self.record_transaction(slot, transaction);
+        Ok(())
+    }
+
+    fn record_transaction(&self, slot: u64, transaction: ConfirmTransactionWithIndex) {
         if self.processed_slots.get(&slot).is_some() {
             error!(
                 "slot {} already processed should not receive transaction for it",
@@ -1132,25 +1161,15 @@ impl State {
             .last_sent_block
             .is_some_and(|last_sent| slot <= last_sent)
         {
-            self.late_transactions += 1;
+            self.late_transactions.fetch_add(1, AtomicOrdering::Relaxed);
         }
 
-        if let Some(txs) = self.transactions.get_mut(&slot) {
+        let mut transactions = self.transactions.lock().unwrap();
+        if let Some(txs) = transactions.get_mut(&slot) {
             txs.push(transaction);
         } else {
             debug!("inserting first transaction for slot {}", slot);
-            let mut txs = Vec::new();
-            txs.push(transaction);
-            self.transactions.insert(slot, txs);
-        }
-
-        if self.is_ready(slot) {
-            if let Err(e) = self.process_upto(trace, slot) {
-                panic!(
-                    "process_upto failed after set_transaction(slot={}): {}",
-                    slot, e
-                )
-            }
+            transactions.insert(slot, vec![transaction]);
         }
     }
 
@@ -1176,7 +1195,10 @@ impl State {
         // the transactions of fork slots below both are never read.
         if let (Some(lib), Some(last_sent)) = (self.lib, self.last_sent_block) {
             let cutoff = lib.min(last_sent);
-            self.transactions.retain(|&slot, _| slot > cutoff);
+            self.transactions
+                .get_mut()
+                .unwrap()
+                .retain(|&slot, _| slot > cutoff);
         }
     }
 
@@ -1340,7 +1362,13 @@ impl State {
             );
 
             if must_send {
-                let tx_count = self.transactions.get(&slot).map(|t| t.len()).unwrap_or(0);
+                let tx_count = self
+                    .transactions
+                    .get_mut()
+                    .unwrap()
+                    .get(&slot)
+                    .map(|t| t.len())
+                    .unwrap_or(0);
                 info!(
                     "process_upto: preparing to send slot {} (account_changes={}, txs={}, parent={}, lib={})",
                     slot,
@@ -1358,8 +1386,12 @@ impl State {
                     &block_info,
                 );
 
-                let mut transactions_with_index =
-                    self.transactions.remove(&slot).unwrap_or_else(|| vec![]);
+                let mut transactions_with_index = self
+                    .transactions
+                    .get_mut()
+                    .unwrap()
+                    .remove(&slot)
+                    .unwrap_or_else(|| vec![]);
 
                 transactions_with_index.sort_by_key(|ti| ti.index);
 
@@ -1420,11 +1452,11 @@ impl State {
 
         let (account_changes, account_data_bytes) = self.block_account_changes.totals();
 
-        // Counts only: this runs under the state lock, and the map can hold transactions of
-        // fork slots that are never purged, so per-transaction work would grow without bound.
-        let transactions: usize = self.transactions.values().map(Vec::len).sum();
+        // Counts only: this runs under the state lock
+        let pending_transactions = self.transactions.lock().unwrap();
+        let transactions: usize = pending_transactions.values().map(Vec::len).sum();
         let stale_transaction_slots = self.last_sent_block.map_or(0, |last_sent| {
-            self.transactions
+            pending_transactions
                 .keys()
                 .filter(|&&s| s <= last_sent)
                 .count()
@@ -1445,8 +1477,8 @@ impl State {
             self.block_account_changes.min_slot(),
             account_changes,
             account_data_bytes,
-            self.transactions.len(),
-            self.transactions.keys().min(),
+            pending_transactions.len(),
+            pending_transactions.keys().min(),
             stale_transaction_slots,
             transactions,
             self.block_infos.len(),
@@ -1454,7 +1486,7 @@ impl State {
             self.processed_slots.len(),
             self.account_cache.len(),
             self.account_cache.startup_versions(),
-            self.late_transactions,
+            self.late_transactions.load(Ordering::Relaxed),
             self.late_account_updates.load(Ordering::Relaxed),
             PENDING_BLOCK_WRITES.load(Ordering::Relaxed),
             PENDING_ACCOUNT_BLOCK_WRITES.load(Ordering::Relaxed),
@@ -3480,17 +3512,27 @@ mod tests {
             transaction: crate::pb::sf::solana::r#type::v1::ConfirmedTransaction::default(),
         };
         for slot in [50, 90, 95, 101, 150] {
-            state.transactions.insert(slot, vec![transaction()]);
+            state
+                .transactions
+                .get_mut()
+                .unwrap()
+                .insert(slot, vec![transaction()]);
         }
 
         // Without a sent block, missing parents may still be confirmed from any slot
         state.lib = Some(90);
         state.purge_blocks_up_to(100);
-        assert_eq!(state.transactions.len(), 5);
+        assert_eq!(state.transactions.get_mut().unwrap().len(), 5);
 
         state.last_sent_block = Some(100);
         state.purge_blocks_up_to(100);
-        let mut kept: Vec<u64> = state.transactions.keys().copied().collect();
+        let mut kept: Vec<u64> = state
+            .transactions
+            .get_mut()
+            .unwrap()
+            .keys()
+            .copied()
+            .collect();
         kept.sort();
         assert_eq!(kept, vec![95, 101, 150]);
     }

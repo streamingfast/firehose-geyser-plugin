@@ -503,9 +503,13 @@ impl GeyserPlugin for Plugin {
             transaction: compiled_transaction,
         };
 
-        let mut lock_state = self.write_state("notify_transaction");
-
-        lock_state.set_transaction(slot, tx, self.trace);
+        let attempt = self
+            .read_state("notify_transaction")
+            .try_set_transaction(slot, tx);
+        if let Err(tx) = attempt {
+            self.write_state("notify_transaction")
+                .set_transaction(slot, tx, self.trace);
+        }
         Ok(())
     }
 

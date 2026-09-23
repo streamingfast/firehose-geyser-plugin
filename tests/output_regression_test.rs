@@ -126,7 +126,8 @@ fn update_account(
     }
 }
 
-/// Runs the workload, with each slot's account updates spread over `update_threads` threads,
+/// Runs the workload, with each slot's account updates and transactions spread over
+/// `update_threads` threads,
 /// and returns the number of lines and digest of the block and account block streams.
 fn run_workload(update_threads: usize, unique_write_versions: bool) -> (usize, u64, usize, u64) {
     let cursor_file = NamedTempFile::new().unwrap();
@@ -250,19 +251,32 @@ fn run_workload(update_threads: usize, unique_write_versions: bool) -> (usize, u
         });
 
         let transaction_count = rng.next(4);
-        for index in 0..transaction_count {
-            let info = ReplicaTransactionInfoV3 {
-                signature: &signature,
-                message_hash: &message_hash,
-                is_vote: false,
-                transaction: &transaction,
-                transaction_status_meta: &meta,
-                index: index as usize,
-            };
-            plugin
-                .notify_transaction_for_bank(ReplicaTransactionInfoVersions::V0_0_3(&info), slot, 0)
-                .unwrap();
-        }
+        std::thread::scope(|scope| {
+            for thread in 0..update_threads {
+                let plugin = &plugin;
+                let (signature, message_hash, transaction, meta) =
+                    (&signature, &message_hash, &transaction, &meta);
+                scope.spawn(move || {
+                    for index in (0..transaction_count).skip(thread).step_by(update_threads) {
+                        let info = ReplicaTransactionInfoV3 {
+                            signature,
+                            message_hash,
+                            is_vote: false,
+                            transaction,
+                            transaction_status_meta: meta,
+                            index: index as usize,
+                        };
+                        plugin
+                            .notify_transaction_for_bank(
+                                ReplicaTransactionInfoVersions::V0_0_3(&info),
+                                slot,
+                                0,
+                            )
+                            .unwrap();
+                    }
+                });
+            }
+        });
 
         if is_fork {
             continue;
@@ -311,8 +325,9 @@ fn test_output_matches_recorded_digest() {
     assert_eq!(account_blocks_digest, EXPECTED_ACCOUNT_BLOCKS_DIGEST);
 }
 
-/// Updates of the same account in a slot are ordered by write version, not arrival, so the
-/// output does not depend on how updates are spread over validator threads. Write versions
+/// Updates of the same account in a slot are ordered by write version and transactions by
+/// index, not arrival, so the output does not depend on how they are spread over validator
+/// threads. Write versions
 /// are unique here, like the validator's, since equal ones keep whichever arrives last.
 #[test]
 fn test_output_does_not_depend_on_update_threads() {

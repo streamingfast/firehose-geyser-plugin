@@ -189,7 +189,7 @@ fn test_throughput() {
     let transaction = VersionedTransaction::default();
     let meta = TransactionStatusMeta::default();
 
-    let mut update_time = Duration::ZERO;
+    let mut replay_time = Duration::ZERO;
     let mut block_time = Duration::ZERO;
     let cpu_before = cpu_seconds();
     let started = Instant::now();
@@ -200,8 +200,31 @@ fn test_throughput() {
                 let plugin = &plugin;
                 let data = &data;
                 let owners = &owners;
+                let (signature, message_hash, transaction, meta) =
+                    (&signature, &message_hash, &transaction, &meta);
                 scope.spawn(move || {
+                    // Transactions interleaved with account updates, like replay threads send them
+                    let transactions = TRANSACTIONS_PER_SLOT / UPDATE_THREADS;
+                    let mut next_transaction = 0;
                     for n in 0..UPDATES_PER_THREAD_PER_SLOT {
+                        while next_transaction * UPDATES_PER_THREAD_PER_SLOT < n * transactions {
+                            let info = ReplicaTransactionInfoV3 {
+                                signature,
+                                message_hash,
+                                is_vote: false,
+                                transaction,
+                                transaction_status_meta: meta,
+                                index: (thread * transactions + next_transaction) as usize,
+                            };
+                            plugin
+                                .notify_transaction_for_bank(
+                                    ReplicaTransactionInfoVersions::V0_0_3(&info),
+                                    slot,
+                                    0,
+                                )
+                                .unwrap();
+                            next_transaction += 1;
+                        }
                         let i = (slot * UPDATE_THREADS + thread) * UPDATES_PER_THREAD_PER_SLOT + n;
                         let r = splitmix(i ^ 0xABCD);
                         // Mostly existing accounts, some new ones
@@ -224,22 +247,9 @@ fn test_throughput() {
                 });
             }
         });
-        update_time += updates_started.elapsed();
+        replay_time += updates_started.elapsed();
 
         let block_started = Instant::now();
-        for index in 0..TRANSACTIONS_PER_SLOT {
-            let info = ReplicaTransactionInfoV3 {
-                signature: &signature,
-                message_hash: &message_hash,
-                is_vote: false,
-                transaction: &transaction,
-                transaction_status_meta: &meta,
-                index: index as usize,
-            };
-            plugin
-                .notify_transaction_for_bank(ReplicaTransactionInfoVersions::V0_0_3(&info), slot, 0)
-                .unwrap();
-        }
         let blockhash = format!("hash{}", slot);
         let parent_blockhash = format!("hash{}", slot - 1);
         let block_info = ReplicaBlockInfoV4 {
@@ -268,7 +278,7 @@ fn test_throughput() {
     // Let the printer threads of the last blocks finish
     std::thread::sleep(Duration::from_secs(1));
     let live_cpu = cpu_seconds() - cpu_before;
-    let updates = SLOTS * UPDATE_THREADS * UPDATES_PER_THREAD_PER_SLOT;
+    let callbacks = SLOTS * (UPDATE_THREADS * UPDATES_PER_THREAD_PER_SLOT + TRANSACTIONS_PER_SLOT);
 
     println!(
         "THROUGHPUT startup_load={:.2?} ({:.0} ns/account) end_of_startup={:.2?} startup_rss_mb={} running_rss_mb={}",
@@ -279,11 +289,11 @@ fn test_throughput() {
         running_rss,
     );
     println!(
-        "THROUGHPUT live={:.2?} cpu={:.2}s updates={:.2?} ({:.0} ns/update) blocks={:.2?} ({:.2?}/slot) rss_mb={}",
+        "THROUGHPUT live={:.2?} cpu={:.2}s replay={:.2?} ({:.0} ns/callback) blocks={:.2?} ({:.2?}/slot) rss_mb={}",
         live,
         live_cpu,
-        update_time,
-        update_time.as_nanos() as f64 / updates as f64,
+        replay_time,
+        replay_time.as_nanos() as f64 / callbacks as f64,
         block_time,
         block_time / SLOTS as u32,
         rss_mb() - rss_before,
