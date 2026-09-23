@@ -26,8 +26,8 @@ const ADDRESSES: u64 = 3_000;
 const OWNERS: u64 = 6;
 
 /// Expected `fnv1a64` digest of the sorted lines of the block and account block streams.
-const EXPECTED_BLOCKS_DIGEST: u64 = 0xe9459e1d402eba2a;
-const EXPECTED_ACCOUNT_BLOCKS_DIGEST: u64 = 0xa754717180d96808;
+const EXPECTED_BLOCKS_DIGEST: u64 = 0x7139eefc95fd8769;
+const EXPECTED_ACCOUNT_BLOCKS_DIGEST: u64 = 0xbc16c256d3e4caf9;
 
 struct Rng(u64);
 
@@ -203,7 +203,7 @@ fn test_output_matches_recorded_digest() {
         if slot > FIRST_SLOT && rng.chance(5) {
             continue;
         }
-        // Fork slot: account updates for a slot that is never confirmed
+        // Fork slot: account updates and transactions for a slot that is never confirmed
         let is_fork = slot > FIRST_SLOT && rng.chance(4);
 
         for _ in 0..rng.next(60) {
@@ -239,10 +239,6 @@ fn test_output_matches_recorded_digest() {
             );
         }
 
-        if is_fork {
-            continue;
-        }
-
         let transaction_count = rng.next(4);
         for index in 0..transaction_count {
             let info = ReplicaTransactionInfoV3 {
@@ -256,6 +252,10 @@ fn test_output_matches_recorded_digest() {
             plugin
                 .notify_transaction_for_bank(ReplicaTransactionInfoVersions::V0_0_3(&info), slot, 0)
                 .unwrap();
+        }
+
+        if is_fork {
+            continue;
         }
 
         let blockhash = format!("hash{}", slot);
