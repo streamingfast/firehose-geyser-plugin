@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+* Fixed the first account blocks after startup missing entries. When several confirmed slots went out together in the first send, for example because they were confirmed before the LIB was known, their changes were applied to the account cache before they were sent, so all but the last one dropped every change that was not a deletion.
+* Cut the memory used by the account cache from about 300 GB to about 97 GB on mainnet (1.18 billion accounts), and at startup from about 385 GB to about 116 GB. Output is unchanged.
+  * The cache keeps one packed 44-byte entry per account, keyed by pubkey, instead of two maps (owner + pubkey to data hash, and pubkey to owner). Owners are stored once and referenced by index.
+  * The cache is split in 256 shards that grow one at a time. A single map briefly holds both its old and new tables while growing, which at this size meant tens of GB more.
+  * During startup, the newest snapshot version of each account is kept in its cache entry instead of in a second map keyed by pubkey.
+  * In the `memory stats` log line, `account_data_hash=` and `account_owners=` are replaced by `account_cache=`.
+* Transactions of fork slots are dropped once the slot is at or below both the LIB and the last sent block. They were kept until restart (188 slots and about 200k transactions on a mainnet node).
+* Account updates and transactions from different validator threads no longer wait on each other. They take the state lock in shared mode: account updates write to pending changes split in 16 shards, each behind its own lock, and transactions to a map behind its own lock. Only block processing, and a transaction arriving after its slot is confirmed, take the state lock exclusively. In the throughput benchmark on Linux, with 8 threads sending interleaved account updates and transactions, a callback takes about 300 ns instead of 430 ns, for the same CPU time.
+* Snapshot accounts at startup, which Agave sends from one thread per CPU while generating its index, are recorded in parallel under the shared state lock: the cache shards have their own locks, and an account's version check and update happen under its shard's lock. The end-of-startup conversion runs on 8 threads. In the throughput benchmark on Linux with 8 threads, startup takes about 290 ns per account instead of 380 ns, and the conversion about 27 ms instead of 175 ms for 20 million accounts.
+* The locks written by every callback (the state lock, the pending changes shards, the transactions map) sit on their own cache lines, so threads writing them do not slow down threads reading the fields next to them.
+* Account updates hold the state lock for less time: the data is hashed and copied before taking it, and pending account data is moved into the block when it is sent instead of copied three times. Block processing, which holds the lock exclusively, takes about 1.0 ms per slot in the throughput benchmark on Linux instead of 1.5 ms.
+* Blocks are encoded to base64 on their printer thread instead of on rayon's global thread pool, which took about 24% more CPU.
+
 ## v4.3.0-fh3.0-1
 
 * The Docker image now takes its `firecore` binary from the `latest` firehose-core image instead of pinning a version (was `v1.14.5`), so each build picks up the newest firehose-core release, currently [v1.20.1](https://github.com/streamingfast/firehose-core/releases/tag/v1.20.1).

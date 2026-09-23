@@ -6,19 +6,696 @@ use lazy_static::lazy_static;
 use pb::sf::solana::r#type::v1::Account;
 use prost_types::Timestamp;
 use rustc_hash::FxHashMap as HashMap;
+use rustc_hash::FxHashSet;
 use solana_rpc_client::rpc_client::RpcClient;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::{Mutex, RwLock};
 
 type BlockAccountChanges = HashMap<u64, AccountChanges>;
 pub type AccountChanges = HashMap<[u8; 64], AccountWithWriteVersion>;
-pub type AccountDataHash = HashMap<[u8; 64], u64>; // owner(32) + pubkey(32)
 pub type AccountOwners = HashMap<[u8; 32], [u8; 32]>; // pubkey(32) -> owner(32)
-pub type StartupAccountReceivedSlot = HashMap<[u8; 32], u64>; // pubkey(32) -> composite value (slot << 25 + write_version)
+                                                      // pubkey(32) -> composite value (slot << 25 + write_version)
 
 pub type Transactions = HashMap<u64, Vec<ConfirmTransactionWithIndex>>;
 type ProcessedSlot = HashMap<u64, bool>;
 
 type BlockInfoMap = HashMap<u64, BlockInfo>;
 type ConfirmedSlotsMap = HashMap<u64, bool>;
+
+/// Keeps a value on its own cache lines (two, as adjacent-line prefetching pairs them), so
+/// threads writing it do not slow down threads using its neighbors.
+#[repr(align(128))]
+#[derive(Default)]
+pub struct CachePadded<T>(T);
+
+impl<T> std::ops::Deref for CachePadded<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<T> std::ops::DerefMut for CachePadded<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.0
+    }
+}
+
+/// Number of `PendingAccountChanges` shards, picked by pubkey.
+const PENDING_SHARDS: usize = 16;
+
+/// Account changes of the slots not sent yet, split by pubkey into shards behind their own
+/// locks, so account updates arriving on different validator threads rarely wait on each
+/// other. Changes are only read and purged under the state write lock, when no update runs.
+pub struct PendingAccountChanges {
+    shards: Vec<CachePadded<Mutex<BlockAccountChanges>>>,
+    /// Slots with at least one change in any shard.
+    slots: Mutex<FxHashSet<u64>>,
+}
+
+impl Default for PendingAccountChanges {
+    fn default() -> Self {
+        PendingAccountChanges {
+            shards: (0..PENDING_SHARDS)
+                .map(|_| CachePadded(Mutex::new(HashMap::default())))
+                .collect(),
+            slots: Mutex::new(FxHashSet::default()),
+        }
+    }
+}
+
+impl PendingAccountChanges {
+    fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+        mutex.lock().expect("pending account changes lock poisoned")
+    }
+
+    pub fn contains_slot(&self, slot: u64) -> bool {
+        Self::lock(&self.slots).contains(&slot)
+    }
+
+    /// Keeps the change unless one with a higher write version is already pending for the
+    /// same owner and account in that slot.
+    pub fn insert(
+        &self,
+        slot: u64,
+        owner_account_key: [u8; 64],
+        change: AccountWithWriteVersion,
+        trace: bool,
+    ) {
+        let mut shard =
+            Self::lock(&self.shards[owner_account_key[32 + 16] as usize % PENDING_SHARDS]);
+        let slot_entries = match shard.get_mut(&slot) {
+            Some(slot_entries) => slot_entries,
+            None => {
+                if Self::lock(&self.slots).insert(slot) {
+                    debug!("got some account data for slot {}", slot);
+                }
+                shard.entry(slot).or_default()
+            }
+        };
+
+        if let Some(prev) = slot_entries.get(&owner_account_key) {
+            if prev.write_version > change.write_version {
+                if trace {
+                    debug!(
+                        "skipping slot because older version: {}, pub_key: {:?}, owner: {:?}, write_version: {}, prev_write_version: {}, deleted: {}, data_hash: {}",
+                        slot, bs58::encode(change.account.address).into_string(), bs58::encode(change.account.owner).into_string(), change.write_version, prev.write_version, change.account.deleted, change.data_hash
+                    );
+                }
+                return; // skipping older write_versions
+            }
+        }
+
+        if trace {
+            let data = &change.account.data;
+            let data_as_hex = hex::encode(&data[..10.min(data.len())]);
+            debug!("handle_account_change@{}: account {:?} owner: {:?} delete: {:?} version: {:?} Data Size: {} Data Hash: {} Data Preview: {}", slot, bs58::encode(change.account.address).into_string(), bs58::encode(change.account.owner).into_string(), change.account.deleted, change.write_version, data.len(), change.data_hash, data_as_hex);
+        }
+
+        slot_entries.insert(owner_account_key, change);
+    }
+
+    /// The pending changes of `slot`, across shards.
+    fn slot_changes(&mut self, slot: u64) -> impl Iterator<Item = &AccountWithWriteVersion> {
+        self.shards
+            .iter_mut()
+            .filter_map(move |shard| {
+                shard
+                    .get_mut()
+                    .expect("pending account changes lock poisoned")
+                    .get(&slot)
+            })
+            .flat_map(|changes| changes.values())
+    }
+
+    /// Moves out the pending changes of `slot`. The slot stays listed, so purging it still
+    /// clears its block info.
+    fn take_slot_changes(&mut self, slot: u64) -> Vec<AccountWithWriteVersion> {
+        let mut changes = Vec::new();
+        for shard in self.shards.iter_mut() {
+            if let Some(slot_changes) = shard
+                .get_mut()
+                .expect("pending account changes lock poisoned")
+                .get_mut(&slot)
+            {
+                changes.extend(slot_changes.drain().map(|(_, change)| change));
+            }
+        }
+        changes
+    }
+
+    /// Removes the slots at or below `upto` and returns them.
+    fn purge_up_to(&mut self, upto: u64) -> Vec<u64> {
+        let slots = self
+            .slots
+            .get_mut()
+            .expect("pending account changes lock poisoned");
+        let purged: Vec<u64> = slots.iter().copied().filter(|&slot| slot <= upto).collect();
+        if purged.is_empty() {
+            return purged;
+        }
+        slots.retain(|&slot| slot > upto);
+        for shard in self.shards.iter_mut() {
+            shard
+                .get_mut()
+                .expect("pending account changes lock poisoned")
+                .retain(|&slot, _| slot > upto);
+        }
+        purged
+    }
+
+    pub fn min_slot(&self) -> Option<u64> {
+        Self::lock(&self.slots).iter().min().copied()
+    }
+
+    pub fn slot_count(&self) -> usize {
+        Self::lock(&self.slots).len()
+    }
+
+    pub fn slots_between(&self, first: u64, last: u64) -> usize {
+        Self::lock(&self.slots)
+            .iter()
+            .filter(|&&slot| slot >= first && slot <= last)
+            .count()
+    }
+
+    /// Number of pending changes and bytes of account data they hold.
+    pub fn totals(&self) -> (usize, usize) {
+        let mut changes = 0usize;
+        let mut data_bytes = 0usize;
+        for shard in &self.shards {
+            for slot_changes in Self::lock(shard).values() {
+                changes += slot_changes.len();
+                data_bytes += slot_changes
+                    .values()
+                    .map(|c| c.account.data.len())
+                    .sum::<usize>();
+            }
+        }
+        (changes, data_bytes)
+    }
+}
+
+impl Clone for PendingAccountChanges {
+    fn clone(&self) -> Self {
+        PendingAccountChanges {
+            shards: self
+                .shards
+                .iter()
+                .map(|shard| CachePadded(Mutex::new(Self::lock(shard).clone())))
+                .collect(),
+            slots: Mutex::new(Self::lock(&self.slots).clone()),
+        }
+    }
+}
+
+/// One shard per value of the pubkey byte picked by `ShardedMap::shard`.
+const SHARDS: usize = 256;
+
+/// Map keyed by pubkey, split in shards behind their own locks. Shards grow one at a time:
+/// growing a hash map briefly holds both its old and new tables, which for a single map of
+/// every account is tens of GB. The locks let snapshot accounts, which Agave sends from one
+/// thread per CPU, be recorded in parallel.
+pub struct ShardedMap<V> {
+    shards: Vec<CachePadded<Mutex<HashMap<[u8; 32], V>>>>,
+}
+
+impl<V> Default for ShardedMap<V> {
+    fn default() -> Self {
+        ShardedMap {
+            shards: (0..SHARDS)
+                .map(|_| CachePadded(Mutex::new(HashMap::default())))
+                .collect(),
+        }
+    }
+}
+
+impl<V: Clone> Clone for ShardedMap<V> {
+    fn clone(&self) -> Self {
+        ShardedMap {
+            shards: self
+                .shards
+                .iter()
+                .map(|shard| CachePadded(Mutex::new(lock(shard).clone())))
+                .collect(),
+        }
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().expect("account cache lock poisoned")
+}
+
+impl<V: Copy> ShardedMap<V> {
+    #[inline]
+    fn shard(key: &[u8; 32]) -> usize {
+        // A middle byte: vanity pubkeys share their first bytes (base58 prefix) and suffixes
+        // like pump.fun's "...pump" fix the last few, but the middle bytes stay uniform.
+        key[16] as usize
+    }
+
+    #[inline]
+    fn lock_shard(&self, key: &[u8; 32]) -> std::sync::MutexGuard<'_, HashMap<[u8; 32], V>> {
+        lock(&self.shards[Self::shard(key)])
+    }
+
+    #[inline]
+    pub fn get(&self, key: &[u8; 32]) -> Option<V> {
+        self.lock_shard(key).get(key).copied()
+    }
+
+    #[inline]
+    pub fn insert(&self, key: [u8; 32], value: V) -> Option<V> {
+        self.lock_shard(&key).insert(key, value)
+    }
+
+    pub fn len(&self) -> usize {
+        self.shards.iter().map(|shard| lock(shard).len()).sum()
+    }
+
+    /// Converts the shards on a few threads, each dropping a source shard once converted, so
+    /// the conversion never holds more than one extra shard per thread.
+    fn convert<W: Send>(self, convert: impl Fn(V) -> Option<W> + Sync) -> ShardedMap<W>
+    where
+        V: Send,
+    {
+        const THREADS: usize = 8;
+        let mut sources: Vec<Option<HashMap<[u8; 32], V>>> = self
+            .shards
+            .into_iter()
+            .map(|shard| Some(shard.0.into_inner().expect("account cache lock poisoned")))
+            .collect();
+        let mut converted: Vec<Option<HashMap<[u8; 32], W>>> = (0..SHARDS).map(|_| None).collect();
+        let chunk = SHARDS.div_ceil(THREADS);
+        std::thread::scope(|scope| {
+            for (sources, converted) in sources.chunks_mut(chunk).zip(converted.chunks_mut(chunk)) {
+                let convert = &convert;
+                scope.spawn(move || {
+                    for (source, converted) in sources.iter_mut().zip(converted.iter_mut()) {
+                        let source = source.take().expect("shard converted once");
+                        let mut shard = HashMap::default();
+                        shard.reserve(source.len());
+                        shard.extend(
+                            source
+                                .into_iter()
+                                .filter_map(|(key, value)| Some((key, convert(value)?))),
+                        );
+                        shard.shrink_to_fit();
+                        *converted = Some(shard);
+                    }
+                });
+            }
+        });
+        ShardedMap {
+            shards: converted
+                .into_iter()
+                .map(|shard| CachePadded(Mutex::new(shard.expect("every shard converted"))))
+                .collect(),
+        }
+    }
+}
+
+/// Packed to 12 bytes: the cache holds one per account on the chain.
+#[derive(Clone, Copy)]
+#[repr(C, packed)]
+struct CachedAccount {
+    owner_id: u32,
+    data_hash: u64,
+}
+
+/// `StartupAccount::owner_id` of an account with a startup version but no cached data hash.
+const NO_OWNER: u32 = u32::MAX;
+
+/// Cache entry during startup, which also holds the newest snapshot version seen for the
+/// account so the pubkey is stored once instead of in a second map.
+#[derive(Clone, Copy)]
+#[repr(C, packed)]
+struct StartupAccount {
+    owner_id: u32,
+    data_hash: u64,
+    version: u64,
+    has_version: bool,
+}
+
+enum Accounts {
+    Startup {
+        accounts: ShardedMap<StartupAccount>,
+        cached: AtomicUsize,
+        versions: AtomicUsize,
+    },
+    Running(ShardedMap<CachedAccount>),
+}
+
+impl Clone for Accounts {
+    fn clone(&self) -> Self {
+        match self {
+            Accounts::Startup {
+                accounts,
+                cached,
+                versions,
+            } => Accounts::Startup {
+                accounts: accounts.clone(),
+                cached: AtomicUsize::new(cached.load(AtomicOrdering::Relaxed)),
+                versions: AtomicUsize::new(versions.load(AtomicOrdering::Relaxed)),
+            },
+            Accounts::Running(accounts) => Accounts::Running(accounts.clone()),
+        }
+    }
+}
+
+/// Owners, stored once and referenced by index.
+#[derive(Default, Clone)]
+struct Owners {
+    owners: Vec<[u8; 32]>,
+    ids: HashMap<[u8; 32], u32>,
+}
+
+/// Owner and data hash of the last sent version of every account, keyed by pubkey. An account
+/// has one owner at a time, so a data hash is only returned when the owner asked for matches.
+/// Owners are programs, few enough to be stored once and referenced by index.
+///
+/// Until `end_startup`, it also tracks the newest snapshot version received per account.
+pub struct AccountCache {
+    accounts: Accounts,
+    owners: RwLock<Owners>,
+}
+
+impl Clone for AccountCache {
+    fn clone(&self) -> Self {
+        AccountCache {
+            accounts: self.accounts.clone(),
+            owners: RwLock::new(self.owners.read().expect("owners lock poisoned").clone()),
+        }
+    }
+}
+
+impl Default for AccountCache {
+    fn default() -> Self {
+        AccountCache {
+            accounts: Accounts::Startup {
+                accounts: ShardedMap::default(),
+                cached: AtomicUsize::new(0),
+                versions: AtomicUsize::new(0),
+            },
+            owners: RwLock::new(Owners::default()),
+        }
+    }
+}
+
+impl AccountCache {
+    fn owner_id(&self, owner: [u8; 32]) -> u32 {
+        if let Some(&id) = self
+            .owners
+            .read()
+            .expect("owners lock poisoned")
+            .ids
+            .get(&owner)
+        {
+            return id;
+        }
+        let mut owners = self.owners.write().expect("owners lock poisoned");
+        if let Some(&id) = owners.ids.get(&owner) {
+            return id;
+        }
+        let id = u32::try_from(owners.owners.len())
+            .ok()
+            .filter(|&id| id != NO_OWNER)
+            .expect("more than u32::MAX - 1 distinct owners");
+        owners.owners.push(owner);
+        owners.ids.insert(owner, id);
+        id
+    }
+
+    /// Id of `owner` if it was ever cached, without adding it.
+    fn existing_owner_id(&self, owner: &[u8; 32]) -> Option<u32> {
+        self.owners
+            .read()
+            .expect("owners lock poisoned")
+            .ids
+            .get(owner)
+            .copied()
+    }
+
+    /// Owner id and data hash of the account, in one lookup.
+    #[inline]
+    fn get_ids(&self, address: &[u8; 32]) -> Option<(u32, u64)> {
+        match &self.accounts {
+            Accounts::Running(accounts) => {
+                let cached = accounts.get(address)?;
+                Some((cached.owner_id, cached.data_hash))
+            }
+            Accounts::Startup { accounts, .. } => {
+                let cached = accounts.get(address)?;
+                if cached.owner_id == NO_OWNER {
+                    None
+                } else {
+                    Some((cached.owner_id, cached.data_hash))
+                }
+            }
+        }
+    }
+
+    /// Owner and data hash of the account, in one lookup.
+    #[inline]
+    pub fn get(&self, address: &[u8; 32]) -> Option<([u8; 32], u64)> {
+        let (owner_id, data_hash) = self.get_ids(address)?;
+        let owner = self.owners.read().expect("owners lock poisoned").owners[owner_id as usize];
+        Some((owner, data_hash))
+    }
+
+    #[inline]
+    pub fn owner(&self, address: &[u8; 32]) -> Option<[u8; 32]> {
+        self.get(address).map(|(owner, _)| owner)
+    }
+
+    #[inline]
+    pub fn data_hash(&self, owner: &[u8; 32], address: &[u8; 32]) -> Option<u64> {
+        match self.get(address)? {
+            (cached_owner, data_hash) if &cached_owner == owner => Some(data_hash),
+            _ => None,
+        }
+    }
+
+    pub fn insert(&self, owner: [u8; 32], address: [u8; 32], data_hash: u64) {
+        let owner_id = self.owner_id(owner);
+        match &self.accounts {
+            Accounts::Running(accounts) => {
+                accounts.insert(
+                    address,
+                    CachedAccount {
+                        owner_id,
+                        data_hash,
+                    },
+                );
+            }
+            Accounts::Startup {
+                accounts, cached, ..
+            } => {
+                let mut shard = accounts.lock_shard(&address);
+                match shard.get_mut(&address) {
+                    Some(entry) => {
+                        if entry.owner_id == NO_OWNER {
+                            cached.fetch_add(1, AtomicOrdering::Relaxed);
+                        }
+                        entry.owner_id = owner_id;
+                        entry.data_hash = data_hash;
+                    }
+                    None => {
+                        cached.fetch_add(1, AtomicOrdering::Relaxed);
+                        shard.insert(
+                            address,
+                            StartupAccount {
+                                owner_id,
+                                data_hash,
+                                version: 0,
+                                has_version: false,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Removes the account only if it is cached under `owner`: a deletion reported under a
+    /// previous owner must not drop the entry of the current one.
+    pub fn remove(&self, owner: &[u8; 32], address: &[u8; 32]) {
+        if let Some(owner_id) = self.existing_owner_id(owner) {
+            self.remove_if(address, |cached_owner_id| cached_owner_id == owner_id);
+        }
+    }
+
+    pub fn remove_address(&self, address: &[u8; 32]) {
+        self.remove_if(address, |_| true);
+    }
+
+    fn remove_if(&self, address: &[u8; 32], matches: impl Fn(u32) -> bool) {
+        match &self.accounts {
+            Accounts::Running(accounts) => {
+                let mut shard = accounts.lock_shard(address);
+                if shard
+                    .get(address)
+                    .is_some_and(|entry| matches(entry.owner_id))
+                {
+                    shard.remove(address);
+                }
+            }
+            Accounts::Startup {
+                accounts, cached, ..
+            } => {
+                let mut shard = accounts.lock_shard(address);
+                let Some(entry) = shard.get_mut(address) else {
+                    return;
+                };
+                if entry.owner_id == NO_OWNER || !matches(entry.owner_id) {
+                    return;
+                }
+                cached.fetch_sub(1, AtomicOrdering::Relaxed);
+                if entry.has_version {
+                    entry.owner_id = NO_OWNER;
+                    entry.data_hash = 0;
+                } else {
+                    shard.remove(address);
+                }
+            }
+        }
+    }
+
+    /// Records a snapshot version of the account and caches it, unless a version at least as
+    /// new was already received. The check and the update happen under one shard lock, so
+    /// versions of an account arriving on different threads resolve the same as in sequence.
+    /// Gives up when startup already ended, which `set_on_startup_after_end` handles.
+    pub fn set_on_startup(
+        &self,
+        owner: [u8; 32],
+        address: [u8; 32],
+        data_hash: u64,
+        version: u64,
+        deleted: bool,
+    ) -> Result<(), ()> {
+        let Accounts::Startup {
+            accounts,
+            cached,
+            versions,
+        } = &self.accounts
+        else {
+            return Err(());
+        };
+        let owner_id = if deleted {
+            NO_OWNER
+        } else {
+            self.owner_id(owner)
+        };
+
+        let mut shard = accounts.lock_shard(&address);
+        let entry = match shard.get_mut(&address) {
+            Some(entry) if entry.has_version && entry.version >= version => return Ok(()),
+            Some(entry) => {
+                if !entry.has_version {
+                    versions.fetch_add(1, AtomicOrdering::Relaxed);
+                }
+                entry.version = version;
+                entry.has_version = true;
+                entry
+            }
+            None => {
+                versions.fetch_add(1, AtomicOrdering::Relaxed);
+                shard.entry(address).or_insert(StartupAccount {
+                    owner_id: NO_OWNER,
+                    data_hash: 0,
+                    version,
+                    has_version: true,
+                })
+            }
+        };
+
+        let was_cached = entry.owner_id != NO_OWNER;
+        entry.owner_id = owner_id;
+        entry.data_hash = if deleted { 0 } else { data_hash };
+        match (was_cached, deleted) {
+            (false, false) => {
+                cached.fetch_add(1, AtomicOrdering::Relaxed);
+            }
+            (true, true) => {
+                cached.fetch_sub(1, AtomicOrdering::Relaxed);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Snapshot notifications after `end_startup` start tracking versions again from none.
+    pub fn set_on_startup_after_end(
+        &mut self,
+        owner: [u8; 32],
+        address: [u8; 32],
+        data_hash: u64,
+        version: u64,
+        deleted: bool,
+    ) {
+        let accounts =
+            std::mem::replace(&mut self.accounts, Accounts::Running(ShardedMap::default()));
+        self.accounts = match accounts {
+            Accounts::Running(accounts) => {
+                let cached = accounts.len();
+                Accounts::Startup {
+                    accounts: accounts.convert(|entry| {
+                        Some(StartupAccount {
+                            owner_id: entry.owner_id,
+                            data_hash: entry.data_hash,
+                            version: 0,
+                            has_version: false,
+                        })
+                    }),
+                    cached: AtomicUsize::new(cached),
+                    versions: AtomicUsize::new(0),
+                }
+            }
+            startup => startup,
+        };
+        self.set_on_startup(owner, address, data_hash, version, deleted)
+            .expect("switched to the startup layout above");
+    }
+
+    /// Drops the startup versions and switches to the smaller running layout.
+    pub fn end_startup(&mut self) {
+        let accounts =
+            std::mem::replace(&mut self.accounts, Accounts::Running(ShardedMap::default()));
+        self.accounts = match accounts {
+            Accounts::Startup { accounts, .. } => Accounts::Running(accounts.convert(|entry| {
+                if entry.owner_id == NO_OWNER {
+                    None
+                } else {
+                    Some(CachedAccount {
+                        owner_id: entry.owner_id,
+                        data_hash: entry.data_hash,
+                    })
+                }
+            })),
+            running => running,
+        };
+    }
+
+    /// Number of accounts with a startup version, zero after `end_startup`.
+    pub fn startup_versions(&self) -> usize {
+        match &self.accounts {
+            Accounts::Startup { versions, .. } => versions.load(AtomicOrdering::Relaxed),
+            Accounts::Running(_) => 0,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match &self.accounts {
+            Accounts::Startup { cached, .. } => cached.load(AtomicOrdering::Relaxed),
+            Accounts::Running(accounts) => accounts.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 use crate::pb::sf::solana::r#type::v1::{Block, BlockHeight, Reward, UnixTimestamp};
 use crate::plugins::{to_block_rewards, ConfirmTransactionWithIndex};
 use bs58;
@@ -35,23 +712,11 @@ pub struct AccountFixed {
     pub deleted: bool,
 }
 
-impl AccountFixed {
-    pub fn to_account(&self) -> Account {
-        Account {
-            address: self.address.to_vec(),
-            owner: self.owner.to_vec(),
-            data: self.data.clone(),
-            deleted: self.deleted,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct AccountWithWriteVersion {
     pub account: AccountFixed,
     pub write_version: u64,
     pub data_hash: u64,
-    pub owner_account_key: Option<[u8; 64]>,
 }
 
 lazy_static! {
@@ -81,6 +746,8 @@ const DEFAULT_RPC_BLOCK_CONFIG: RpcBlockConfig = RpcBlockConfig {
     max_supported_transaction_version: Some(1),
 };
 
+// Aligned so the state lock's word, written by every callback, sits on its own cache lines
+#[repr(align(128))]
 pub struct State {
     pub initialized: bool, // passed the first received blockmeta
 
@@ -92,18 +759,17 @@ pub struct State {
     pub cursor: Option<u64>,
     pub lib: Option<u64>,
 
-    pub block_account_changes: BlockAccountChanges,
+    pub block_account_changes: PendingAccountChanges,
 
-    pub account_data_hash: AccountDataHash, // only updated when we print the block
-    pub account_owners: AccountOwners,      // only updated when we print the block
-    pub startup_received_slot: StartupAccountReceivedSlot, // only used during startup phase
+    pub account_cache: AccountCache, // only updated when we print the block
 
     pub block_infos: BlockInfoMap,
     pub confirmed_slots: ConfirmedSlotsMap,
 
     pub with_block: bool,
     //with_account: bool,
-    pub transactions: Transactions,
+    /// Filled under the shared state lock by `try_set_transaction`.
+    pub transactions: CachePadded<Mutex<Transactions>>,
     pub processed_slots: ProcessedSlot,
 
     pub cursor_path: String,
@@ -112,9 +778,9 @@ pub struct State {
     /// Slot of the last `memory stats` log line.
     pub last_stats_slot: u64,
     /// Transactions received for a slot at or below `last_sent_block`, which are never sent.
-    pub late_transactions: u64,
+    pub late_transactions: AtomicU64,
     /// Account updates received for a slot at or below `last_sent_block`.
-    pub late_account_updates: u64,
+    pub late_account_updates: AtomicU64,
 
     local_rpc_client: Option<RpcClient>,
     remote_rpc_client: Option<RpcClient>,
@@ -140,20 +806,18 @@ impl State {
             lib: None,
             initialized: false,
 
-            block_account_changes: HashMap::default(),
-            account_data_hash: HashMap::default(),
-            account_owners: HashMap::default(),
-            startup_received_slot: HashMap::default(),
+            block_account_changes: PendingAccountChanges::default(),
+            account_cache: AccountCache::default(),
             block_infos: HashMap::default(),
             confirmed_slots: HashMap::default(),
             last_sent_block: None,
 
-            transactions: HashMap::default(),
+            transactions: CachePadded(Mutex::new(HashMap::default())),
             processed_slots: HashMap::default(),
 
             last_stats_slot: 0,
-            late_transactions: 0,
-            late_account_updates: 0,
+            late_transactions: AtomicU64::new(0),
+            late_account_updates: AtomicU64::new(0),
 
             local_rpc_client: Some(local_rpc_client),
             remote_rpc_client: Some(remote_rpc_client),
@@ -175,19 +839,19 @@ impl State {
             cursor: self.cursor,
             lib: self.lib,
             block_account_changes: self.block_account_changes.clone(),
-            account_data_hash: self.account_data_hash.clone(),
-            account_owners: self.account_owners.clone(),
-            startup_received_slot: self.startup_received_slot.clone(),
+            account_cache: self.account_cache.clone(),
             block_infos: self.block_infos.clone(),
             confirmed_slots: self.confirmed_slots.clone(),
             with_block: self.with_block,
-            transactions: self.transactions.clone(),
+            transactions: CachePadded(Mutex::new(self.transactions.lock().unwrap().clone())),
             processed_slots: self.processed_slots.clone(),
             cursor_path: self.cursor_path.clone(),
             dev_config: self.dev_config.clone(),
             last_stats_slot: self.last_stats_slot,
-            late_transactions: self.late_transactions,
-            late_account_updates: self.late_account_updates,
+            late_transactions: AtomicU64::new(self.late_transactions.load(AtomicOrdering::Relaxed)),
+            late_account_updates: AtomicU64::new(
+                self.late_account_updates.load(AtomicOrdering::Relaxed),
+            ),
 
             // Cannot clone those
             local_rpc_client: None,
@@ -378,7 +1042,7 @@ impl State {
                 if !self.with_block {
                     return true; // if we only track account changes, we don't need to count the transactions
                 }
-                if let Some(trxs) = self.transactions.get(&slot) {
+                if let Some(trxs) = self.transactions.lock().unwrap().get(&slot) {
                     if blk.transaction_count == trxs.len() as u64 {
                         true
                     } else {
@@ -423,7 +1087,7 @@ impl State {
                 slot,
                 self.cursor,
                 self.lib,
-                self.account_data_hash.len()
+                self.account_cache.len()
             );
             if self.cursor.is_none() {
                 // usually because the lib has been set from rpc
@@ -487,68 +1151,127 @@ impl State {
         //    At 400ms per slot, this supports ~6,900 years of blockchain history
         let composite_value = (slot << 25) | write_version;
 
-        // Check if we already have this account with a newer version
-        if let Some(&existing_composite) = self.startup_received_slot.get(&pub_key_fixed) {
-            if existing_composite >= composite_value {
-                return;
-            }
-        }
-        self.startup_received_slot
-            .insert(pub_key_fixed, composite_value);
-
-        // Check if there was a previous owner for this public key
-        if let Some(previous_owner) = self.account_owners.get(&pub_key_fixed) {
-            if previous_owner != &owner_fixed {
-                // Previous owner is different, so delete the old entry from account_data_hash
-                let mut previous_owner_account_key = [0u8; 64];
-                // SAFETY: previous_owner is 32 bytes and pub_key_fixed is 32 bytes
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        previous_owner.as_ptr(),
-                        previous_owner_account_key.as_mut_ptr(),
-                        32,
-                    );
-                    std::ptr::copy_nonoverlapping(
-                        pub_key_fixed.as_ptr(),
-                        previous_owner_account_key.as_mut_ptr().add(32),
-                        32,
-                    );
-                }
-                self.account_data_hash.remove(&previous_owner_account_key);
-            }
-        }
-
-        // Create owner+pubkey composite key (64 bytes total)
-        let mut owner_account_key = [0u8; 64];
-        // SAFETY: owner_fixed is 32 bytes and pub_key_fixed is 32 bytes
-        unsafe {
-            std::ptr::copy_nonoverlapping(owner_fixed.as_ptr(), owner_account_key.as_mut_ptr(), 32);
-            std::ptr::copy_nonoverlapping(
-                pub_key_fixed.as_ptr(),
-                owner_account_key.as_mut_ptr().add(32),
-                32,
+        // The newest startup version wins whatever owner it has, including when it deletes
+        if self
+            .account_cache
+            .set_on_startup(
+                owner_fixed,
+                pub_key_fixed,
+                data_hash,
+                composite_value,
+                deleted,
+            )
+            .is_err()
+        {
+            self.account_cache.set_on_startup_after_end(
+                owner_fixed,
+                pub_key_fixed,
+                data_hash,
+                composite_value,
+                deleted,
             );
         }
+    }
 
-        if deleted {
-            self.account_data_hash.remove(&owner_account_key);
-            self.account_owners.remove(&pub_key_fixed);
-        } else {
-            self.account_data_hash.insert(owner_account_key, data_hash);
-            self.account_owners.insert(pub_key_fixed, owner_fixed);
-        }
+    /// `set_account_on_startup` under the shared state lock. Returns false when startup
+    /// already ended, which needs `set_account_on_startup` instead.
+    pub fn try_set_account_on_startup(
+        &self,
+        pub_key: &[u8],
+        owner: &[u8],
+        data_hash: u64,
+        slot: u64,
+        write_version: u64,
+        deleted: bool,
+    ) -> bool {
+        let mut pub_key_fixed = [0u8; 32];
+        let mut owner_fixed = [0u8; 32];
+        pub_key_fixed.copy_from_slice(&pub_key[..32]);
+        owner_fixed.copy_from_slice(&owner[..32]);
+        self.account_cache
+            .set_on_startup(
+                owner_fixed,
+                pub_key_fixed,
+                data_hash,
+                (slot << 25) | write_version,
+                deleted,
+            )
+            .is_ok()
     }
 
     pub fn delete_startup_info(&mut self) {
-        self.startup_received_slot = HashMap::default();
+        self.account_cache.end_startup();
     }
 
     // set_account populates the caches for set_account
+    /// Takes the data by value so callers can copy it before taking the state lock.
     pub fn set_account(
         &mut self,
         slot: u64,
         pub_key: &[u8],
-        data: &[u8],
+        data: impl Into<Vec<u8>>,
+        owner: &[u8],
+        write_version: u64,
+        deleted: bool,
+        data_hash: u64,
+        trace: bool,
+    ) {
+        // purge tail data on initialization
+        if !self.block_account_changes.contains_slot(slot) {
+            let initializing = self.cursor.is_none() && self.first_block_to_process.is_none();
+            if initializing {
+                debug!("initializing: deleting blocks up to: {}", slot - 32);
+                self.purge_blocks_up_to(slot - 32);
+            }
+        }
+        self.record_account(
+            slot,
+            pub_key,
+            data.into(),
+            owner,
+            write_version,
+            deleted,
+            data_hash,
+            trace,
+        );
+    }
+
+    /// `set_account` under the shared state lock, so account updates from several threads run
+    /// in parallel. Gives the data back when the update needs `set_account` instead, which is
+    /// only while initializing, for the first change of a slot.
+    pub fn try_set_account(
+        &self,
+        slot: u64,
+        pub_key: &[u8],
+        data: Vec<u8>,
+        owner: &[u8],
+        write_version: u64,
+        deleted: bool,
+        data_hash: u64,
+        trace: bool,
+    ) -> Result<(), Vec<u8>> {
+        let initializing = self.cursor.is_none() && self.first_block_to_process.is_none();
+        if initializing && !self.block_account_changes.contains_slot(slot) {
+            return Err(data);
+        }
+        self.record_account(
+            slot,
+            pub_key,
+            data,
+            owner,
+            write_version,
+            deleted,
+            data_hash,
+            trace,
+        );
+        Ok(())
+    }
+
+    fn record_account(
+        &self,
+        slot: u64,
+        pub_key: &[u8],
+        data: Vec<u8>,
         owner: &[u8],
         write_version: u64,
         deleted: bool,
@@ -557,79 +1280,35 @@ impl State {
     ) {
         if let Some(last_sent) = self.last_sent_block {
             if last_sent >= slot {
-                self.late_account_updates += 1;
+                self.late_account_updates
+                    .fetch_add(1, AtomicOrdering::Relaxed);
                 error!("Received account data for slot {} which is older than the last sent block {} (owner: {:?}, account: {:?})", slot, last_sent,  bs58::encode(pub_key).into_string(), bs58::encode(owner).into_string());
             }
         }
 
         //create a unique key from owner and account addresses
         let mut owner_account_key = [0u8; 64];
-        // SAFETY: Both owner and pub_key are guaranteed to be 32 bytes (Solana pubkey size)
-        unsafe {
-            std::ptr::copy_nonoverlapping(owner.as_ptr(), owner_account_key.as_mut_ptr(), 32);
-            std::ptr::copy_nonoverlapping(
-                pub_key.as_ptr(),
-                owner_account_key.as_mut_ptr().add(32),
-                32,
-            );
-        }
-
-        // purge tail data on initialization
-        if !self.block_account_changes.contains_key(&slot) {
-            debug!("got some account data for slot {}", slot);
-            let initializing = self.cursor.is_none() && self.first_block_to_process.is_none();
-            if initializing {
-                debug!("initializing: deleting blocks up to: {}", slot - 32);
-                self.purge_blocks_up_to(slot - 32);
-            }
-        }
-
-        let slot_entries = self
-            .block_account_changes
-            .entry(slot)
-            .or_insert_with(HashMap::default);
-
-        // skip if new change version exists
-        if let Some(prev) = slot_entries.get(&owner_account_key) {
-            if prev.write_version > write_version {
-                if trace {
-                    debug!(
-                        "skipping slot because older version: {}, pub_key: {:?}, owner: {:?}, write_version: {}, prev_write_version: {}, deleted: {}, data_hash: {}",
-                        slot, bs58::encode(pub_key).into_string(), bs58::encode(owner).into_string(), write_version, prev.write_version, deleted, data_hash
-                    );
-                }
-                return; // skipping older write_versions
-            }
-        }
-
-        if trace {
-            let data_as_hex = hex::encode(&data[..10.min(data.len())]);
-            debug!("handle_account_change@{}: account {:?} owner: {:?} delete: {:?} version: {:?} Data Size: {} Data Hash: {} Data Preview: {}", slot, bs58::encode(pub_key).into_string(), bs58::encode(owner).into_string(), deleted, write_version, data.len(), data_hash, data_as_hex);
-        }
+        owner_account_key[..32].copy_from_slice(&owner[..32]);
+        owner_account_key[32..].copy_from_slice(&pub_key[..32]);
 
         let mut address = [0u8; 32];
         let mut owner_array = [0u8; 32];
+        address.copy_from_slice(&pub_key[..32]);
+        owner_array.copy_from_slice(&owner[..32]);
 
-        // SAFETY: Both pub_key and owner are guaranteed to be 32 bytes (Solana pubkey size)
-        unsafe {
-            std::ptr::copy_nonoverlapping(pub_key.as_ptr(), address.as_mut_ptr(), 32);
-            std::ptr::copy_nonoverlapping(owner.as_ptr(), owner_array.as_mut_ptr(), 32);
-        }
-
-        let fixed_account = AccountFixed {
-            address,
-            owner: owner_array,
-            data: data.to_vec(),
-            deleted,
-        };
         let awv = AccountWithWriteVersion {
-            account: fixed_account,
+            account: AccountFixed {
+                address,
+                owner: owner_array,
+                data,
+                deleted,
+            },
             write_version,
             data_hash,
-            owner_account_key: None,
         };
 
-        slot_entries.insert(owner_account_key, awv);
+        self.block_account_changes
+            .insert(slot, owner_account_key, awv, trace);
     }
 
     pub fn set_transaction(
@@ -638,27 +1317,7 @@ impl State {
         transaction: ConfirmTransactionWithIndex,
         trace: bool,
     ) {
-        if self.processed_slots.get(&slot).is_some() {
-            error!(
-                "slot {} already processed should not receive transaction for it",
-                slot
-            );
-        }
-        if self
-            .last_sent_block
-            .is_some_and(|last_sent| slot <= last_sent)
-        {
-            self.late_transactions += 1;
-        }
-
-        if let Some(txs) = self.transactions.get_mut(&slot) {
-            txs.push(transaction);
-        } else {
-            debug!("inserting first transaction for slot {}", slot);
-            let mut txs = Vec::new();
-            txs.push(transaction);
-            self.transactions.insert(slot, txs);
-        }
+        self.record_transaction(slot, transaction);
 
         if self.is_ready(slot) {
             if let Err(e) = self.process_upto(trace, slot) {
@@ -670,17 +1329,46 @@ impl State {
         }
     }
 
+    /// `set_transaction` under the shared state lock, so transactions from several threads
+    /// are recorded in parallel. Gives the transaction back when its slot is already
+    /// confirmed: it may complete the block, which `set_transaction` then sends.
+    pub fn try_set_transaction(
+        &self,
+        slot: u64,
+        transaction: ConfirmTransactionWithIndex,
+    ) -> Result<(), ConfirmTransactionWithIndex> {
+        if self.confirmed_slots.contains_key(&slot) {
+            return Err(transaction);
+        }
+        self.record_transaction(slot, transaction);
+        Ok(())
+    }
+
+    fn record_transaction(&self, slot: u64, transaction: ConfirmTransactionWithIndex) {
+        if self.processed_slots.get(&slot).is_some() {
+            error!(
+                "slot {} already processed should not receive transaction for it",
+                slot
+            );
+        }
+        if self
+            .last_sent_block
+            .is_some_and(|last_sent| slot <= last_sent)
+        {
+            self.late_transactions.fetch_add(1, AtomicOrdering::Relaxed);
+        }
+
+        let mut transactions = self.transactions.lock().unwrap();
+        if let Some(txs) = transactions.get_mut(&slot) {
+            txs.push(transaction);
+        } else {
+            debug!("inserting first transaction for slot {}", slot);
+            transactions.insert(slot, vec![transaction]);
+        }
+    }
+
     fn purge_blocks_up_to(&mut self, upto: u64) {
-        let blocks = self
-            .block_account_changes
-            .keys()
-            .cloned()
-            .collect::<Vec<u64>>();
-        for block in blocks {
-            if block > upto {
-                continue;
-            }
-            self.block_account_changes.remove(&block);
+        for block in self.block_account_changes.purge_up_to(upto) {
             self.block_infos.remove(&block);
         }
 
@@ -695,16 +1383,22 @@ impl State {
                 }
             }
         }
+
+        // A slot at or below the LIB that is not confirmed by now never will be, and
+        // `add_missing_slots_to_confirmed_slots` only walks back to the last sent block, so
+        // the transactions of fork slots below both are never read.
+        if let (Some(lib), Some(last_sent)) = (self.lib, self.last_sent_block) {
+            let cutoff = lib.min(last_sent);
+            self.transactions
+                .get_mut()
+                .unwrap()
+                .retain(|&slot, _| slot > cutoff);
+        }
     }
 
     fn apply_changes_upto(&mut self, trace: bool, slot: u64) {
         // Find the lowest slot value in block_account_changes keys
-        let first_slot = self
-            .block_account_changes
-            .keys()
-            .min()
-            .copied()
-            .unwrap_or(slot);
+        let first_slot = self.block_account_changes.min_slot().unwrap_or(slot);
 
         if first_slot > slot {
             info!(
@@ -715,30 +1409,25 @@ impl State {
         }
 
         let started = std::time::Instant::now();
-        let pending_slots = self
-            .block_account_changes
-            .keys()
-            .filter(|&&s| s >= first_slot && s <= slot)
-            .count();
+        let pending_slots = self.block_account_changes.slots_between(first_slot, slot);
         info!(
             "applying account cache changes for slots from {} to: {} ({} slots with pending account changes, hash_count={})",
             first_slot,
             slot,
             pending_slots,
-            self.account_data_hash.len()
+            self.account_cache.len()
         );
 
         let mut slots_applied = 0u64;
         let mut changes_applied = 0usize;
         // Loop through each slot from first_slot to slot (inclusive)
         for current_slot in first_slot..=slot {
-            let (_, changes) = filter_account_changes(
-                self.block_account_changes.get(&current_slot),
-                &self.account_data_hash,
-                &self.account_owners,
-                current_slot,
-                trace,
-            );
+            let slot_changes: Vec<&AccountWithWriteVersion> = self
+                .block_account_changes
+                .slot_changes(current_slot)
+                .collect();
+            let (_, changes) =
+                filter_account_changes(&slot_changes, &self.account_cache, current_slot, trace);
             changes_applied += changes.len();
             self.apply_cache_changes(changes);
             slots_applied += 1;
@@ -751,7 +1440,7 @@ impl State {
             slots_applied,
             changes_applied,
             started.elapsed(),
-            self.account_data_hash.len()
+            self.account_cache.len()
         );
     }
 
@@ -797,10 +1486,13 @@ impl State {
                 lib,
                 self.first_received_blockmeta,
                 self.confirmed_slots.len(),
-                self.account_data_hash.len()
+                self.account_cache.len()
             );
-            if slot != 0 {
-                self.apply_changes_upto(trace, slot - 1);
+            // Only the slots that are not sent: the loop below filters each sent slot against
+            // the cache before applying its changes, so they must not be in it already
+            let catch_up_to = slot.min(first_block_to_process);
+            if catch_up_to != 0 {
+                self.apply_changes_upto(trace, catch_up_to - 1);
             }
             info!("process_upto: first-send init complete, marking initialized");
             self.initialized = true;
@@ -859,16 +1551,23 @@ impl State {
                 }
             }
 
+            // Purged right after this slot is processed, so its data can move into the block
+            let slot_changes = self.block_account_changes.take_slot_changes(slot);
             let (effective_account_changes, cache_changes) = filter_account_changes(
-                self.block_account_changes.get(&slot),
-                &self.account_data_hash,
-                &self.account_owners,
+                &slot_changes.iter().collect::<Vec<_>>(),
+                &self.account_cache,
                 slot,
                 trace,
             );
 
             if must_send {
-                let tx_count = self.transactions.get(&slot).map(|t| t.len()).unwrap_or(0);
+                let tx_count = self
+                    .transactions
+                    .get_mut()
+                    .unwrap()
+                    .get(&slot)
+                    .map(|t| t.len())
+                    .unwrap_or(0);
                 info!(
                     "process_upto: preparing to send slot {} (account_changes={}, txs={}, parent={}, lib={})",
                     slot,
@@ -878,10 +1577,17 @@ impl State {
                     lib
                 );
 
-                let acc_block = create_account_block(effective_account_changes, &block_info);
+                let acc_block = create_account_block(
+                    filtered_accounts(&effective_account_changes, slot_changes),
+                    &block_info,
+                );
 
-                let mut transactions_with_index =
-                    self.transactions.remove(&slot).unwrap_or_else(|| vec![]);
+                let mut transactions_with_index = self
+                    .transactions
+                    .get_mut()
+                    .unwrap()
+                    .remove(&slot)
+                    .unwrap_or_else(|| vec![]);
 
                 transactions_with_index.sort_by_key(|ti| ti.index);
 
@@ -940,21 +1646,13 @@ impl State {
         };
         use std::sync::atomic::Ordering;
 
-        let mut account_changes = 0usize;
-        let mut account_data_bytes = 0usize;
-        for changes in self.block_account_changes.values() {
-            account_changes += changes.len();
-            account_data_bytes += changes
-                .values()
-                .map(|c| c.account.data.len())
-                .sum::<usize>();
-        }
+        let (account_changes, account_data_bytes) = self.block_account_changes.totals();
 
-        // Counts only: this runs under the state lock, and the map can hold transactions of
-        // fork slots that are never purged, so per-transaction work would grow without bound.
-        let transactions: usize = self.transactions.values().map(Vec::len).sum();
+        // Counts only: this runs under the state lock
+        let pending_transactions = self.transactions.lock().unwrap();
+        let transactions: usize = pending_transactions.values().map(Vec::len).sum();
         let stale_transaction_slots = self.last_sent_block.map_or(0, |last_sent| {
-            self.transactions
+            pending_transactions
                 .keys()
                 .filter(|&&s| s <= last_sent)
                 .count()
@@ -965,28 +1663,27 @@ impl State {
              block_account_changes(slots={} min_slot={:?} accounts={} data_bytes={}) \
              transactions(slots={} min_slot={:?} stale_slots={} count={}) \
              block_infos={} confirmed_slots={} processed_slots={} \
-             account_data_hash={} account_owners={} startup_received_slot={} \
+             account_cache={} startup_received_slot={} \
              late_transactions={} late_account_updates={} \
              pending_writes(blocks={} account_blocks={} base64_bytes={})",
             slot,
             self.last_sent_block,
             self.lib,
-            self.block_account_changes.len(),
-            self.block_account_changes.keys().min(),
+            self.block_account_changes.slot_count(),
+            self.block_account_changes.min_slot(),
             account_changes,
             account_data_bytes,
-            self.transactions.len(),
-            self.transactions.keys().min(),
+            pending_transactions.len(),
+            pending_transactions.keys().min(),
             stale_transaction_slots,
             transactions,
             self.block_infos.len(),
             self.confirmed_slots.len(),
             self.processed_slots.len(),
-            self.account_data_hash.len(),
-            self.account_owners.len(),
-            self.startup_received_slot.len(),
-            self.late_transactions,
-            self.late_account_updates,
+            self.account_cache.len(),
+            self.account_cache.startup_versions(),
+            self.late_transactions.load(Ordering::Relaxed),
+            self.late_account_updates.load(Ordering::Relaxed),
             PENDING_BLOCK_WRITES.load(Ordering::Relaxed),
             PENDING_ACCOUNT_BLOCK_WRITES.load(Ordering::Relaxed),
             PENDING_WRITE_BYTES.load(Ordering::Relaxed),
@@ -1004,7 +1701,7 @@ impl State {
     }
 
     pub fn get_hash_count(&self) -> usize {
-        self.account_data_hash.len()
+        self.account_cache.len()
     }
 
     fn apply_cache_changes(&mut self, changes: Vec<StateChange>) {
@@ -1021,21 +1718,11 @@ impl State {
             address_fixed.copy_from_slice(&address_vec);
             owner_fixed.copy_from_slice(&owner_vec);
 
-            // Create composite key (owner + address)
-            let mut owner_account_key = [0u8; 64];
-            owner_account_key[..32].copy_from_slice(&owner_fixed);
-            owner_account_key[32..].copy_from_slice(&address_fixed);
-
             if deleted {
-                self.account_data_hash.remove(&owner_account_key);
-                if let Some(cached) = self.account_owners.get(&address_fixed) {
-                    if cached == &owner_fixed {
-                        self.account_owners.remove(&address_fixed);
-                    }
-                }
+                self.account_cache.remove(&owner_fixed, &address_fixed);
             } else {
-                self.account_data_hash.insert(owner_account_key, data_hash);
-                self.account_owners.insert(address_fixed, owner_fixed); // last one wins
+                self.account_cache
+                    .insert(owner_fixed, address_fixed, data_hash); // last one wins
             }
         }
     }
@@ -1048,58 +1735,93 @@ struct StateChange {
     deleted: bool,
 }
 
+/// An account change kept by `filter_account_changes`, borrowing the data from the slot's
+/// pending changes so it is only copied when the block is sent.
+/// An account change kept by `filter_account_changes`. Its data is that of `changes[source]`,
+/// so the caller can move it into the block instead of copying it.
+struct FilteredAccount {
+    address: [u8; 32],
+    owner: [u8; 32],
+    source: usize,
+    deleted: bool,
+}
+
+impl FilteredAccount {
+    fn to_account(&self, data: Vec<u8>) -> Account {
+        Account {
+            address: self.address.to_vec(),
+            owner: self.owner.to_vec(),
+            data,
+            deleted: self.deleted,
+        }
+    }
+}
+
+/// Builds the accounts of `filtered`, moving each data out of `changes` on its last use.
+fn filtered_accounts(
+    filtered: &[FilteredAccount],
+    changes: Vec<AccountWithWriteVersion>,
+) -> Vec<Account> {
+    let mut uses = vec![0usize; changes.len()];
+    for account in filtered {
+        uses[account.source] += 1;
+    }
+    let mut data: Vec<Vec<u8>> = changes.into_iter().map(|c| c.account.data).collect();
+    filtered
+        .iter()
+        .map(|account| {
+            uses[account.source] -= 1;
+            let data = if uses[account.source] == 0 {
+                std::mem::take(&mut data[account.source])
+            } else {
+                data[account.source].clone()
+            };
+            account.to_account(data)
+        })
+        .collect()
+}
+
 fn filter_account_changes(
-    changes: Option<&HashMap<[u8; 64], AccountWithWriteVersion>>,
-    account_data_hash: &AccountDataHash,
-    account_owners: &AccountOwners,
+    changes: &[&AccountWithWriteVersion],
+    account_cache: &AccountCache,
     slot: u64,
     trace: bool,
-) -> (Vec<Account>, Vec<StateChange>) {
-    let mut filtered_changes: Vec<AccountFixed> = Vec::new();
+) -> (Vec<FilteredAccount>, Vec<StateChange>) {
+    let mut filtered_changes: Vec<FilteredAccount> = Vec::new();
     let mut state_changes: Vec<StateChange> = Vec::new();
 
     let mut in_block_owners = AccountOwners::default();
-    let mut ordered_changes: Vec<AccountWithWriteVersion> = Vec::new();
-
-    if let Some(changes) = changes {
-        for (owner_account_key, account_with_version) in changes {
-            let with_key = AccountWithWriteVersion {
-                account: account_with_version.account.clone(),
-                write_version: account_with_version.write_version,
-                data_hash: account_with_version.data_hash,
-                owner_account_key: Some(*owner_account_key),
-            };
-            ordered_changes.push(with_key);
-        }
-    }
-    ordered_changes.sort_by(|a, b| {
+    let mut ordered_changes: Vec<usize> = (0..changes.len()).collect();
+    ordered_changes.sort_by(|&a, &b| {
+        let (a, b) = (changes[a], changes[b]);
         a.account
             .address
             .cmp(&b.account.address)
             .then_with(|| a.write_version.cmp(&b.write_version))
     });
 
-    for account_with_version in ordered_changes.into_iter() {
-        let owner_account_key_fixed = &account_with_version.owner_account_key.unwrap();
+    for source in ordered_changes {
+        let account_with_version = changes[source];
         let account = &account_with_version.account;
-        account_with_version.write_version;
+        let cached = account_cache.get(&account.address);
 
         let mut should_include = false;
-        if let Some(cached_hash) = account_data_hash.get(owner_account_key_fixed) {
-            if *cached_hash != account_with_version.data_hash {
-                should_include = true;
+        match cached {
+            Some((cached_owner, cached_hash)) if cached_owner == account.owner => {
+                if cached_hash != account_with_version.data_hash {
+                    should_include = true;
+                }
+                if account.deleted {
+                    should_include = true;
+                }
             }
-            if account.deleted {
-                should_include = true;
-            }
-        } else {
-            should_include = true;
+            _ => should_include = true,
         }
 
         let cached_owner = in_block_owners
             .get(&account.address)
-            .or_else(|| account_owners.get(&account.address))
-            .copied();
+            .copied()
+            .or(cached.map(|(owner, _)| owner));
 
         let different_previous_owner = match cached_owner {
             None => None,
@@ -1116,26 +1838,30 @@ fn filter_account_changes(
         if let Some(cached_owner) = different_previous_owner {
             should_include = true;
 
-            let prev_already_pushed = filtered_changes
+            // Changes are sorted by address, so this account's earlier entries are the last ones
+            let same_address_start = filtered_changes
                 .iter()
-                .any(|change| change.address == account.address && change.owner == cached_owner);
+                .rposition(|change| change.address != account.address)
+                .map_or(0, |i| i + 1);
+
+            let prev_already_pushed = filtered_changes[same_address_start..]
+                .iter()
+                .any(|change| change.owner == cached_owner);
 
             if !prev_already_pushed {
                 // Push the account change with the previous owner
                 // it will appear before the new owner's state change
-                filtered_changes.push(AccountFixed {
+                filtered_changes.push(FilteredAccount {
                     address: account.address,
                     owner: cached_owner,
-                    data: account_with_version.account.data.clone(),
+                    source,
                     deleted: account.deleted,
                 });
             }
 
-            for change in filtered_changes.iter_mut() {
-                if change.address == account.address {
-                    change.deleted = account.deleted;
-                    change.data = account.data.clone();
-                }
+            for change in filtered_changes[same_address_start..].iter_mut() {
+                change.deleted = account.deleted;
+                change.source = source;
             }
         }
 
@@ -1145,7 +1871,12 @@ fn filter_account_changes(
             if trace {
                 debug!("include_change@{}: account {:?} owner: {:?} delete: {:?} version: {:?} Data hash: {}", slot, bs58::encode(&account.address).into_string(), bs58::encode(&account.owner).into_string(), &account.deleted, account_with_version.write_version, account_with_version.data_hash);
             }
-            filtered_changes.push(account.clone());
+            filtered_changes.push(FilteredAccount {
+                address: account.address,
+                owner: account.owner,
+                source,
+                deleted: account.deleted,
+            });
 
             if let Some(cached_owner) = different_previous_owner {
                 state_changes.push(StateChange {
@@ -1172,13 +1903,7 @@ fn filter_account_changes(
         }
     }
 
-    // Convert AccountFixed to Account for output compatibility
-    let account_changes: Vec<Account> = filtered_changes
-        .into_iter()
-        .map(|fixed_account| fixed_account.to_account())
-        .collect();
-
-    (account_changes, state_changes)
+    (filtered_changes, state_changes)
 }
 
 #[cfg(test)]
@@ -1247,17 +1972,15 @@ mod tests {
             account,
             write_version,
             data_hash,
-            owner_account_key: None,
         }
     }
 
     #[test]
     fn test_filter_account_changes_empty_changes() {
-        let account_data_hash: AccountDataHash = HashMap::default();
-        let account_owners: AccountOwners = HashMap::default();
+        let account_cache = AccountCache::default();
 
         let (filtered_changes, state_changes) =
-            filter_account_changes(None, &account_data_hash, &account_owners, 0, false);
+            filter_account_changes_owned(None, &account_cache, 0, false);
 
         assert!(filtered_changes.is_empty());
         assert!(state_changes.is_empty());
@@ -1266,8 +1989,7 @@ mod tests {
     #[test]
     fn test_filter_account_changes_new_account() {
         let mut changes = HashMap::default();
-        let account_data_hash = HashMap::default();
-        let account_owners = HashMap::default();
+        let account_cache = AccountCache::default();
 
         let address = vec![
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
@@ -1284,13 +2006,8 @@ mod tests {
         let key = create_composite_key(&owner, &address);
         changes.insert(key, account_with_version);
 
-        let (filtered_changes, state_changes) = filter_account_changes(
-            Some(&changes),
-            &account_data_hash,
-            &account_owners,
-            0,
-            false,
-        );
+        let (filtered_changes, state_changes) =
+            filter_account_changes_owned(Some(&changes), &account_cache, 0, false);
 
         assert_eq!(filtered_changes.len(), 1);
         assert_eq!(state_changes.len(), 1);
@@ -1311,8 +2028,7 @@ mod tests {
     #[test]
     fn test_filter_account_changes_same_data_hash_not_deleted() {
         let mut changes = HashMap::default();
-        let mut account_data_hash: AccountDataHash = HashMap::default();
-        let account_owners: AccountOwners = HashMap::default();
+        let mut account_cache = AccountCache::default();
 
         let address = vec![
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
@@ -1329,15 +2045,10 @@ mod tests {
         let owner_account_key = create_composite_key(&owner, &address);
         changes.insert(owner_account_key, account_with_version);
         let owner_account_key_fixed = owner_account_key;
-        account_data_hash.insert(owner_account_key_fixed, 123); // Same hash
+        account_cache.insert_key(owner_account_key_fixed, 123); // Same hash
 
-        let (filtered_changes, state_changes) = filter_account_changes(
-            Some(&changes),
-            &account_data_hash,
-            &account_owners,
-            0,
-            false,
-        );
+        let (filtered_changes, state_changes) =
+            filter_account_changes_owned(Some(&changes), &account_cache, 0, false);
 
         // Should be filtered out because hash is the same and not deleted
         assert!(filtered_changes.is_empty());
@@ -1347,8 +2058,7 @@ mod tests {
     #[test]
     fn test_filter_account_changes_different_data_hash() {
         let mut changes = HashMap::default();
-        let mut account_data_hash: AccountDataHash = HashMap::default();
-        let account_owners: AccountOwners = HashMap::default();
+        let mut account_cache = AccountCache::default();
 
         let address = vec![
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
@@ -1365,15 +2075,10 @@ mod tests {
         let owner_account_key = create_composite_key(&owner, &address);
         changes.insert(owner_account_key, account_with_version);
         let owner_account_key_fixed = owner_account_key;
-        account_data_hash.insert(owner_account_key_fixed, 456); // Different hash
+        account_cache.insert_key(owner_account_key_fixed, 456); // Different hash
 
-        let (filtered_changes, state_changes) = filter_account_changes(
-            Some(&changes),
-            &account_data_hash,
-            &account_owners,
-            0,
-            false,
-        );
+        let (filtered_changes, state_changes) =
+            filter_account_changes_owned(Some(&changes), &account_cache, 0, false);
 
         // Should be included because hash is different
         assert_eq!(filtered_changes.len(), 1);
@@ -1386,8 +2091,7 @@ mod tests {
     #[test]
     fn test_filter_account_changes_deleted_account() {
         let mut changes = HashMap::default();
-        let mut account_data_hash: AccountDataHash = HashMap::default();
-        let account_owners: AccountOwners = HashMap::default();
+        let mut account_cache = AccountCache::default();
 
         let address = vec![
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
@@ -1404,15 +2108,10 @@ mod tests {
         let owner_account_key = create_composite_key(&owner, &address);
         changes.insert(owner_account_key, account_with_version);
         let owner_account_key_fixed = owner_account_key;
-        account_data_hash.insert(owner_account_key_fixed, 123); // Same hash but account is deleted
+        account_cache.insert_key(owner_account_key_fixed, 123); // Same hash but account is deleted
 
-        let (filtered_changes, state_changes) = filter_account_changes(
-            Some(&changes),
-            &account_data_hash,
-            &account_owners,
-            0,
-            false,
-        );
+        let (filtered_changes, state_changes) =
+            filter_account_changes_owned(Some(&changes), &account_cache, 0, false);
 
         // Should be included because account is deleted even with same hash
         assert_eq!(filtered_changes.len(), 1);
@@ -1426,8 +2125,7 @@ mod tests {
     #[test]
     fn test_filter_account_changes_ownership_change() {
         let mut changes = HashMap::default();
-        let account_data_hash: AccountDataHash = HashMap::default();
-        let mut account_owners: AccountOwners = HashMap::default();
+        let mut account_cache = AccountCache::default();
 
         let address = vec![
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
@@ -1449,15 +2147,10 @@ mod tests {
             create_composite_key(&new_owner, &address),
             account_with_version,
         );
-        account_owners.insert(vec_to_fixed_32(&address), vec_to_fixed_32(&old_owner)); // Different owner
+        account_cache.insert(vec_to_fixed_32(&old_owner), vec_to_fixed_32(&address), 0); // Different owner
 
-        let (filtered_changes, state_changes) = filter_account_changes(
-            Some(&changes),
-            &account_data_hash,
-            &account_owners,
-            0,
-            false,
-        );
+        let (filtered_changes, state_changes) =
+            filter_account_changes_owned(Some(&changes), &account_cache, 0, false);
 
         // Should have 2 accounts: one with old owner, one with new owner
         assert_eq!(filtered_changes.len(), 2);
@@ -1490,8 +2183,7 @@ mod tests {
     #[test]
     fn test_filter_account_changes_create_changeowner_delete() {
         let mut changes = HashMap::default();
-        let account_data_hash: AccountDataHash = HashMap::default();
-        let account_owners: AccountOwners = HashMap::default();
+        let account_cache = AccountCache::default();
 
         let address = vec![
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
@@ -1517,13 +2209,8 @@ mod tests {
         let key2 = create_composite_key(&new_owner, &address);
         changes.insert(key2, account2_with_version);
 
-        let (mut filtered_changes, state_changes) = filter_account_changes(
-            Some(&changes),
-            &account_data_hash,
-            &account_owners,
-            0,
-            false,
-        );
+        let (mut filtered_changes, state_changes) =
+            filter_account_changes_owned(Some(&changes), &account_cache, 0, false);
 
         // Should have 2 accounts: one with old owner, one with new owner
         assert_eq!(filtered_changes.len(), 2);
@@ -1565,8 +2252,7 @@ mod tests {
     #[test]
     fn test_filter_account_changes_multiple_accounts_sorted() {
         let mut changes = HashMap::default();
-        let account_data_hash: AccountDataHash = HashMap::default();
-        let account_owners: AccountOwners = HashMap::default();
+        let account_cache = AccountCache::default();
 
         // Create accounts with addresses that will test sorting
         let address1 = vec![
@@ -1609,13 +2295,8 @@ mod tests {
             account_with_version3,
         );
 
-        let (filtered_changes, state_changes) = filter_account_changes(
-            Some(&changes),
-            &account_data_hash,
-            &account_owners,
-            0,
-            false,
-        );
+        let (filtered_changes, state_changes) =
+            filter_account_changes_owned(Some(&changes), &account_cache, 0, false);
 
         assert_eq!(filtered_changes.len(), 3);
         assert_eq!(state_changes.len(), 3);
@@ -1629,8 +2310,7 @@ mod tests {
     #[test]
     fn test_filter_account_changes_complex_scenario() {
         let mut changes = HashMap::default();
-        let mut account_data_hash: AccountDataHash = HashMap::default();
-        let mut account_owners: AccountOwners = HashMap::default();
+        let mut account_cache = AccountCache::default();
 
         // Account 1: New account (should be included)
         let address1 = vec![
@@ -1661,7 +2341,7 @@ mod tests {
         let account_with_version2 = create_test_account_with_version(account2, 2, 222);
         let owner_account_key2 = create_composite_key(&owner2, &address2);
         changes.insert(owner_account_key2, account_with_version2);
-        account_data_hash.insert(owner_account_key2, 222); // Same hash
+        account_cache.insert_key(owner_account_key2, 222); // Same hash
 
         // Account 3: Ownership change (should include both old and new owner versions)
         let address3 = vec![
@@ -1682,7 +2362,7 @@ mod tests {
         let account_with_version3 = create_test_account_with_version(account3, 3, 333);
         let owner_account_key3 = create_composite_key(&new_owner3, &address3);
         changes.insert(owner_account_key3, account_with_version3);
-        account_owners.insert(vec_to_fixed_32(&address3), vec_to_fixed_32(&old_owner3));
+        account_cache.insert(vec_to_fixed_32(&old_owner3), vec_to_fixed_32(&address3), 0);
 
         // Account 4: Deleted account with same hash (should be included)
         let address4 = vec![
@@ -1698,15 +2378,10 @@ mod tests {
         let account_with_version4 = create_test_account_with_version(account4, 4, 444);
         let owner_account_key4 = create_composite_key(&owner4, &address4);
         changes.insert(owner_account_key4, account_with_version4);
-        account_data_hash.insert(owner_account_key4, 444); // Same hash but deleted
+        account_cache.insert_key(owner_account_key4, 444); // Same hash but deleted
 
-        let (filtered_changes, state_changes) = filter_account_changes(
-            Some(&changes),
-            &account_data_hash,
-            &account_owners,
-            0,
-            false,
-        );
+        let (filtered_changes, state_changes) =
+            filter_account_changes_owned(Some(&changes), &account_cache, 0, false);
 
         // Should have: Account1, Account3 (old owner), Account3 (new owner), Account4
         assert_eq!(filtered_changes.len(), 4);
@@ -1730,8 +2405,7 @@ mod tests {
 
         state.apply_cache_changes(changes);
 
-        assert!(state.account_data_hash.is_empty());
-        assert!(state.account_owners.is_empty());
+        assert!(state.account_cache.is_empty());
     }
 
     #[test]
@@ -1756,16 +2430,16 @@ mod tests {
 
         state.apply_cache_changes(vec![change]);
 
-        // Check that account_owners is updated
+        // Check that the cached owner is updated
         let address_fixed = vec_to_fixed_32(&address);
         let owner_fixed = vec_to_fixed_32(&owner);
-        assert_eq!(state.account_owners.get(&address_fixed), Some(&owner_fixed));
+        assert_eq!(state.account_cache.owner(&address_fixed), Some(owner_fixed));
 
-        // Check that account_data_hash is updated with the combined key
+        // Check that the data hash is cached under the owner
         let expected_key_fixed = create_composite_key(&owner, &address);
         assert_eq!(
-            state.account_data_hash.get(&expected_key_fixed),
-            Some(&data_hash)
+            state.account_cache.get_by_key(&expected_key_fixed),
+            Some(data_hash)
         );
     }
 
@@ -1784,19 +2458,14 @@ mod tests {
 
         // First add an account
         let address_fixed = vec_to_fixed_32(&address);
-        let owner_fixed = vec_to_fixed_32(&owner);
         let owner_account_key_fixed = create_composite_key(&owner, &address);
-
-        state.account_owners.insert(address_fixed, owner_fixed);
         state
-            .account_data_hash
-            .insert(owner_account_key_fixed, data_hash);
+            .account_cache
+            .insert_key(owner_account_key_fixed, data_hash);
 
         // Verify it's there
-        assert!(state.account_owners.contains_key(&address_fixed));
-        assert!(state
-            .account_data_hash
-            .contains_key(&owner_account_key_fixed));
+        assert!(state.account_cache.owner(&address_fixed).is_some());
+        assert!(state.account_cache.contains_key(&owner_account_key_fixed));
 
         // Now delete it
         let change = StateChange {
@@ -1809,10 +2478,8 @@ mod tests {
         state.apply_cache_changes(vec![change]);
 
         // Check that both are removed
-        assert!(!state.account_owners.contains_key(&address_fixed));
-        assert!(!state
-            .account_data_hash
-            .contains_key(&owner_account_key_fixed));
+        assert!(!state.account_cache.owner(&address_fixed).is_some());
+        assert!(!state.account_cache.contains_key(&owner_account_key_fixed));
     }
 
     #[test]
@@ -1881,16 +2548,16 @@ mod tests {
         let owner3_fixed = vec_to_fixed_32(&owner3);
 
         assert_eq!(
-            state.account_owners.get(&address1_fixed),
-            Some(&owner1_fixed)
+            state.account_cache.owner(&address1_fixed),
+            Some(owner1_fixed)
         );
         assert_eq!(
-            state.account_owners.get(&address2_fixed),
-            Some(&owner2_fixed)
+            state.account_cache.owner(&address2_fixed),
+            Some(owner2_fixed)
         );
         assert_eq!(
-            state.account_owners.get(&address3_fixed),
-            Some(&owner3_fixed)
+            state.account_cache.owner(&address3_fixed),
+            Some(owner3_fixed)
         );
 
         // Check all data hashes are added
@@ -1898,9 +2565,18 @@ mod tests {
         let key2_fixed = create_composite_key(&owner2, &address2);
         let key3_fixed = create_composite_key(&owner3, &address3);
 
-        assert_eq!(state.account_data_hash.get(&key1_fixed), Some(&data_hash1));
-        assert_eq!(state.account_data_hash.get(&key2_fixed), Some(&data_hash2));
-        assert_eq!(state.account_data_hash.get(&key3_fixed), Some(&data_hash3));
+        assert_eq!(
+            state.account_cache.get_by_key(&key1_fixed),
+            Some(data_hash1)
+        );
+        assert_eq!(
+            state.account_cache.get_by_key(&key2_fixed),
+            Some(data_hash2)
+        );
+        assert_eq!(
+            state.account_cache.get_by_key(&key3_fixed),
+            Some(data_hash3)
+        );
     }
 
     #[test]
@@ -1929,16 +2605,12 @@ mod tests {
         let data_hash2 = 222u64;
 
         let address1_fixed = vec_to_fixed_32(&address1);
-        let owner1_fixed = vec_to_fixed_32(&owner1);
         let address2_fixed = vec_to_fixed_32(&address2);
         let owner2_fixed = vec_to_fixed_32(&owner2);
         let key1_fixed = create_composite_key(&owner1, &address1);
         let key2_fixed = create_composite_key(&owner2, &address2);
-
-        state.account_owners.insert(address1_fixed, owner1_fixed);
-        state.account_data_hash.insert(key1_fixed, data_hash1);
-        state.account_owners.insert(address2_fixed, owner2_fixed);
-        state.account_data_hash.insert(key2_fixed, data_hash2);
+        state.account_cache.insert_key(key1_fixed, data_hash1);
+        state.account_cache.insert_key(key2_fixed, data_hash2);
 
         // Now apply mixed changes: delete one, add one, update one
         let address3 = vec![
@@ -1978,25 +2650,28 @@ mod tests {
         state.apply_cache_changes(changes);
 
         // Check address1 is deleted
-        assert!(!state.account_owners.contains_key(&address1_fixed));
-        assert!(!state.account_data_hash.contains_key(&key1_fixed));
+        assert!(!state.account_cache.owner(&address1_fixed).is_some());
+        assert!(!state.account_cache.contains_key(&key1_fixed));
 
         // Check address2 is updated
         assert_eq!(
-            state.account_owners.get(&address2_fixed),
-            Some(&owner2_fixed)
+            state.account_cache.owner(&address2_fixed),
+            Some(owner2_fixed)
         );
-        assert_eq!(state.account_data_hash.get(&key2_fixed), Some(&999u64));
+        assert_eq!(state.account_cache.get_by_key(&key2_fixed), Some(999u64));
 
         // Check address3 is added
         let address3_fixed = vec_to_fixed_32(&address3);
         let owner3_fixed = vec_to_fixed_32(&owner3);
         assert_eq!(
-            state.account_owners.get(&address3_fixed),
-            Some(&owner3_fixed)
+            state.account_cache.owner(&address3_fixed),
+            Some(owner3_fixed)
         );
         let key3_fixed = create_composite_key(&owner3, &address3);
-        assert_eq!(state.account_data_hash.get(&key3_fixed), Some(&data_hash3));
+        assert_eq!(
+            state.account_cache.get_by_key(&key3_fixed),
+            Some(data_hash3)
+        );
     }
 
     #[test]
@@ -2019,11 +2694,8 @@ mod tests {
 
         // Set up initial state with old owner
         let address_fixed = vec_to_fixed_32(&address);
-        let old_owner_fixed = vec_to_fixed_32(&old_owner);
         let old_key_fixed = create_composite_key(&old_owner, &address);
-
-        state.account_owners.insert(address_fixed, old_owner_fixed);
-        state.account_data_hash.insert(old_key_fixed, data_hash);
+        state.account_cache.insert_key(old_key_fixed, data_hash);
 
         // Apply ownership change
         let change = StateChange {
@@ -2035,18 +2707,18 @@ mod tests {
 
         state.apply_cache_changes(vec![change]);
 
-        // Check that account_owners is updated to new owner
+        // Check that the cached owner is updated to the new owner
         let new_owner_fixed = vec_to_fixed_32(&new_owner);
         assert_eq!(
-            state.account_owners.get(&address_fixed),
-            Some(&new_owner_fixed)
+            state.account_cache.owner(&address_fixed),
+            Some(new_owner_fixed)
         );
 
         // Check that new key is added
         let new_key_fixed = create_composite_key(&new_owner, &address);
         assert_eq!(
-            state.account_data_hash.get(&new_key_fixed),
-            Some(&data_hash)
+            state.account_cache.get_by_key(&new_key_fixed),
+            Some(data_hash)
         );
 
         // Note: the apply_cache should be called with a 'deleted: true' on the old state. we're testing an incomplete scenario
@@ -2093,18 +2765,18 @@ mod tests {
         let address_fixed = vec_to_fixed_32(&address);
         let owner2_fixed = vec_to_fixed_32(&owner2);
         assert_eq!(
-            state.account_owners.get(&address_fixed),
-            Some(&owner2_fixed)
+            state.account_cache.owner(&address_fixed),
+            Some(owner2_fixed)
         );
 
         let new_key_fixed = create_composite_key(&owner2, &address);
         let old_key_fixed = create_composite_key(&owner1, &address);
 
         assert_eq!(
-            state.account_data_hash.get(&new_key_fixed),
-            Some(&data_hash2)
+            state.account_cache.get_by_key(&new_key_fixed),
+            Some(data_hash2)
         );
-        assert_eq!(state.account_data_hash.get(&old_key_fixed), None);
+        assert_eq!(state.account_cache.get_by_key(&old_key_fixed), None);
     }
 
     // Helper function to create a test State instance
@@ -2409,40 +3081,40 @@ mod tests {
 
         assert_eq!(
             state
-                .account_data_hash
-                .get(&owner_account_key_fixed)
+                .account_cache
+                .get_by_key(&owner_account_key_fixed)
                 .unwrap(),
-            &data_hash_1
+            data_hash_1
         );
 
         // set startup value with slot=7 -> unchanged
         state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_2, 7, 1, false);
         assert_eq!(
             state
-                .account_data_hash
-                .get(&owner_account_key_fixed)
+                .account_cache
+                .get_by_key(&owner_account_key_fixed)
                 .unwrap(),
-            &data_hash_1
+            data_hash_1
         );
 
         // set startup value with slot=8, higher write_version -> changed
         state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_2, 8, 4, false);
         assert_eq!(
             state
-                .account_data_hash
-                .get(&owner_account_key_fixed)
+                .account_cache
+                .get_by_key(&owner_account_key_fixed)
                 .unwrap(),
-            &data_hash_2
+            data_hash_2
         );
 
         // set startup value with slot=9, lower write_version -> changed
         state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_3, 9, 0, false);
         assert_eq!(
             state
-                .account_data_hash
-                .get(&owner_account_key_fixed)
+                .account_cache
+                .get_by_key(&owner_account_key_fixed)
                 .unwrap(),
-            &data_hash_3
+            data_hash_3
         );
 
         // set startup value with slot=10, higher write_version, deleted=true -> all traces removed
@@ -2450,23 +3122,23 @@ mod tests {
 
         // verify all traces to the account are removed from hashes
         assert!(state
-            .account_data_hash
-            .get(&owner_account_key_fixed)
+            .account_cache
+            .get_by_key(&owner_account_key_fixed)
             .is_none());
-        assert!(state.account_owners.get(&pub_key_1_fixed).is_none());
+        assert!(state.account_cache.owner(&pub_key_1_fixed).is_none());
 
         // test with different owner: set up account with OWNER_KEY_1 again
         state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_1, 11, 0, false);
         assert_eq!(
             state
-                .account_data_hash
-                .get(&owner_account_key_fixed)
+                .account_cache
+                .get_by_key(&owner_account_key_fixed)
                 .unwrap(),
-            &data_hash_1
+            data_hash_1
         );
         assert_eq!(
-            state.account_owners.get(&pub_key_1_fixed).unwrap(),
-            &vec_to_fixed_32(OWNER_KEY_1)
+            state.account_cache.owner(&pub_key_1_fixed).unwrap(),
+            vec_to_fixed_32(OWNER_KEY_1)
         );
 
         // set with different owner (OWNER_KEY_11111111111111111111111111111111) and deleted=true
@@ -2475,26 +3147,26 @@ mod tests {
 
         // Verify previous values with the other owner are also gone
         assert!(state
-            .account_data_hash
-            .get(&owner_account_key_fixed)
+            .account_cache
+            .get_by_key(&owner_account_key_fixed)
             .is_none());
-        assert!(state.account_owners.get(&pub_key_1_fixed).is_none());
+        assert!(state.account_cache.owner(&pub_key_1_fixed).is_none());
 
         // set a value 'before' the block where it got deleted. it should remain deleted
         state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_1, 11, 0, false);
         assert!(state
-            .account_data_hash
-            .get(&owner_account_key_fixed)
+            .account_cache
+            .get_by_key(&owner_account_key_fixed)
             .is_none());
 
         // set a value 'after' the block where it got deleted. it should remain deleted
         state.set_account_on_startup(PUB_KEY_1, OWNER_KEY_1, data_hash_1, 12, 1, false);
         assert_eq!(
             state
-                .account_data_hash
-                .get(&owner_account_key_fixed)
+                .account_cache
+                .get_by_key(&owner_account_key_fixed)
                 .unwrap(),
-            &data_hash_1
+            data_hash_1
         );
     }
 
@@ -2520,44 +3192,44 @@ mod tests {
         // First call with owner1
         state.set_account_on_startup(PUB_KEY_1, owner1, data_hash1, slot1, 0, false);
 
-        // Verify owner1+pubkey entry exists in account_data_hash
+        // Verify owner1+pubkey entry exists in the account cache
         let owner1_account_key_fixed = create_composite_key(owner1, PUB_KEY_1);
         let pub_key_1_fixed = vec_to_fixed_32(PUB_KEY_1);
         let owner1_fixed = vec_to_fixed_32(owner1);
         assert_eq!(
             state
-                .account_data_hash
-                .get(&owner1_account_key_fixed)
+                .account_cache
+                .get_by_key(&owner1_account_key_fixed)
                 .unwrap(),
-            &data_hash1
+            data_hash1
         );
         assert_eq!(
-            state.account_owners.get(&pub_key_1_fixed).unwrap(),
-            &owner1_fixed
+            state.account_cache.owner(&pub_key_1_fixed).unwrap(),
+            owner1_fixed
         );
 
         // Second call with owner2 and higher slot number
         state.set_account_on_startup(PUB_KEY_1, owner2, data_hash2, slot2, 0, false);
 
-        // Verify that owner1+pubkey entry is deleted from account_data_hash
+        // Verify that owner1+pubkey entry is deleted from the account cache
         assert!(state
-            .account_data_hash
-            .get(&owner1_account_key_fixed)
+            .account_cache
+            .get_by_key(&owner1_account_key_fixed)
             .is_none());
 
-        // Verify that owner2+pubkey entry exists in account_data_hash
+        // Verify that owner2+pubkey entry exists in the account cache
         let owner2_account_key_fixed = create_composite_key(owner2, PUB_KEY_1);
         let owner2_fixed = vec_to_fixed_32(owner2);
         assert_eq!(
             state
-                .account_data_hash
-                .get(&owner2_account_key_fixed)
+                .account_cache
+                .get_by_key(&owner2_account_key_fixed)
                 .unwrap(),
-            &data_hash2
+            data_hash2
         );
         assert_eq!(
-            state.account_owners.get(&pub_key_1_fixed).unwrap(),
-            &owner2_fixed
+            state.account_cache.owner(&pub_key_1_fixed).unwrap(),
+            owner2_fixed
         );
     }
 
@@ -2800,15 +3472,24 @@ mod tests {
         }
 
         assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_1)],
+            state
+                .account_cache
+                .get_by_key(&concat_keys(OWNER_KEY_1, PUB_KEY_1))
+                .unwrap(),
             12345
         );
         assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_2)],
+            state
+                .account_cache
+                .get_by_key(&concat_keys(OWNER_KEY_1, PUB_KEY_2))
+                .unwrap(),
             23456
         );
         assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_3)],
+            state
+                .account_cache
+                .get_by_key(&concat_keys(OWNER_KEY_1, PUB_KEY_3))
+                .unwrap(),
             34567
         );
 
@@ -2842,15 +3523,24 @@ mod tests {
         }
 
         assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_1)],
+            state
+                .account_cache
+                .get_by_key(&concat_keys(OWNER_KEY_1, PUB_KEY_1))
+                .unwrap(),
             12345
         );
         assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_2)],
+            state
+                .account_cache
+                .get_by_key(&concat_keys(OWNER_KEY_1, PUB_KEY_2))
+                .unwrap(),
             23456
         );
         assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_3)],
+            state
+                .account_cache
+                .get_by_key(&concat_keys(OWNER_KEY_1, PUB_KEY_3))
+                .unwrap(),
             34567
         );
 
@@ -2884,15 +3574,24 @@ mod tests {
         }
 
         assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_1)],
+            state
+                .account_cache
+                .get_by_key(&concat_keys(OWNER_KEY_1, PUB_KEY_1))
+                .unwrap(),
             12345
         );
         assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_2)],
+            state
+                .account_cache
+                .get_by_key(&concat_keys(OWNER_KEY_1, PUB_KEY_2))
+                .unwrap(),
             23456
         );
         assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_3)],
+            state
+                .account_cache
+                .get_by_key(&concat_keys(OWNER_KEY_1, PUB_KEY_3))
+                .unwrap(),
             34567
         );
 
@@ -2928,15 +3627,24 @@ mod tests {
 
         // this should be inserted even if we don't actually SEND the block
         assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_1)],
+            state
+                .account_cache
+                .get_by_key(&concat_keys(OWNER_KEY_1, PUB_KEY_1))
+                .unwrap(),
             12345
         );
         assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_2)],
+            state
+                .account_cache
+                .get_by_key(&concat_keys(OWNER_KEY_1, PUB_KEY_2))
+                .unwrap(),
             23456
         );
         assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_3)],
+            state
+                .account_cache
+                .get_by_key(&concat_keys(OWNER_KEY_1, PUB_KEY_3))
+                .unwrap(),
             34567
         );
 
@@ -2974,20 +3682,313 @@ mod tests {
 
         // this should be inserted even if we don't actually SEND the block
         assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_1)],
+            state
+                .account_cache
+                .get_by_key(&concat_keys(OWNER_KEY_1, PUB_KEY_1))
+                .unwrap(),
             12345
         );
         assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_2)],
+            state
+                .account_cache
+                .get_by_key(&concat_keys(OWNER_KEY_1, PUB_KEY_2))
+                .unwrap(),
             23456
         );
         assert_eq!(
-            state.account_data_hash[&concat_keys(OWNER_KEY_1, PUB_KEY_3)],
+            state
+                .account_cache
+                .get_by_key(&concat_keys(OWNER_KEY_1, PUB_KEY_3))
+                .unwrap(),
             34567
         );
 
         // Validate captured logs
         assert_logs_contain_ordered(expected_logs);
+    }
+
+    #[test]
+    fn test_first_send_keeps_changes_of_every_sent_slot() {
+        let mut state =
+            new_test_state(Some(100), setup_noop_block_printer_with_logging(true, true));
+
+        state.set_account(100, PUB_KEY_1, DATA_1, OWNER_KEY_1, 1, false, 12345, false);
+        state.set_account(101, PUB_KEY_2, DATA_2, OWNER_KEY_1, 1, false, 23456, false);
+        state.set_account(102, PUB_KEY_3, DATA_3, OWNER_KEY_1, 1, false, 34567, false);
+
+        // Slots confirmed before the LIB is known pile up and go out in the first send
+        state.set_block_info(simple_block_info(100), false);
+        state.set_confirmed_slot(100, false);
+        state.set_block_info(simple_block_info(101), false);
+        state.set_confirmed_slot(101, false);
+        assert_eq!(state.last_sent_block, None);
+
+        state.set_lib(90);
+        state.set_block_info(simple_block_info(102), false);
+        state.set_confirmed_slot(102, false);
+        assert_eq!(state.last_sent_block, Some(102));
+
+        assert_logs_contain_ordered(
+            [100, 101, 102]
+                .iter()
+                .map(|slot| format!("preparing to send slot {} (account_changes=1,", slot))
+                .collect(),
+        );
+    }
+
+    fn filter_account_changes_owned(
+        changes: Option<&HashMap<[u8; 64], AccountWithWriteVersion>>,
+        account_cache: &AccountCache,
+        slot: u64,
+        trace: bool,
+    ) -> (Vec<Account>, Vec<StateChange>) {
+        let changes: Vec<&AccountWithWriteVersion> = changes
+            .into_iter()
+            .flat_map(|changes| changes.values())
+            .collect();
+        let (accounts, state_changes) =
+            filter_account_changes(&changes, account_cache, slot, trace);
+        let accounts = accounts
+            .iter()
+            .map(|account| account.to_account(changes[account.source].account.data.clone()))
+            .collect();
+        (accounts, state_changes)
+    }
+
+    #[test]
+    fn test_purge_drops_transactions_below_lib_and_last_sent() {
+        let mut state = create_test_state();
+        let transaction = || ConfirmTransactionWithIndex {
+            index: 0,
+            transaction: crate::pb::sf::solana::r#type::v1::ConfirmedTransaction::default(),
+        };
+        for slot in [50, 90, 95, 101, 150] {
+            state
+                .transactions
+                .get_mut()
+                .unwrap()
+                .insert(slot, vec![transaction()]);
+        }
+
+        // Without a sent block, missing parents may still be confirmed from any slot
+        state.lib = Some(90);
+        state.purge_blocks_up_to(100);
+        assert_eq!(state.transactions.get_mut().unwrap().len(), 5);
+
+        state.last_sent_block = Some(100);
+        state.purge_blocks_up_to(100);
+        let mut kept: Vec<u64> = state
+            .transactions
+            .get_mut()
+            .unwrap()
+            .keys()
+            .copied()
+            .collect();
+        kept.sort();
+        assert_eq!(kept, vec![95, 101, 150]);
+    }
+
+    /// The pending changes of a slot, merged across shards.
+    impl PendingAccountChanges {
+        fn get(&self, slot: &u64) -> Option<AccountChanges> {
+            if !self.contains_slot(*slot) {
+                return None;
+            }
+            let mut merged = AccountChanges::default();
+            for shard in &self.shards {
+                if let Some(changes) = Self::lock(shard).get(slot) {
+                    merged.extend(changes.iter().map(|(key, change)| (*key, change.clone())));
+                }
+            }
+            Some(merged)
+        }
+    }
+
+    fn split_key(key: &[u8; 64]) -> ([u8; 32], [u8; 32]) {
+        let mut owner = [0u8; 32];
+        let mut address = [0u8; 32];
+        owner.copy_from_slice(&key[..32]);
+        address.copy_from_slice(&key[32..]);
+        (owner, address)
+    }
+
+    /// Lookups and inserts by owner(32) + pubkey(32) key, the layout the tests are written in.
+    impl AccountCache {
+        fn get_by_key(&self, key: &[u8; 64]) -> Option<u64> {
+            let (owner, address) = split_key(key);
+            self.data_hash(&owner, &address)
+        }
+
+        fn contains_key(&self, key: &[u8; 64]) -> bool {
+            self.get_by_key(key).is_some()
+        }
+
+        fn insert_key(&mut self, key: [u8; 64], data_hash: u64) {
+            let (owner, address) = split_key(&key);
+            self.insert(owner, address, data_hash);
+        }
+    }
+
+    /// The account cache kept as two maps, owner + pubkey -> data hash and pubkey -> owner,
+    /// plus a third for the newest snapshot version of each pubkey, with the same update
+    /// rules as `AccountCache`.
+    #[derive(Default)]
+    struct TwoMapCache {
+        data_hash: HashMap<[u8; 64], u64>,
+        owners: HashMap<[u8; 32], [u8; 32]>,
+        startup_versions: HashMap<[u8; 32], u64>,
+    }
+
+    impl TwoMapCache {
+        fn set_on_startup(
+            &mut self,
+            owner: [u8; 32],
+            address: [u8; 32],
+            data_hash: u64,
+            version: u64,
+            deleted: bool,
+        ) {
+            if let Some(&existing) = self.startup_versions.get(&address) {
+                if existing >= version {
+                    return;
+                }
+            }
+            self.startup_versions.insert(address, version);
+
+            if let Some(previous_owner) = self.owners.get(&address) {
+                if previous_owner != &owner {
+                    self.data_hash
+                        .remove(&concat_keys(previous_owner, &address));
+                }
+            }
+            let key = concat_keys(&owner, &address);
+            if deleted {
+                self.data_hash.remove(&key);
+                self.owners.remove(&address);
+            } else {
+                self.data_hash.insert(key, data_hash);
+                self.owners.insert(address, owner);
+            }
+        }
+
+        fn apply(&mut self, changes: &[StateChange]) {
+            for change in changes {
+                let owner = vec_to_fixed_32(&change.owner);
+                let address = vec_to_fixed_32(&change.address);
+                let key = concat_keys(&owner, &address);
+                if change.deleted {
+                    self.data_hash.remove(&key);
+                    if self.owners.get(&address) == Some(&owner) {
+                        self.owners.remove(&address);
+                    }
+                } else {
+                    self.data_hash.insert(key, change.data_hash);
+                    self.owners.insert(address, owner);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_account_cache_matches_two_map_cache() {
+        const ADDRESSES: u8 = 4;
+        const OWNERS: u8 = 3;
+
+        // xorshift64, so failures replay identically
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = |bound: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % bound
+        };
+
+        let mut state = create_test_state();
+        let mut expected = TwoMapCache::default();
+        let mut write_version = 0u64;
+
+        for slot in 1..20_000u64 {
+            if next(500) == 0 {
+                expected.startup_versions.clear();
+                state.delete_startup_info();
+            } else if next(4) == 0 {
+                let owner = [1 + next(OWNERS as u64) as u8; 32];
+                let address = [10 + next(ADDRESSES as u64) as u8; 32];
+                let data_hash = next(3);
+                let deleted = next(5) == 0;
+                // Versions out of order, so some are older than one already received
+                let startup_slot = next(8);
+                let startup_write_version = next(4);
+                expected.set_on_startup(
+                    owner,
+                    address,
+                    data_hash,
+                    (startup_slot << 25) | startup_write_version,
+                    deleted,
+                );
+                state.set_account_on_startup(
+                    &address,
+                    &owner,
+                    data_hash,
+                    startup_slot,
+                    startup_write_version,
+                    deleted,
+                );
+            } else {
+                let mut changes: AccountChanges = HashMap::default();
+                for _ in 0..1 + next(6) {
+                    write_version += 1;
+                    let owner = [1 + next(OWNERS as u64) as u8; 32];
+                    let address = [10 + next(ADDRESSES as u64) as u8; 32];
+                    let data_hash = next(3);
+                    let deleted = next(5) == 0;
+                    let account =
+                        create_test_account(address.to_vec(), owner.to_vec(), vec![], deleted);
+                    changes.insert(
+                        concat_keys(&owner, &address),
+                        create_test_account_with_version(account, write_version, data_hash),
+                    );
+                }
+                let (_, state_changes) = filter_account_changes(
+                    &changes.values().collect::<Vec<_>>(),
+                    &state.account_cache,
+                    slot,
+                    false,
+                );
+                expected.apply(&state_changes);
+                state.apply_cache_changes(state_changes);
+            }
+
+            assert_eq!(state.account_cache.len(), expected.owners.len());
+            assert_eq!(
+                state.account_cache.startup_versions(),
+                expected.startup_versions.len()
+            );
+            for a in 0..ADDRESSES {
+                let address = [10 + a; 32];
+                assert_eq!(
+                    state.account_cache.owner(&address),
+                    expected.owners.get(&address).copied(),
+                    "owner of address {} after slot {}",
+                    a,
+                    slot
+                );
+                for o in 0..OWNERS {
+                    let owner = [1 + o; 32];
+                    assert_eq!(
+                        state.account_cache.data_hash(&owner, &address),
+                        expected
+                            .data_hash
+                            .get(&concat_keys(&owner, &address))
+                            .copied(),
+                        "data hash of address {} under owner {} after slot {}",
+                        a,
+                        o,
+                        slot
+                    );
+                }
+            }
+        }
     }
 }
 

@@ -4,13 +4,14 @@ use agave_geyser_plugin_interface::geyser_plugin_interface::{
 use {
     crate::{config::Config as PluginConfig, state::BlockInfo, state::State},
     agave_geyser_plugin_interface::geyser_plugin_interface::{
-        GeyserPlugin, ReplicaAccountInfoVersions, ReplicaBlockInfoVersions,
+        GeyserPlugin, GeyserPluginError, ReplicaAccountInfoVersions, ReplicaBlockInfoVersions,
         ReplicaEntryInfoVersions, ReplicaTransactionInfoVersions, Result as PluginResult,
     },
     gxhash::gxhash64,
     std::{
-        concat, env,
-        sync::{RwLock, RwLockWriteGuard},
+        alloc::{handle_alloc_error, GlobalAlloc, Layout, System},
+        concat, env, io,
+        sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
         time::Instant,
     },
 };
@@ -119,6 +120,18 @@ impl Plugin {
         guard
     }
 
+    fn read_state(&self, context: &str) -> RwLockReadGuard<'_, State> {
+        let started = Instant::now();
+        let guard = self
+            .state
+            .as_ref()
+            .unwrap_or_else(|| panic!("cannot get RW lock for {} (state is None)", context))
+            .read()
+            .unwrap_or_else(|_| panic!("cannot get RW lock for {} (poisoned)", context));
+        STATE_LOCK_WAIT.record_since(started);
+        guard
+    }
+
     /// Returns a copy of the State object at time of calling, refer
     /// to [State::internal_copy] for details on what is copied.
     pub fn state_copy(&self) -> State {
@@ -148,8 +161,7 @@ impl Plugin {
             return;
         }
 
-        let mut lock_state = self.write_state("set_account");
-
+        // Hash and copy the data before taking the lock, which every other callback waits on
         let data_hash = if data.len() == 0 {
             0
         } else {
@@ -157,16 +169,10 @@ impl Plugin {
         };
 
         if is_startup {
-            lock_state.set_account_on_startup(
-                pub_key,
-                owner,
-                data_hash,
-                slot,
-                write_version,
-                deleted,
-            );
+            self.set_account_on_startup(slot, pub_key, owner, write_version, deleted, data_hash);
         } else {
-            lock_state.set_account(
+            let data = data.to_vec();
+            let attempt = self.read_state("set_account").try_set_account(
                 slot,
                 pub_key,
                 data,
@@ -176,6 +182,18 @@ impl Plugin {
                 data_hash,
                 self.trace,
             );
+            if let Err(data) = attempt {
+                self.write_state("set_account").set_account(
+                    slot,
+                    pub_key,
+                    data,
+                    owner,
+                    write_version,
+                    deleted,
+                    data_hash,
+                    self.trace,
+                );
+            }
         }
 
         if self.trace {
@@ -187,14 +205,41 @@ impl Plugin {
     }
 }
 
-impl GeyserPlugin for Plugin {
-    fn name(&self) -> &'static str {
-        let n = concat!(env!("CARGO_PKG_NAME"), "-", env!("CARGO_PKG_VERSION"));
-        info!("name called: returning {}", n);
-        n
+impl Plugin {
+    // Out of line so the startup path stays out of the per-transaction account update path
+    #[inline(never)]
+    fn set_account_on_startup(
+        &self,
+        slot: u64,
+        pub_key: &[u8],
+        owner: &[u8],
+        write_version: u64,
+        deleted: bool,
+        data_hash: u64,
+    ) {
+        let recorded = self.read_state("set_account").try_set_account_on_startup(
+            pub_key,
+            owner,
+            data_hash,
+            slot,
+            write_version,
+            deleted,
+        );
+        if !recorded {
+            self.write_state("set_account").set_account_on_startup(
+                pub_key,
+                owner,
+                data_hash,
+                slot,
+                write_version,
+                deleted,
+            );
+        }
     }
+}
 
-    fn on_load(&mut self, config_file: &str, _is_reload: bool) -> PluginResult<()> {
+impl Plugin {
+    fn load_inner(&mut self, config_file: &str) -> PluginResult<()> {
         let plugin_config = PluginConfig::load_from_file(config_file)?;
         let filter_level =
             LevelFilter::from_str(plugin_config.log.level.as_str()).unwrap_or(LevelFilter::Info);
@@ -297,6 +342,26 @@ impl GeyserPlugin for Plugin {
         info!("cursor: {:?}", cursor);
 
         Ok(())
+    }
+}
+
+impl GeyserPlugin for Plugin {
+    fn name(&self) -> &'static str {
+        let n = concat!(env!("CARGO_PKG_NAME"), "-", env!("CARGO_PKG_VERSION"));
+        info!("name called: returning {}", n);
+        n
+    }
+
+    fn on_load(&mut self, config_file: &str, _is_reload: bool) -> PluginResult<()> {
+        // Agave drops the returned error with its own allocator, so it must not own heap memory
+        self.load_inner(config_file).map_err(|err| {
+            error!("plugin load failed: {}", err);
+            let kind = match &err {
+                GeyserPluginError::ConfigFileOpenError(e) => e.kind(),
+                _ => io::ErrorKind::InvalidData,
+            };
+            GeyserPluginError::ConfigFileOpenError(kind.into())
+        })
     }
 
     // NOOP
@@ -479,9 +544,13 @@ impl GeyserPlugin for Plugin {
             transaction: compiled_transaction,
         };
 
-        let mut lock_state = self.write_state("notify_transaction");
-
-        lock_state.set_transaction(slot, tx, self.trace);
+        let attempt = self
+            .read_state("notify_transaction")
+            .try_set_transaction(slot, tx);
+        if let Err(tx) = attempt {
+            self.write_state("notify_transaction")
+                .set_transaction(slot, tx, self.trace);
+        }
         Ok(())
     }
 
@@ -612,9 +681,15 @@ pub fn to_block_rewards(rewards: &Option<solana_transaction_status::Rewards>) ->
 pub unsafe extern "C" fn _create_plugin() -> *mut dyn GeyserPlugin {
     println!("creating plugin");
     let plugin = Plugin::new(false, false);
-    let plugin: Box<dyn GeyserPlugin> = Box::new(plugin);
+    // Agave frees this allocation with its own allocator, so it must come from the system malloc
+    let layout = Layout::new::<Plugin>();
+    let ptr = System.alloc(layout) as *mut Plugin;
+    if ptr.is_null() {
+        handle_alloc_error(layout);
+    }
+    ptr.write(plugin);
     println!("plugin created");
-    Box::into_raw(plugin)
+    ptr
 }
 
 // Below are just transformation functions to help with decoding different versions of the data sent to the plugin

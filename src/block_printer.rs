@@ -1,9 +1,9 @@
 use crate::pb::sf::solana::r#type::v1::{AccountBlock, Block};
 use crate::state::{BlockInfo, ACC_MUTEX, BLOCK_MUTEX, CURSOR_MUTEX};
 use crate::stats::{PENDING_ACCOUNT_BLOCK_WRITES, PENDING_BLOCK_WRITES, PENDING_WRITE_BYTES};
+use base64::Engine;
 use log::{debug, error, info, warn};
 use prost::Message;
-use rbase64;
 use std::fs::File;
 use std::io::Write;
 use std::sync::atomic::Ordering;
@@ -104,7 +104,8 @@ impl BlockPrinter {
                     );
                     let encoded_block = block.encode_to_vec();
                     let encoded_len = encoded_block.len();
-                    let base64_encoded_block = rbase64::encode(&encoded_block);
+                    let base64_encoded_block =
+                        base64::engine::general_purpose::STANDARD.encode(&encoded_block);
                     let payload = base64_encoded_block;
                     PENDING_WRITE_BYTES.fetch_add(payload.len(), Ordering::Relaxed);
                     info!(
@@ -175,7 +176,8 @@ impl BlockPrinter {
                     );
                     let encoded_account_block = account_block.encode_to_vec();
                     let encoded_len = encoded_account_block.len();
-                    let base64_encoded_block = rbase64::encode(&encoded_account_block);
+                    let base64_encoded_block =
+                        base64::engine::general_purpose::STANDARD.encode(&encoded_account_block);
                     let payload = base64_encoded_block;
                     PENDING_WRITE_BYTES.fetch_add(payload.len(), Ordering::Relaxed);
                     info!(

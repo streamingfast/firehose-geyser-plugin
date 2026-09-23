@@ -6,6 +6,7 @@ on:
       - 'release/**'
     tags:
       - 'v*'
+  pull_request:
 
 env:
   REGISTRY: ghcr.io
@@ -42,6 +43,7 @@ jobs:
           tags: |
             type=ref,event=tag
             type=ref,event=branch
+            type=ref,event=pr
             type=sha,prefix=
           flavor: |
             # Only promote :latest on non-prerelease tags (no beta/rc).
@@ -51,7 +53,8 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
+          # Pull requests from forks get a read-only token, so they only build
+          push: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
