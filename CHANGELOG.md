@@ -13,7 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   * During startup, the newest snapshot version of each account is kept in its cache entry instead of in a second map keyed by pubkey.
   * In the `memory stats` log line, `account_data_hash=` and `account_owners=` are replaced by `account_cache=`.
 * Transactions of fork slots are dropped once the slot is at or below both the LIB and the last sent block. They were kept until restart (188 slots and about 200k transactions on a mainnet node).
+* Account updates from different validator threads no longer wait on each other. They take the state lock in shared mode and write to pending changes split in 16 shards, each behind its own lock; only block processing takes the lock exclusively. In the throughput benchmark on Linux, an update takes about 280 ns instead of 465 ns, for the same CPU time.
 * Account updates hold the state lock for less time: the data is hashed and copied before taking it, and pending account data is copied once when a block is sent instead of three times.
+* Blocks are encoded to base64 on their printer thread instead of on rayon's global thread pool, which took about 24% more CPU.
 
 ## v4.3.0-fh3.0-1
 

@@ -70,6 +70,12 @@ fn rss_mb() -> u64 {
 
 /// User + system CPU time of the whole process, printer threads included.
 fn cpu_seconds() -> f64 {
+    // Linux: utime and stime in clock ticks (100 per second), after the command name
+    if let Ok(stat) = std::fs::read_to_string("/proc/self/stat") {
+        let fields: Vec<&str> = stat[stat.rfind(')').unwrap() + 2..].split(' ').collect();
+        let ticks: u64 = fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap();
+        return ticks as f64 / 100.0;
+    }
     let out = std::process::Command::new("ps")
         .args(["-o", "time=", "-p", &std::process::id().to_string()])
         .output()

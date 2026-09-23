@@ -10,7 +10,7 @@ use {
     gxhash::gxhash64,
     std::{
         concat, env,
-        sync::{RwLock, RwLockWriteGuard},
+        sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
         time::Instant,
     },
 };
@@ -119,6 +119,18 @@ impl Plugin {
         guard
     }
 
+    fn read_state(&self, context: &str) -> RwLockReadGuard<'_, State> {
+        let started = Instant::now();
+        let guard = self
+            .state
+            .as_ref()
+            .unwrap_or_else(|| panic!("cannot get RW lock for {} (state is None)", context))
+            .read()
+            .unwrap_or_else(|_| panic!("cannot get RW lock for {} (poisoned)", context));
+        STATE_LOCK_WAIT.record_since(started);
+        guard
+    }
+
     /// Returns a copy of the State object at time of calling, refer
     /// to [State::internal_copy] for details on what is copied.
     pub fn state_copy(&self) -> State {
@@ -166,7 +178,7 @@ impl Plugin {
             );
         } else {
             let data = data.to_vec();
-            self.write_state("set_account").set_account(
+            let attempt = self.read_state("set_account").try_set_account(
                 slot,
                 pub_key,
                 data,
@@ -176,6 +188,18 @@ impl Plugin {
                 data_hash,
                 self.trace,
             );
+            if let Err(data) = attempt {
+                self.write_state("set_account").set_account(
+                    slot,
+                    pub_key,
+                    data,
+                    owner,
+                    write_version,
+                    deleted,
+                    data_hash,
+                    self.trace,
+                );
+            }
         }
 
         if self.trace {

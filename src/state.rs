@@ -6,7 +6,10 @@ use lazy_static::lazy_static;
 use pb::sf::solana::r#type::v1::Account;
 use prost_types::Timestamp;
 use rustc_hash::FxHashMap as HashMap;
+use rustc_hash::FxHashSet;
 use solana_rpc_client::rpc_client::RpcClient;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::Mutex;
 
 type BlockAccountChanges = HashMap<u64, AccountChanges>;
 pub type AccountChanges = HashMap<[u8; 64], AccountWithWriteVersion>;
@@ -18,6 +21,158 @@ type ProcessedSlot = HashMap<u64, bool>;
 
 type BlockInfoMap = HashMap<u64, BlockInfo>;
 type ConfirmedSlotsMap = HashMap<u64, bool>;
+
+/// Number of `PendingAccountChanges` shards, picked by pubkey.
+const PENDING_SHARDS: usize = 16;
+
+/// Account changes of the slots not sent yet, split by pubkey into shards behind their own
+/// locks, so account updates arriving on different validator threads rarely wait on each
+/// other. Changes are only read and purged under the state write lock, when no update runs.
+pub struct PendingAccountChanges {
+    shards: Vec<Mutex<BlockAccountChanges>>,
+    /// Slots with at least one change in any shard.
+    slots: Mutex<FxHashSet<u64>>,
+}
+
+impl Default for PendingAccountChanges {
+    fn default() -> Self {
+        PendingAccountChanges {
+            shards: (0..PENDING_SHARDS)
+                .map(|_| Mutex::new(HashMap::default()))
+                .collect(),
+            slots: Mutex::new(FxHashSet::default()),
+        }
+    }
+}
+
+impl PendingAccountChanges {
+    fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+        mutex.lock().expect("pending account changes lock poisoned")
+    }
+
+    pub fn contains_slot(&self, slot: u64) -> bool {
+        Self::lock(&self.slots).contains(&slot)
+    }
+
+    /// Keeps the change unless one with a higher write version is already pending for the
+    /// same owner and account in that slot.
+    pub fn insert(
+        &self,
+        slot: u64,
+        owner_account_key: [u8; 64],
+        change: AccountWithWriteVersion,
+        trace: bool,
+    ) {
+        let mut shard =
+            Self::lock(&self.shards[owner_account_key[32 + 16] as usize % PENDING_SHARDS]);
+        let slot_entries = match shard.get_mut(&slot) {
+            Some(slot_entries) => slot_entries,
+            None => {
+                if Self::lock(&self.slots).insert(slot) {
+                    debug!("got some account data for slot {}", slot);
+                }
+                shard.entry(slot).or_default()
+            }
+        };
+
+        if let Some(prev) = slot_entries.get(&owner_account_key) {
+            if prev.write_version > change.write_version {
+                if trace {
+                    debug!(
+                        "skipping slot because older version: {}, pub_key: {:?}, owner: {:?}, write_version: {}, prev_write_version: {}, deleted: {}, data_hash: {}",
+                        slot, bs58::encode(change.account.address).into_string(), bs58::encode(change.account.owner).into_string(), change.write_version, prev.write_version, change.account.deleted, change.data_hash
+                    );
+                }
+                return; // skipping older write_versions
+            }
+        }
+
+        if trace {
+            let data = &change.account.data;
+            let data_as_hex = hex::encode(&data[..10.min(data.len())]);
+            debug!("handle_account_change@{}: account {:?} owner: {:?} delete: {:?} version: {:?} Data Size: {} Data Hash: {} Data Preview: {}", slot, bs58::encode(change.account.address).into_string(), bs58::encode(change.account.owner).into_string(), change.account.deleted, change.write_version, data.len(), change.data_hash, data_as_hex);
+        }
+
+        slot_entries.insert(owner_account_key, change);
+    }
+
+    /// The pending changes of `slot`, across shards.
+    fn slot_changes(&mut self, slot: u64) -> impl Iterator<Item = &AccountWithWriteVersion> {
+        self.shards
+            .iter_mut()
+            .filter_map(move |shard| {
+                shard
+                    .get_mut()
+                    .expect("pending account changes lock poisoned")
+                    .get(&slot)
+            })
+            .flat_map(|changes| changes.values())
+    }
+
+    /// Removes the slots at or below `upto` and returns them.
+    fn purge_up_to(&mut self, upto: u64) -> Vec<u64> {
+        let slots = self
+            .slots
+            .get_mut()
+            .expect("pending account changes lock poisoned");
+        let purged: Vec<u64> = slots.iter().copied().filter(|&slot| slot <= upto).collect();
+        if purged.is_empty() {
+            return purged;
+        }
+        slots.retain(|&slot| slot > upto);
+        for shard in self.shards.iter_mut() {
+            shard
+                .get_mut()
+                .expect("pending account changes lock poisoned")
+                .retain(|&slot, _| slot > upto);
+        }
+        purged
+    }
+
+    pub fn min_slot(&self) -> Option<u64> {
+        Self::lock(&self.slots).iter().min().copied()
+    }
+
+    pub fn slot_count(&self) -> usize {
+        Self::lock(&self.slots).len()
+    }
+
+    pub fn slots_between(&self, first: u64, last: u64) -> usize {
+        Self::lock(&self.slots)
+            .iter()
+            .filter(|&&slot| slot >= first && slot <= last)
+            .count()
+    }
+
+    /// Number of pending changes and bytes of account data they hold.
+    pub fn totals(&self) -> (usize, usize) {
+        let mut changes = 0usize;
+        let mut data_bytes = 0usize;
+        for shard in &self.shards {
+            for slot_changes in Self::lock(shard).values() {
+                changes += slot_changes.len();
+                data_bytes += slot_changes
+                    .values()
+                    .map(|c| c.account.data.len())
+                    .sum::<usize>();
+            }
+        }
+        (changes, data_bytes)
+    }
+}
+
+impl Clone for PendingAccountChanges {
+    fn clone(&self) -> Self {
+        PendingAccountChanges {
+            shards: self
+                .shards
+                .iter()
+                .map(|shard| Mutex::new(Self::lock(shard).clone()))
+                .collect(),
+            slots: Mutex::new(Self::lock(&self.slots).clone()),
+        }
+    }
+}
 
 /// One shard per value of the pubkey byte picked by `ShardedMap::shard`.
 const SHARDS: usize = 256;
@@ -448,7 +603,7 @@ pub struct State {
     pub cursor: Option<u64>,
     pub lib: Option<u64>,
 
-    pub block_account_changes: BlockAccountChanges,
+    pub block_account_changes: PendingAccountChanges,
 
     pub account_cache: AccountCache, // only updated when we print the block
 
@@ -468,7 +623,7 @@ pub struct State {
     /// Transactions received for a slot at or below `last_sent_block`, which are never sent.
     pub late_transactions: u64,
     /// Account updates received for a slot at or below `last_sent_block`.
-    pub late_account_updates: u64,
+    pub late_account_updates: AtomicU64,
 
     local_rpc_client: Option<RpcClient>,
     remote_rpc_client: Option<RpcClient>,
@@ -494,7 +649,7 @@ impl State {
             lib: None,
             initialized: false,
 
-            block_account_changes: HashMap::default(),
+            block_account_changes: PendingAccountChanges::default(),
             account_cache: AccountCache::default(),
             block_infos: HashMap::default(),
             confirmed_slots: HashMap::default(),
@@ -505,7 +660,7 @@ impl State {
 
             last_stats_slot: 0,
             late_transactions: 0,
-            late_account_updates: 0,
+            late_account_updates: AtomicU64::new(0),
 
             local_rpc_client: Some(local_rpc_client),
             remote_rpc_client: Some(remote_rpc_client),
@@ -537,7 +692,9 @@ impl State {
             dev_config: self.dev_config.clone(),
             last_stats_slot: self.last_stats_slot,
             late_transactions: self.late_transactions,
-            late_account_updates: self.late_account_updates,
+            late_account_updates: AtomicU64::new(
+                self.late_account_updates.load(AtomicOrdering::Relaxed),
+            ),
 
             // Cannot clone those
             local_rpc_client: None,
@@ -864,81 +1021,99 @@ impl State {
         data_hash: u64,
         trace: bool,
     ) {
-        let data: Vec<u8> = data.into();
-        if let Some(last_sent) = self.last_sent_block {
-            if last_sent >= slot {
-                self.late_account_updates += 1;
-                error!("Received account data for slot {} which is older than the last sent block {} (owner: {:?}, account: {:?})", slot, last_sent,  bs58::encode(pub_key).into_string(), bs58::encode(owner).into_string());
-            }
-        }
-
-        //create a unique key from owner and account addresses
-        let mut owner_account_key = [0u8; 64];
-        // SAFETY: Both owner and pub_key are guaranteed to be 32 bytes (Solana pubkey size)
-        unsafe {
-            std::ptr::copy_nonoverlapping(owner.as_ptr(), owner_account_key.as_mut_ptr(), 32);
-            std::ptr::copy_nonoverlapping(
-                pub_key.as_ptr(),
-                owner_account_key.as_mut_ptr().add(32),
-                32,
-            );
-        }
-
         // purge tail data on initialization
-        if !self.block_account_changes.contains_key(&slot) {
-            debug!("got some account data for slot {}", slot);
+        if !self.block_account_changes.contains_slot(slot) {
             let initializing = self.cursor.is_none() && self.first_block_to_process.is_none();
             if initializing {
                 debug!("initializing: deleting blocks up to: {}", slot - 32);
                 self.purge_blocks_up_to(slot - 32);
             }
         }
+        self.record_account(
+            slot,
+            pub_key,
+            data.into(),
+            owner,
+            write_version,
+            deleted,
+            data_hash,
+            trace,
+        );
+    }
 
-        let slot_entries = self
-            .block_account_changes
-            .entry(slot)
-            .or_insert_with(HashMap::default);
+    /// `set_account` under the shared state lock, so account updates from several threads run
+    /// in parallel. Gives the data back when the update needs `set_account` instead, which is
+    /// only while initializing, for the first change of a slot.
+    pub fn try_set_account(
+        &self,
+        slot: u64,
+        pub_key: &[u8],
+        data: Vec<u8>,
+        owner: &[u8],
+        write_version: u64,
+        deleted: bool,
+        data_hash: u64,
+        trace: bool,
+    ) -> Result<(), Vec<u8>> {
+        let initializing = self.cursor.is_none() && self.first_block_to_process.is_none();
+        if initializing && !self.block_account_changes.contains_slot(slot) {
+            return Err(data);
+        }
+        self.record_account(
+            slot,
+            pub_key,
+            data,
+            owner,
+            write_version,
+            deleted,
+            data_hash,
+            trace,
+        );
+        Ok(())
+    }
 
-        // skip if new change version exists
-        if let Some(prev) = slot_entries.get(&owner_account_key) {
-            if prev.write_version > write_version {
-                if trace {
-                    debug!(
-                        "skipping slot because older version: {}, pub_key: {:?}, owner: {:?}, write_version: {}, prev_write_version: {}, deleted: {}, data_hash: {}",
-                        slot, bs58::encode(pub_key).into_string(), bs58::encode(owner).into_string(), write_version, prev.write_version, deleted, data_hash
-                    );
-                }
-                return; // skipping older write_versions
+    fn record_account(
+        &self,
+        slot: u64,
+        pub_key: &[u8],
+        data: Vec<u8>,
+        owner: &[u8],
+        write_version: u64,
+        deleted: bool,
+        data_hash: u64,
+        trace: bool,
+    ) {
+        if let Some(last_sent) = self.last_sent_block {
+            if last_sent >= slot {
+                self.late_account_updates
+                    .fetch_add(1, AtomicOrdering::Relaxed);
+                error!("Received account data for slot {} which is older than the last sent block {} (owner: {:?}, account: {:?})", slot, last_sent,  bs58::encode(pub_key).into_string(), bs58::encode(owner).into_string());
             }
         }
 
-        if trace {
-            let data_as_hex = hex::encode(&data[..10.min(data.len())]);
-            debug!("handle_account_change@{}: account {:?} owner: {:?} delete: {:?} version: {:?} Data Size: {} Data Hash: {} Data Preview: {}", slot, bs58::encode(pub_key).into_string(), bs58::encode(owner).into_string(), deleted, write_version, data.len(), data_hash, data_as_hex);
-        }
+        //create a unique key from owner and account addresses
+        let mut owner_account_key = [0u8; 64];
+        owner_account_key[..32].copy_from_slice(&owner[..32]);
+        owner_account_key[32..].copy_from_slice(&pub_key[..32]);
 
         let mut address = [0u8; 32];
         let mut owner_array = [0u8; 32];
+        address.copy_from_slice(&pub_key[..32]);
+        owner_array.copy_from_slice(&owner[..32]);
 
-        // SAFETY: Both pub_key and owner are guaranteed to be 32 bytes (Solana pubkey size)
-        unsafe {
-            std::ptr::copy_nonoverlapping(pub_key.as_ptr(), address.as_mut_ptr(), 32);
-            std::ptr::copy_nonoverlapping(owner.as_ptr(), owner_array.as_mut_ptr(), 32);
-        }
-
-        let fixed_account = AccountFixed {
-            address,
-            owner: owner_array,
-            data,
-            deleted,
-        };
         let awv = AccountWithWriteVersion {
-            account: fixed_account,
+            account: AccountFixed {
+                address,
+                owner: owner_array,
+                data,
+                deleted,
+            },
             write_version,
             data_hash,
         };
 
-        slot_entries.insert(owner_account_key, awv);
+        self.block_account_changes
+            .insert(slot, owner_account_key, awv, trace);
     }
 
     pub fn set_transaction(
@@ -980,16 +1155,7 @@ impl State {
     }
 
     fn purge_blocks_up_to(&mut self, upto: u64) {
-        let blocks = self
-            .block_account_changes
-            .keys()
-            .cloned()
-            .collect::<Vec<u64>>();
-        for block in blocks {
-            if block > upto {
-                continue;
-            }
-            self.block_account_changes.remove(&block);
+        for block in self.block_account_changes.purge_up_to(upto) {
             self.block_infos.remove(&block);
         }
 
@@ -1016,12 +1182,7 @@ impl State {
 
     fn apply_changes_upto(&mut self, trace: bool, slot: u64) {
         // Find the lowest slot value in block_account_changes keys
-        let first_slot = self
-            .block_account_changes
-            .keys()
-            .min()
-            .copied()
-            .unwrap_or(slot);
+        let first_slot = self.block_account_changes.min_slot().unwrap_or(slot);
 
         if first_slot > slot {
             info!(
@@ -1032,11 +1193,7 @@ impl State {
         }
 
         let started = std::time::Instant::now();
-        let pending_slots = self
-            .block_account_changes
-            .keys()
-            .filter(|&&s| s >= first_slot && s <= slot)
-            .count();
+        let pending_slots = self.block_account_changes.slots_between(first_slot, slot);
         info!(
             "applying account cache changes for slots from {} to: {} ({} slots with pending account changes, hash_count={})",
             first_slot,
@@ -1050,7 +1207,7 @@ impl State {
         // Loop through each slot from first_slot to slot (inclusive)
         for current_slot in first_slot..=slot {
             let (_, changes) = filter_account_changes(
-                self.block_account_changes.get(&current_slot),
+                self.block_account_changes.slot_changes(current_slot),
                 &self.account_cache,
                 current_slot,
                 trace,
@@ -1176,7 +1333,7 @@ impl State {
             }
 
             let (effective_account_changes, cache_changes) = filter_account_changes(
-                self.block_account_changes.get(&slot),
+                self.block_account_changes.slot_changes(slot),
                 &self.account_cache,
                 slot,
                 trace,
@@ -1261,15 +1418,7 @@ impl State {
         };
         use std::sync::atomic::Ordering;
 
-        let mut account_changes = 0usize;
-        let mut account_data_bytes = 0usize;
-        for changes in self.block_account_changes.values() {
-            account_changes += changes.len();
-            account_data_bytes += changes
-                .values()
-                .map(|c| c.account.data.len())
-                .sum::<usize>();
-        }
+        let (account_changes, account_data_bytes) = self.block_account_changes.totals();
 
         // Counts only: this runs under the state lock, and the map can hold transactions of
         // fork slots that are never purged, so per-transaction work would grow without bound.
@@ -1292,8 +1441,8 @@ impl State {
             slot,
             self.last_sent_block,
             self.lib,
-            self.block_account_changes.len(),
-            self.block_account_changes.keys().min(),
+            self.block_account_changes.slot_count(),
+            self.block_account_changes.min_slot(),
             account_changes,
             account_data_bytes,
             self.transactions.len(),
@@ -1306,7 +1455,7 @@ impl State {
             self.account_cache.len(),
             self.account_cache.startup_versions(),
             self.late_transactions,
-            self.late_account_updates,
+            self.late_account_updates.load(Ordering::Relaxed),
             PENDING_BLOCK_WRITES.load(Ordering::Relaxed),
             PENDING_ACCOUNT_BLOCK_WRITES.load(Ordering::Relaxed),
             PENDING_WRITE_BYTES.load(Ordering::Relaxed),
@@ -1379,7 +1528,7 @@ impl FilteredAccount<'_> {
 }
 
 fn filter_account_changes<'a>(
-    changes: Option<&'a HashMap<[u8; 64], AccountWithWriteVersion>>,
+    changes: impl Iterator<Item = &'a AccountWithWriteVersion>,
     account_cache: &AccountCache,
     slot: u64,
     trace: bool,
@@ -1388,8 +1537,7 @@ fn filter_account_changes<'a>(
     let mut state_changes: Vec<StateChange> = Vec::new();
 
     let mut in_block_owners = AccountOwners::default();
-    let mut ordered_changes: Vec<&'a AccountWithWriteVersion> =
-        changes.map_or_else(Vec::new, |changes| changes.values().collect());
+    let mut ordered_changes: Vec<&'a AccountWithWriteVersion> = changes.collect();
     ordered_changes.sort_by(|a, b| {
         a.account
             .address
@@ -3312,7 +3460,12 @@ mod tests {
         slot: u64,
         trace: bool,
     ) -> (Vec<Account>, Vec<StateChange>) {
-        let (accounts, state_changes) = filter_account_changes(changes, account_cache, slot, trace);
+        let (accounts, state_changes) = filter_account_changes(
+            changes.into_iter().flat_map(|changes| changes.values()),
+            account_cache,
+            slot,
+            trace,
+        );
         (
             accounts.iter().map(FilteredAccount::to_account).collect(),
             state_changes,
@@ -3340,6 +3493,22 @@ mod tests {
         let mut kept: Vec<u64> = state.transactions.keys().copied().collect();
         kept.sort();
         assert_eq!(kept, vec![95, 101, 150]);
+    }
+
+    /// The pending changes of a slot, merged across shards.
+    impl PendingAccountChanges {
+        fn get(&self, slot: &u64) -> Option<AccountChanges> {
+            if !self.contains_slot(*slot) {
+                return None;
+            }
+            let mut merged = AccountChanges::default();
+            for shard in &self.shards {
+                if let Some(changes) = Self::lock(shard).get(slot) {
+                    merged.extend(changes.iter().map(|(key, change)| (*key, change.clone())));
+                }
+            }
+            Some(merged)
+        }
     }
 
     fn split_key(key: &[u8; 64]) -> ([u8; 32], [u8; 32]) {
@@ -3488,7 +3657,7 @@ mod tests {
                     );
                 }
                 let (_, state_changes) =
-                    filter_account_changes(Some(&changes), &state.account_cache, slot, false);
+                    filter_account_changes(changes.values(), &state.account_cache, slot, false);
                 expected.apply(&state_changes);
                 state.apply_cache_changes(state_changes);
             }

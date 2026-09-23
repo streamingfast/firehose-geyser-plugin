@@ -126,8 +126,9 @@ fn update_account(
     }
 }
 
-#[test]
-fn test_output_matches_recorded_digest() {
+/// Runs the workload, with each slot's account updates spread over `update_threads` threads,
+/// and returns the number of lines and digest of the block and account block streams.
+fn run_workload(update_threads: usize, unique_write_versions: bool) -> (usize, u64, usize, u64) {
     let cursor_file = NamedTempFile::new().unwrap();
     let block_file = NamedTempFile::new().unwrap();
     let account_block_file = NamedTempFile::new().unwrap();
@@ -206,6 +207,7 @@ fn test_output_matches_recorded_digest() {
         // Fork slot: account updates and transactions for a slot that is never confirmed
         let is_fork = slot > FIRST_SLOT && rng.chance(4);
 
+        let mut updates = Vec::new();
         for _ in 0..rng.next(60) {
             let address = address(rng.next(ADDRESSES + (slot - FIRST_SLOT) * 5));
             let owner = owner(&mut rng);
@@ -213,31 +215,39 @@ fn test_output_matches_recorded_digest() {
             let lamports = if rng.chance(8) { 0 } else { 1 };
             // Mostly increasing write versions, with some going backwards within the slot
             write_version += 1;
-            let version = if rng.chance(5) {
+            let mut version = if rng.chance(5) {
                 write_version - rng.next(5)
             } else {
                 write_version
             };
-            update_account(
-                &plugin, slot, &address, &owner, &data, lamports, version, false,
-            );
+            if unique_write_versions {
+                version = write_version;
+            }
+            updates.push((slot, address, owner, data, lamports, version));
         }
 
         // Late update for a slot that was already sent
         if slot > FIRST_SLOT + 5 && rng.chance(2) {
             write_version += 1;
             let address = address(rng.next(ADDRESSES));
-            update_account(
-                &plugin,
-                slot - 5,
-                &address,
-                &[1; 32],
-                &[9],
-                1,
-                write_version,
-                false,
-            );
+            updates.push((slot - 5, address, [1; 32], vec![9], 1, write_version));
         }
+
+        std::thread::scope(|scope| {
+            for thread in 0..update_threads {
+                let plugin = &plugin;
+                let updates = &updates;
+                scope.spawn(move || {
+                    for (slot, address, owner, data, lamports, version) in
+                        updates.iter().skip(thread).step_by(update_threads)
+                    {
+                        update_account(
+                            plugin, *slot, address, owner, data, *lamports, *version, false,
+                        );
+                    }
+                });
+            }
+        });
 
         let transaction_count = rng.next(4);
         for index in 0..transaction_count {
@@ -289,8 +299,25 @@ fn test_output_matches_recorded_digest() {
         "blocks={} digest={:#x}, account_blocks={} digest={:#x}",
         blocks, blocks_digest, account_blocks, account_blocks_digest
     );
+    (blocks, blocks_digest, account_blocks, account_blocks_digest)
+}
+
+#[test]
+fn test_output_matches_recorded_digest() {
+    let (blocks, blocks_digest, account_blocks, account_blocks_digest) = run_workload(1, false);
     assert!(blocks > 300, "only {} block lines written", blocks);
     assert_eq!(blocks, account_blocks);
     assert_eq!(blocks_digest, EXPECTED_BLOCKS_DIGEST);
     assert_eq!(account_blocks_digest, EXPECTED_ACCOUNT_BLOCKS_DIGEST);
+}
+
+/// Updates of the same account in a slot are ordered by write version, not arrival, so the
+/// output does not depend on how updates are spread over validator threads. Write versions
+/// are unique here, like the validator's, since equal ones keep whichever arrives last.
+#[test]
+fn test_output_does_not_depend_on_update_threads() {
+    let single = run_workload(1, true);
+    for _ in 0..3 {
+        assert_eq!(run_workload(4, true), single);
+    }
 }
