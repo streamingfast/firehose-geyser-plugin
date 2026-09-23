@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v4.3.0-fh3.0-3
 
 * Fixed the first account blocks after startup missing entries. When several confirmed slots went out together in the first send, for example because they were confirmed before the LIB was known, their changes were applied to the account cache before they were sent, so all but the last one dropped every change that was not a deletion.
 * Cut the memory used by the account cache from about 300 GB to about 97 GB on mainnet (1.18 billion accounts), and at startup from about 385 GB to about 116 GB. Output is unchanged.
