@@ -109,6 +109,22 @@ impl PendingAccountChanges {
             .flat_map(|changes| changes.values())
     }
 
+    /// Moves out the pending changes of `slot`. The slot stays listed, so purging it still
+    /// clears its block info.
+    fn take_slot_changes(&mut self, slot: u64) -> Vec<AccountWithWriteVersion> {
+        let mut changes = Vec::new();
+        for shard in self.shards.iter_mut() {
+            if let Some(slot_changes) = shard
+                .get_mut()
+                .expect("pending account changes lock poisoned")
+                .get_mut(&slot)
+            {
+                changes.extend(slot_changes.drain().map(|(_, change)| change));
+            }
+        }
+        changes
+    }
+
     /// Removes the slots at or below `upto` and returns them.
     fn purge_up_to(&mut self, upto: u64) -> Vec<u64> {
         let slots = self
@@ -1228,12 +1244,12 @@ impl State {
         let mut changes_applied = 0usize;
         // Loop through each slot from first_slot to slot (inclusive)
         for current_slot in first_slot..=slot {
-            let (_, changes) = filter_account_changes(
-                self.block_account_changes.slot_changes(current_slot),
-                &self.account_cache,
-                current_slot,
-                trace,
-            );
+            let slot_changes: Vec<&AccountWithWriteVersion> = self
+                .block_account_changes
+                .slot_changes(current_slot)
+                .collect();
+            let (_, changes) =
+                filter_account_changes(&slot_changes, &self.account_cache, current_slot, trace);
             changes_applied += changes.len();
             self.apply_cache_changes(changes);
             slots_applied += 1;
@@ -1354,8 +1370,10 @@ impl State {
                 }
             }
 
+            // Purged right after this slot is processed, so its data can move into the block
+            let slot_changes = self.block_account_changes.take_slot_changes(slot);
             let (effective_account_changes, cache_changes) = filter_account_changes(
-                self.block_account_changes.slot_changes(slot),
+                &slot_changes.iter().collect::<Vec<_>>(),
                 &self.account_cache,
                 slot,
                 trace,
@@ -1379,10 +1397,7 @@ impl State {
                 );
 
                 let acc_block = create_account_block(
-                    effective_account_changes
-                        .iter()
-                        .map(FilteredAccount::to_account)
-                        .collect(),
+                    filtered_accounts(&effective_account_changes, slot_changes),
                     &block_info,
                 );
 
@@ -1541,43 +1556,71 @@ struct StateChange {
 
 /// An account change kept by `filter_account_changes`, borrowing the data from the slot's
 /// pending changes so it is only copied when the block is sent.
-struct FilteredAccount<'a> {
+/// An account change kept by `filter_account_changes`. Its data is that of `changes[source]`,
+/// so the caller can move it into the block instead of copying it.
+struct FilteredAccount {
     address: [u8; 32],
     owner: [u8; 32],
-    data: &'a [u8],
+    source: usize,
     deleted: bool,
 }
 
-impl FilteredAccount<'_> {
-    fn to_account(&self) -> Account {
+impl FilteredAccount {
+    fn to_account(&self, data: Vec<u8>) -> Account {
         Account {
             address: self.address.to_vec(),
             owner: self.owner.to_vec(),
-            data: self.data.to_vec(),
+            data,
             deleted: self.deleted,
         }
     }
 }
 
-fn filter_account_changes<'a>(
-    changes: impl Iterator<Item = &'a AccountWithWriteVersion>,
+/// Builds the accounts of `filtered`, moving each data out of `changes` on its last use.
+fn filtered_accounts(
+    filtered: &[FilteredAccount],
+    changes: Vec<AccountWithWriteVersion>,
+) -> Vec<Account> {
+    let mut uses = vec![0usize; changes.len()];
+    for account in filtered {
+        uses[account.source] += 1;
+    }
+    let mut data: Vec<Vec<u8>> = changes.into_iter().map(|c| c.account.data).collect();
+    filtered
+        .iter()
+        .map(|account| {
+            uses[account.source] -= 1;
+            let data = if uses[account.source] == 0 {
+                std::mem::take(&mut data[account.source])
+            } else {
+                data[account.source].clone()
+            };
+            account.to_account(data)
+        })
+        .collect()
+}
+
+fn filter_account_changes(
+    changes: &[&AccountWithWriteVersion],
     account_cache: &AccountCache,
     slot: u64,
     trace: bool,
-) -> (Vec<FilteredAccount<'a>>, Vec<StateChange>) {
-    let mut filtered_changes: Vec<FilteredAccount<'a>> = Vec::new();
+) -> (Vec<FilteredAccount>, Vec<StateChange>) {
+    let mut filtered_changes: Vec<FilteredAccount> = Vec::new();
     let mut state_changes: Vec<StateChange> = Vec::new();
 
     let mut in_block_owners = AccountOwners::default();
-    let mut ordered_changes: Vec<&'a AccountWithWriteVersion> = changes.collect();
-    ordered_changes.sort_by(|a, b| {
+    let mut ordered_changes: Vec<usize> = (0..changes.len()).collect();
+    ordered_changes.sort_by(|&a, &b| {
+        let (a, b) = (changes[a], changes[b]);
         a.account
             .address
             .cmp(&b.account.address)
             .then_with(|| a.write_version.cmp(&b.write_version))
     });
 
-    for account_with_version in ordered_changes {
+    for source in ordered_changes {
+        let account_with_version = changes[source];
         let account = &account_with_version.account;
         let cached = account_cache.get(&account.address);
 
@@ -1630,14 +1673,14 @@ fn filter_account_changes<'a>(
                 filtered_changes.push(FilteredAccount {
                     address: account.address,
                     owner: cached_owner,
-                    data: &account.data,
+                    source,
                     deleted: account.deleted,
                 });
             }
 
             for change in filtered_changes[same_address_start..].iter_mut() {
                 change.deleted = account.deleted;
-                change.data = &account.data;
+                change.source = source;
             }
         }
 
@@ -1650,7 +1693,7 @@ fn filter_account_changes<'a>(
             filtered_changes.push(FilteredAccount {
                 address: account.address,
                 owner: account.owner,
-                data: &account.data,
+                source,
                 deleted: account.deleted,
             });
 
@@ -3492,16 +3535,17 @@ mod tests {
         slot: u64,
         trace: bool,
     ) -> (Vec<Account>, Vec<StateChange>) {
-        let (accounts, state_changes) = filter_account_changes(
-            changes.into_iter().flat_map(|changes| changes.values()),
-            account_cache,
-            slot,
-            trace,
-        );
-        (
-            accounts.iter().map(FilteredAccount::to_account).collect(),
-            state_changes,
-        )
+        let changes: Vec<&AccountWithWriteVersion> = changes
+            .into_iter()
+            .flat_map(|changes| changes.values())
+            .collect();
+        let (accounts, state_changes) =
+            filter_account_changes(&changes, account_cache, slot, trace);
+        let accounts = accounts
+            .iter()
+            .map(|account| account.to_account(changes[account.source].account.data.clone()))
+            .collect();
+        (accounts, state_changes)
     }
 
     #[test]
@@ -3698,8 +3742,12 @@ mod tests {
                         create_test_account_with_version(account, write_version, data_hash),
                     );
                 }
-                let (_, state_changes) =
-                    filter_account_changes(changes.values(), &state.account_cache, slot, false);
+                let (_, state_changes) = filter_account_changes(
+                    &changes.values().collect::<Vec<_>>(),
+                    &state.account_cache,
+                    slot,
+                    false,
+                );
                 expected.apply(&state_changes);
                 state.apply_cache_changes(state_changes);
             }
