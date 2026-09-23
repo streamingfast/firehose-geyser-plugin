@@ -148,8 +148,7 @@ impl Plugin {
             return;
         }
 
-        let mut lock_state = self.write_state("set_account");
-
+        // Hash and copy the data before taking the lock, which every other callback waits on
         let data_hash = if data.len() == 0 {
             0
         } else {
@@ -157,7 +156,7 @@ impl Plugin {
         };
 
         if is_startup {
-            lock_state.set_account_on_startup(
+            self.write_state("set_account").set_account_on_startup(
                 pub_key,
                 owner,
                 data_hash,
@@ -166,7 +165,8 @@ impl Plugin {
                 deleted,
             );
         } else {
-            lock_state.set_account(
+            let data = data.to_vec();
+            self.write_state("set_account").set_account(
                 slot,
                 pub_key,
                 data,

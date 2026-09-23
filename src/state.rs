@@ -630,17 +630,19 @@ impl State {
     }
 
     // set_account populates the caches for set_account
+    /// Takes the data by value so callers can copy it before taking the state lock.
     pub fn set_account(
         &mut self,
         slot: u64,
         pub_key: &[u8],
-        data: &[u8],
+        data: impl Into<Vec<u8>>,
         owner: &[u8],
         write_version: u64,
         deleted: bool,
         data_hash: u64,
         trace: bool,
     ) {
+        let data: Vec<u8> = data.into();
         if let Some(last_sent) = self.last_sent_block {
             if last_sent >= slot {
                 self.late_account_updates += 1;
@@ -705,7 +707,7 @@ impl State {
         let fixed_account = AccountFixed {
             address,
             owner: owner_array,
-            data: data.to_vec(),
+            data,
             deleted,
         };
         let awv = AccountWithWriteVersion {
