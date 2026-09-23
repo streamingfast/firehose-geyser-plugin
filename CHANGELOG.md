@@ -7,7 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
-* Cut the memory used by the account cache roughly in half, from about 300 GB to about 157 GB on mainnet (1.18 billion accounts). The cache now keeps one entry per account (owner and data hash, keyed by pubkey) instead of two maps, one keyed by owner + pubkey and one by pubkey. In the `memory stats` log line, `account_data_hash=` and `account_owners=` are replaced by `account_cache=`.
+* Cut the memory used by the account cache from about 300 GB to about 97 GB on mainnet (1.18 billion accounts), and at startup from about 385 GB to about 116 GB. Output is unchanged.
+  * The cache keeps one packed 44-byte entry per account, keyed by pubkey, instead of two maps (owner + pubkey to data hash, and pubkey to owner). Owners are stored once and referenced by index.
+  * The cache is split in 256 shards that grow one at a time. A single map briefly holds both its old and new tables while growing, which at this size meant tens of GB more.
+  * During startup, the newest snapshot version of each account is kept in its cache entry instead of in a second map keyed by pubkey.
+  * In the `memory stats` log line, `account_data_hash=` and `account_owners=` are replaced by `account_cache=`.
+* Account updates hold the state lock for less time: the data is hashed and copied before taking it, and pending account data is copied once when a block is sent instead of three times.
 
 ## v4.3.0-fh3.0-1
 
