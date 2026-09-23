@@ -118,9 +118,12 @@ fn update_account(
         write_version,
         txn: None,
     };
-    plugin
-        .update_account(ReplicaAccountInfoVersions::V0_0_3(&info), slot, is_startup)
-        .unwrap();
+    let account = ReplicaAccountInfoVersions::V0_0_3(&info);
+    if is_startup {
+        plugin.update_account_from_snapshot(account, slot).unwrap();
+    } else {
+        plugin.update_account_for_bank(account, slot, 0).unwrap();
+    }
 }
 
 #[test]
@@ -181,7 +184,7 @@ fn test_output_matches_recorded_digest() {
 
     // Rooted before the first block so the plugin never asks RPC for the LIB
     plugin
-        .update_slot_status(FIRST_SLOT - 40, None, &SlotStatus::Rooted)
+        .update_bank_status(FIRST_SLOT - 40, None, &SlotStatus::Rooted, 0)
         .unwrap();
 
     let rewards = RewardsAndNumPartitions {
@@ -251,7 +254,7 @@ fn test_output_matches_recorded_digest() {
                 index: index as usize,
             };
             plugin
-                .notify_transaction(ReplicaTransactionInfoVersions::V0_0_3(&info), slot)
+                .notify_transaction_for_bank(ReplicaTransactionInfoVersions::V0_0_3(&info), slot, 0)
                 .unwrap();
         }
 
@@ -269,13 +272,13 @@ fn test_output_matches_recorded_digest() {
             entry_count: 1,
         };
         plugin
-            .notify_block_metadata(ReplicaBlockInfoVersions::V0_0_4(&block_info))
+            .notify_block_metadata_for_bank(ReplicaBlockInfoVersions::V0_0_4(&block_info), 0)
             .unwrap();
         plugin
-            .update_slot_status(slot - 32, None, &SlotStatus::Rooted)
+            .update_bank_status(slot - 32, None, &SlotStatus::Rooted, 0)
             .unwrap();
         plugin
-            .update_slot_status(slot, Some(parent), &SlotStatus::Confirmed)
+            .update_bank_status(slot, Some(parent), &SlotStatus::Confirmed, 0)
             .unwrap();
         parent = slot;
     }
