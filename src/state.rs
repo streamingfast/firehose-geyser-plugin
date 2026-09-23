@@ -11,7 +11,7 @@ use solana_rpc_client::rpc_client::RpcClient;
 type BlockAccountChanges = HashMap<u64, AccountChanges>;
 pub type AccountChanges = HashMap<[u8; 64], AccountWithWriteVersion>;
 pub type AccountOwners = HashMap<[u8; 32], [u8; 32]>; // pubkey(32) -> owner(32)
-pub type StartupAccountReceivedSlot = ShardedMap<u64>; // pubkey(32) -> composite value (slot << 25 + write_version)
+                                                      // pubkey(32) -> composite value (slot << 25 + write_version)
 
 pub type Transactions = HashMap<u64, Vec<ConfirmTransactionWithIndex>>;
 type ProcessedSlot = HashMap<u64, bool>;
@@ -51,6 +51,11 @@ impl<V> ShardedMap<V> {
     }
 
     #[inline]
+    pub fn get_mut(&mut self, key: &[u8; 32]) -> Option<&mut V> {
+        self.shards[Self::shard(key)].get_mut(key)
+    }
+
+    #[inline]
     pub fn insert(&mut self, key: [u8; 32], value: V) -> Option<V> {
         self.shards[Self::shard(&key)].insert(key, value)
     }
@@ -67,6 +72,28 @@ impl<V> ShardedMap<V> {
     pub fn is_empty(&self) -> bool {
         self.shards.iter().all(HashMap::is_empty)
     }
+
+    /// Converts one shard at a time, dropping each source shard once converted, so the
+    /// conversion never holds more than one extra shard.
+    fn convert<W>(self, convert: impl Fn(V) -> Option<W>) -> ShardedMap<W> {
+        ShardedMap {
+            shards: self
+                .shards
+                .into_iter()
+                .map(|shard| {
+                    let mut converted = HashMap::default();
+                    converted.reserve(shard.len());
+                    converted.extend(
+                        shard
+                            .into_iter()
+                            .filter_map(|(key, value)| Some((key, convert(value)?))),
+                    );
+                    converted.shrink_to_fit();
+                    converted
+                })
+                .collect(),
+        }
+    }
 }
 
 /// Packed to 12 bytes: the cache holds one per account on the chain.
@@ -77,14 +104,54 @@ struct CachedAccount {
     data_hash: u64,
 }
 
+/// `StartupAccount::owner_id` of an account with a startup version but no cached data hash.
+const NO_OWNER: u32 = u32::MAX;
+
+/// Cache entry during startup, which also holds the newest snapshot version seen for the
+/// account so the pubkey is stored once instead of in a second map.
+#[derive(Clone, Copy)]
+#[repr(C, packed)]
+struct StartupAccount {
+    owner_id: u32,
+    data_hash: u64,
+    version: u64,
+    has_version: bool,
+}
+
+#[derive(Clone)]
+enum Accounts {
+    Startup {
+        accounts: ShardedMap<StartupAccount>,
+        cached: usize,
+        versions: usize,
+    },
+    Running(ShardedMap<CachedAccount>),
+}
+
 /// Owner and data hash of the last sent version of every account, keyed by pubkey. An account
 /// has one owner at a time, so a data hash is only returned when the owner asked for matches.
 /// Owners are programs, few enough to be stored once and referenced by index.
-#[derive(Default, Clone)]
+///
+/// Until `end_startup`, it also tracks the newest snapshot version received per account.
+#[derive(Clone)]
 pub struct AccountCache {
-    accounts: ShardedMap<CachedAccount>,
+    accounts: Accounts,
     owners: Vec<[u8; 32]>,
     owner_ids: HashMap<[u8; 32], u32>,
+}
+
+impl Default for AccountCache {
+    fn default() -> Self {
+        AccountCache {
+            accounts: Accounts::Startup {
+                accounts: ShardedMap::default(),
+                cached: 0,
+                versions: 0,
+            },
+            owners: Vec::new(),
+            owner_ids: HashMap::default(),
+        }
+    }
 }
 
 impl AccountCache {
@@ -92,65 +159,235 @@ impl AccountCache {
         if let Some(&id) = self.owner_ids.get(&owner) {
             return id;
         }
-        let id = u32::try_from(self.owners.len()).expect("more than u32::MAX distinct owners");
+        let id = u32::try_from(self.owners.len())
+            .ok()
+            .filter(|&id| id != NO_OWNER)
+            .expect("more than u32::MAX - 1 distinct owners");
         self.owners.push(owner);
         self.owner_ids.insert(owner, id);
         id
     }
 
+    /// Owner id and data hash of the account, in one lookup.
+    #[inline]
+    fn get_ids(&self, address: &[u8; 32]) -> Option<(u32, u64)> {
+        match &self.accounts {
+            Accounts::Running(accounts) => {
+                let cached = *accounts.get(address)?;
+                Some((cached.owner_id, cached.data_hash))
+            }
+            Accounts::Startup { accounts, .. } => {
+                let cached = *accounts.get(address)?;
+                if cached.owner_id == NO_OWNER {
+                    None
+                } else {
+                    Some((cached.owner_id, cached.data_hash))
+                }
+            }
+        }
+    }
+
     /// Owner and data hash of the account, in one lookup.
     #[inline]
     pub fn get(&self, address: &[u8; 32]) -> Option<(&[u8; 32], u64)> {
-        let cached = *self.accounts.get(address)?;
-        Some((&self.owners[cached.owner_id as usize], cached.data_hash))
+        let (owner_id, data_hash) = self.get_ids(address)?;
+        Some((&self.owners[owner_id as usize], data_hash))
     }
 
     #[inline]
     pub fn owner(&self, address: &[u8; 32]) -> Option<&[u8; 32]> {
-        self.accounts
-            .get(address)
-            .map(|cached| &self.owners[cached.owner_id as usize])
+        self.get(address).map(|(owner, _)| owner)
     }
 
     #[inline]
     pub fn data_hash(&self, owner: &[u8; 32], address: &[u8; 32]) -> Option<u64> {
-        let cached = *self.accounts.get(address)?;
-        if &self.owners[cached.owner_id as usize] == owner {
-            Some(cached.data_hash)
-        } else {
-            None
+        match self.get(address)? {
+            (cached_owner, data_hash) if cached_owner == owner => Some(data_hash),
+            _ => None,
         }
     }
 
     pub fn insert(&mut self, owner: [u8; 32], address: [u8; 32], data_hash: u64) {
         let owner_id = self.owner_id(owner);
-        self.accounts.insert(
-            address,
-            CachedAccount {
-                owner_id,
-                data_hash,
+        match &mut self.accounts {
+            Accounts::Running(accounts) => {
+                accounts.insert(
+                    address,
+                    CachedAccount {
+                        owner_id,
+                        data_hash,
+                    },
+                );
+            }
+            Accounts::Startup {
+                accounts, cached, ..
+            } => match accounts.get_mut(&address) {
+                Some(entry) => {
+                    if entry.owner_id == NO_OWNER {
+                        *cached += 1;
+                    }
+                    entry.owner_id = owner_id;
+                    entry.data_hash = data_hash;
+                }
+                None => {
+                    *cached += 1;
+                    accounts.insert(
+                        address,
+                        StartupAccount {
+                            owner_id,
+                            data_hash,
+                            version: 0,
+                            has_version: false,
+                        },
+                    );
+                }
             },
-        );
+        }
     }
 
     /// Removes the account only if it is cached under `owner`: a deletion reported under a
     /// previous owner must not drop the entry of the current one.
     pub fn remove(&mut self, owner: &[u8; 32], address: &[u8; 32]) {
         if self.owner(address) == Some(owner) {
-            self.accounts.remove(address);
+            self.remove_address(address);
         }
     }
 
     pub fn remove_address(&mut self, address: &[u8; 32]) {
-        self.accounts.remove(address);
+        match &mut self.accounts {
+            Accounts::Running(accounts) => {
+                accounts.remove(address);
+            }
+            Accounts::Startup {
+                accounts, cached, ..
+            } => {
+                let Some(entry) = accounts.get_mut(address) else {
+                    return;
+                };
+                if entry.owner_id == NO_OWNER {
+                    return;
+                }
+                *cached -= 1;
+                if entry.has_version {
+                    entry.owner_id = NO_OWNER;
+                    entry.data_hash = 0;
+                } else {
+                    accounts.remove(address);
+                }
+            }
+        }
+    }
+
+    /// Records a snapshot version of the account and caches it, unless a version at least as
+    /// new was already received.
+    pub fn set_on_startup(
+        &mut self,
+        owner: [u8; 32],
+        address: [u8; 32],
+        data_hash: u64,
+        version: u64,
+        deleted: bool,
+    ) {
+        if let Accounts::Running(_) = self.accounts {
+            self.restart_startup();
+        }
+        let Accounts::Startup {
+            accounts, versions, ..
+        } = &mut self.accounts
+        else {
+            unreachable!("restart_startup switches to the startup layout");
+        };
+
+        match accounts.get_mut(&address) {
+            Some(entry) if entry.has_version && entry.version >= version => return,
+            Some(entry) => {
+                if !entry.has_version {
+                    *versions += 1;
+                }
+                entry.version = version;
+                entry.has_version = true;
+            }
+            None => {
+                *versions += 1;
+                accounts.insert(
+                    address,
+                    StartupAccount {
+                        owner_id: NO_OWNER,
+                        data_hash: 0,
+                        version,
+                        has_version: true,
+                    },
+                );
+            }
+        }
+
+        if deleted {
+            self.remove_address(&address);
+        } else {
+            self.insert(owner, address, data_hash);
+        }
+    }
+
+    /// Drops the startup versions and switches to the smaller running layout.
+    pub fn end_startup(&mut self) {
+        let accounts =
+            std::mem::replace(&mut self.accounts, Accounts::Running(ShardedMap::default()));
+        if let Accounts::Startup { accounts, .. } = accounts {
+            self.accounts = Accounts::Running(accounts.convert(|entry| {
+                if entry.owner_id == NO_OWNER {
+                    None
+                } else {
+                    Some(CachedAccount {
+                        owner_id: entry.owner_id,
+                        data_hash: entry.data_hash,
+                    })
+                }
+            }));
+        } else {
+            self.accounts = accounts;
+        }
+    }
+
+    /// Snapshot notifications after `end_startup` start tracking versions again from none.
+    fn restart_startup(&mut self) {
+        let accounts =
+            std::mem::replace(&mut self.accounts, Accounts::Running(ShardedMap::default()));
+        if let Accounts::Running(accounts) = accounts {
+            let cached = accounts.len();
+            self.accounts = Accounts::Startup {
+                accounts: accounts.convert(|entry| {
+                    Some(StartupAccount {
+                        owner_id: entry.owner_id,
+                        data_hash: entry.data_hash,
+                        version: 0,
+                        has_version: false,
+                    })
+                }),
+                cached,
+                versions: 0,
+            };
+        } else {
+            self.accounts = accounts;
+        }
+    }
+
+    /// Number of accounts with a startup version, zero after `end_startup`.
+    pub fn startup_versions(&self) -> usize {
+        match &self.accounts {
+            Accounts::Startup { versions, .. } => *versions,
+            Accounts::Running(_) => 0,
+        }
     }
 
     pub fn len(&self) -> usize {
-        self.accounts.len()
+        match &self.accounts {
+            Accounts::Startup { cached, .. } => *cached,
+            Accounts::Running(accounts) => accounts.len(),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.accounts.is_empty()
+        self.len() == 0
     }
 }
 
@@ -218,7 +455,6 @@ pub struct State {
     pub block_account_changes: BlockAccountChanges,
 
     pub account_cache: AccountCache, // only updated when we print the block
-    pub startup_received_slot: StartupAccountReceivedSlot, // only used during startup phase
 
     pub block_infos: BlockInfoMap,
     pub confirmed_slots: ConfirmedSlotsMap,
@@ -264,7 +500,6 @@ impl State {
 
             block_account_changes: HashMap::default(),
             account_cache: AccountCache::default(),
-            startup_received_slot: ShardedMap::default(),
             block_infos: HashMap::default(),
             confirmed_slots: HashMap::default(),
             last_sent_block: None,
@@ -297,7 +532,6 @@ impl State {
             lib: self.lib,
             block_account_changes: self.block_account_changes.clone(),
             account_cache: self.account_cache.clone(),
-            startup_received_slot: self.startup_received_slot.clone(),
             block_infos: self.block_infos.clone(),
             confirmed_slots: self.confirmed_slots.clone(),
             with_block: self.with_block,
@@ -607,26 +841,18 @@ impl State {
         //    At 400ms per slot, this supports ~6,900 years of blockchain history
         let composite_value = (slot << 25) | write_version;
 
-        // Check if we already have this account with a newer version
-        if let Some(&existing_composite) = self.startup_received_slot.get(&pub_key_fixed) {
-            if existing_composite >= composite_value {
-                return;
-            }
-        }
-        self.startup_received_slot
-            .insert(pub_key_fixed, composite_value);
-
         // The newest startup version wins whatever owner it has, including when it deletes
-        if deleted {
-            self.account_cache.remove_address(&pub_key_fixed);
-        } else {
-            self.account_cache
-                .insert(owner_fixed, pub_key_fixed, data_hash);
-        }
+        self.account_cache.set_on_startup(
+            owner_fixed,
+            pub_key_fixed,
+            data_hash,
+            composite_value,
+            deleted,
+        );
     }
 
     pub fn delete_startup_info(&mut self) {
-        self.startup_received_slot = ShardedMap::default();
+        self.account_cache.end_startup();
     }
 
     // set_account populates the caches for set_account
@@ -1074,7 +1300,7 @@ impl State {
             self.confirmed_slots.len(),
             self.processed_slots.len(),
             self.account_cache.len(),
-            self.startup_received_slot.len(),
+            self.account_cache.startup_versions(),
             self.late_transactions,
             self.late_account_updates,
             PENDING_BLOCK_WRITES.load(Ordering::Relaxed),
@@ -3115,11 +3341,13 @@ mod tests {
     }
 
     /// The account cache kept as two maps, owner + pubkey -> data hash and pubkey -> owner,
-    /// with the same update rules as `AccountCache`.
+    /// plus a third for the newest snapshot version of each pubkey, with the same update
+    /// rules as `AccountCache`.
     #[derive(Default)]
     struct TwoMapCache {
         data_hash: HashMap<[u8; 64], u64>,
         owners: HashMap<[u8; 32], [u8; 32]>,
+        startup_versions: HashMap<[u8; 32], u64>,
     }
 
     impl TwoMapCache {
@@ -3128,8 +3356,16 @@ mod tests {
             owner: [u8; 32],
             address: [u8; 32],
             data_hash: u64,
+            version: u64,
             deleted: bool,
         ) {
+            if let Some(&existing) = self.startup_versions.get(&address) {
+                if existing >= version {
+                    return;
+                }
+            }
+            self.startup_versions.insert(address, version);
+
             if let Some(previous_owner) = self.owners.get(&address) {
                 if previous_owner != &owner {
                     self.data_hash
@@ -3183,13 +3419,32 @@ mod tests {
         let mut write_version = 0u64;
 
         for slot in 1..20_000u64 {
-            if next(4) == 0 {
+            if next(500) == 0 {
+                expected.startup_versions.clear();
+                state.delete_startup_info();
+            } else if next(4) == 0 {
                 let owner = [1 + next(OWNERS as u64) as u8; 32];
                 let address = [10 + next(ADDRESSES as u64) as u8; 32];
                 let data_hash = next(3);
                 let deleted = next(5) == 0;
-                expected.set_on_startup(owner, address, data_hash, deleted);
-                state.set_account_on_startup(&address, &owner, data_hash, slot, 0, deleted);
+                // Versions out of order, so some are older than one already received
+                let startup_slot = next(8);
+                let startup_write_version = next(4);
+                expected.set_on_startup(
+                    owner,
+                    address,
+                    data_hash,
+                    (startup_slot << 25) | startup_write_version,
+                    deleted,
+                );
+                state.set_account_on_startup(
+                    &address,
+                    &owner,
+                    data_hash,
+                    startup_slot,
+                    startup_write_version,
+                    deleted,
+                );
             } else {
                 let mut changes: AccountChanges = HashMap::default();
                 for _ in 0..1 + next(6) {
@@ -3211,6 +3466,11 @@ mod tests {
                 state.apply_cache_changes(state_changes);
             }
 
+            assert_eq!(state.account_cache.len(), expected.owners.len());
+            assert_eq!(
+                state.account_cache.startup_versions(),
+                expected.startup_versions.len()
+            );
             for a in 0..ADDRESSES {
                 let address = [10 + a; 32];
                 assert_eq!(
