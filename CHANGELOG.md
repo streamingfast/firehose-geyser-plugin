@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## v4.3.0-fh3.0-1
 
-* Bumped the Docker image's `firecore` binary to [firehose-core v1.20.1](https://github.com/streamingfast/firehose-core/releases/tag/v1.20.1) (was `v1.14.5`).
+* The Docker image now takes its `firecore` binary from the `latest` firehose-core image instead of pinning a version (was `v1.14.5`), so each build picks up the newest firehose-core release, currently [v1.20.1](https://github.com/streamingfast/firehose-core/releases/tag/v1.20.1).
 
 ## v4.3.0-fh3.0
 
