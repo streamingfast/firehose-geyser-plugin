@@ -69,10 +69,6 @@ impl<V> ShardedMap<V> {
         self.shards.iter().map(HashMap::len).sum()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.shards.iter().all(HashMap::is_empty)
-    }
-
     /// Converts one shard at a time, dropping each source shard once converted, so the
     /// conversion never holds more than one extra shard.
     fn convert<W>(self, convert: impl Fn(V) -> Option<W>) -> ShardedMap<W> {
