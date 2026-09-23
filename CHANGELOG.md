@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v4.3.0-fh3.0-1
+
+* The Docker image now takes its `firecore` binary from the `latest` firehose-core image instead of pinning a version (was `v1.14.5`), so each build picks up the newest firehose-core release, currently [v1.20.1](https://github.com/streamingfast/firehose-core/releases/tag/v1.20.1).
+
 ## v4.3.0-fh3.0
 
 * Bumped to [Agave 4.3.0](https://github.com/anza-xyz/agave/releases/tag/v4.3.0) (`agave-geyser-plugin-interface`, `solana-rpc-client`, `solana-rpc-client-api`, `solana-transaction-status`, `solana-transaction-context`), 5 upstream commits past `v4.3.0-rc.1`. The Geyser plugin interface, `transaction-status`, `transaction-context` and the `rpc-client` crates are untouched in this range, so no plugin code change was required.
