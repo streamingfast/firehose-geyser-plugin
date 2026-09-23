@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+* Cut the memory used by the account cache roughly in half, from about 300 GB to about 157 GB on mainnet (1.18 billion accounts). The cache now keeps one entry per account (owner and data hash, keyed by pubkey) instead of two maps, one keyed by owner + pubkey and one by pubkey. In the `memory stats` log line, `account_data_hash=` and `account_owners=` are replaced by `account_cache=`.
+
 ## v4.3.0-fh3.0-1
 
 * The Docker image now takes its `firecore` binary from the `latest` firehose-core image instead of pinning a version (was `v1.14.5`), so each build picks up the newest firehose-core release, currently [v1.20.1](https://github.com/streamingfast/firehose-core/releases/tag/v1.20.1).
