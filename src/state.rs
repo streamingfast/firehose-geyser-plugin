@@ -781,6 +781,8 @@ pub struct State {
     pub late_transactions: AtomicU64,
     /// Account updates received for a slot at or below `last_sent_block`.
     pub late_account_updates: AtomicU64,
+    /// See `Config::release_free_memory`.
+    pub release_free_memory: bool,
 
     local_rpc_client: Option<RpcClient>,
     remote_rpc_client: Option<RpcClient>,
@@ -818,6 +820,7 @@ impl State {
             last_stats_slot: 0,
             late_transactions: AtomicU64::new(0),
             late_account_updates: AtomicU64::new(0),
+            release_free_memory: false,
 
             local_rpc_client: Some(local_rpc_client),
             remote_rpc_client: Some(remote_rpc_client),
@@ -852,6 +855,7 @@ impl State {
             late_account_updates: AtomicU64::new(
                 self.late_account_updates.load(AtomicOrdering::Relaxed),
             ),
+            release_free_memory: self.release_free_memory,
 
             // Cannot clone those
             local_rpc_client: None,
@@ -1710,6 +1714,16 @@ impl State {
             process_rss_anon,
             process_swap,
         );
+        if self.release_free_memory {
+            let started = std::time::Instant::now();
+            crate::heap::release_free_memory();
+            info!(
+                "released free plugin memory at slot {} in {:?}: process (rss_anon, swap) now {:?}",
+                slot,
+                started.elapsed(),
+                crate::heap::process_anonymous_memory()
+            );
+        }
         info!(
             "callback timings since previous stats at slot {}: {} {} {} {} {} {}",
             slot,
