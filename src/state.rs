@@ -1201,6 +1201,19 @@ impl State {
 
     pub fn delete_startup_info(&mut self) {
         self.account_cache.end_startup();
+
+        // The startup layout was freed by the threads that converted it, which have exited, so
+        // mimalloc would otherwise keep that memory for the life of the process
+        let before = crate::heap::process_anonymous_memory();
+        let started = std::time::Instant::now();
+        crate::heap::release_free_memory();
+        info!(
+            "released free plugin memory after end of startup in {:?}: plugin_live_bytes={} process (rss_anon, swap) {:?} -> {:?}",
+            started.elapsed(),
+            crate::heap::live_bytes(),
+            before,
+            crate::heap::process_anonymous_memory()
+        );
     }
 
     // set_account populates the caches for set_account
@@ -1687,6 +1700,15 @@ impl State {
             PENDING_BLOCK_WRITES.load(Ordering::Relaxed),
             PENDING_ACCOUNT_BLOCK_WRITES.load(Ordering::Relaxed),
             PENDING_WRITE_BYTES.load(Ordering::Relaxed),
+        );
+        let (process_rss_anon, process_swap) = crate::heap::process_anonymous_memory()
+            .map_or((None, None), |(rss, swap)| (Some(rss), Some(swap)));
+        info!(
+            "heap stats at slot {}: plugin_live_bytes={} process_rss_anon={:?} process_swap={:?}",
+            slot,
+            crate::heap::live_bytes(),
+            process_rss_anon,
+            process_swap,
         );
         info!(
             "callback timings since previous stats at slot {}: {} {} {} {} {} {}",

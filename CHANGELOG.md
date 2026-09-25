@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+* The plugin returns to the OS the memory freed at end of startup. The threads that freed the startup layout of the account cache exit right after, so mimalloc kept that memory for the life of the process: about 1 GB per 20 million accounts in the throughput benchmark, roughly 60 GB on mainnet.
+* A `heap stats` line follows each `memory stats` line, with the bytes the plugin has allocated and not freed (`plugin_live_bytes`) and the anonymous memory of the whole validator process, resident and swapped (`process_rss_anon`, `process_swap`, from `/proc/self/status`). The plugin shares the process with Agave's heap, so this tells how much of it is the plugin. The count costs nothing measurable in the throughput benchmark.
+
 ## v4.3.0-fh3.0-3
 
 * Fixed the first account blocks after startup missing entries. When several confirmed slots went out together in the first send, for example because they were confirmed before the LIB was known, their changes were applied to the account cache before they were sent, so all but the last one dropped every change that was not a deletion.
