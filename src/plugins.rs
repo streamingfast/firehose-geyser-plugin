@@ -329,7 +329,7 @@ impl Plugin {
             return Err(err.into());
         }
 
-        self.state = Some(RwLock::new(State::new(
+        let mut state = State::new(
             local_rpc_client,
             remote_rpc_client,
             cursor,
@@ -337,7 +337,9 @@ impl Plugin {
             printer,
             self.with_block,
             plugin_config.dev,
-        )));
+        );
+        state.release_free_memory = plugin_config.release_free_memory;
+        self.state = Some(RwLock::new(state));
 
         info!("cursor: {:?}", cursor);
 

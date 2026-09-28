@@ -1,5 +1,6 @@
 mod block_printer;
 mod config;
+mod heap;
 mod pb;
 pub mod plugins;
 mod state;
@@ -11,4 +12,4 @@ pub use plugins::_create_plugin;
 
 // mimalloc manages the plugin's heap, account cache included
 #[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static GLOBAL: heap::CountingMiMalloc = heap::CountingMiMalloc;

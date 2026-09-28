@@ -71,6 +71,7 @@ firecore start reader-node-stdin \
     "block_destination_file": "/path/to/blocks.fifo",
     "cursor_file": "/path/to/cursor.fh",
     "noop": false,
+    "release_free_memory": false,
     "log": {
         "level": "INFO"
     }
@@ -88,6 +89,7 @@ Flags:
   * `block_destination_file`: path to a linux named pipe where the normal blocks will be written. Must be writable and created with `mkfifo /path/to/file`
   * `cursor_file`: path where the cursor will be written. This is used for optimizations when restarting the server.
   * `noop`: for debugging - when set to true, blocks are not printed to the FIFO destination files, but a log indicates which block would be written.
+  * `release_free_memory`: optional, default `false`. Every 100 slots, makes the plugin's allocator (mimalloc) return to the OS the memory it holds but no longer uses, and logs the process's heap afterwards (`released free plugin memory at slot ...`). Costs a few milliseconds under the plugin's state lock each time. Memory freed at end of startup is always returned.
   * `log.level`: one of [TRACE, DEBUG, INFO] to get anything interesting.
 
 * agave-validator must be run with the following flag: `--geyser-plugin-config /path/to/libfirehose-geyser-plugin.json`

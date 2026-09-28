@@ -25,6 +25,11 @@ pub struct Config {
 
     #[serde(default)]
     pub dev: DevelopmentConfig,
+
+    /// Every 100 slots, with the `memory stats` log line, make mimalloc return the memory it
+    /// holds but no longer uses, and log how much the process's heap changed.
+    #[serde(default)]
+    pub release_free_memory: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -76,5 +81,29 @@ impl Config {
     pub fn load_from_file<P: AsRef<Path>>(file: P) -> PluginResult<Self> {
         let config = read_to_string(file).map_err(GeyserPluginError::ConfigFileOpenError)?;
         Self::load_from_str(&config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const REQUIRED: &str = r#""local_rpc_client": { "endpoint": "" },
+        "remote_rpc_client": { "endpoint": "" },
+        "cursor_file": "",
+        "account_block_destination_file": "",
+        "block_destination_file": """#;
+
+    #[test]
+    fn test_release_free_memory_defaults_to_off() {
+        let config = Config::load_from_str(&format!("{{ {} }}", REQUIRED)).unwrap();
+        assert!(!config.release_free_memory);
+
+        let config = Config::load_from_str(&format!(
+            r#"{{ {}, "release_free_memory": true }}"#,
+            REQUIRED
+        ))
+        .unwrap();
+        assert!(config.release_free_memory);
     }
 }

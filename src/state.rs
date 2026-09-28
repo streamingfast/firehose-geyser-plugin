@@ -781,6 +781,8 @@ pub struct State {
     pub late_transactions: AtomicU64,
     /// Account updates received for a slot at or below `last_sent_block`.
     pub late_account_updates: AtomicU64,
+    /// See `Config::release_free_memory`.
+    pub release_free_memory: bool,
 
     local_rpc_client: Option<RpcClient>,
     remote_rpc_client: Option<RpcClient>,
@@ -818,6 +820,7 @@ impl State {
             last_stats_slot: 0,
             late_transactions: AtomicU64::new(0),
             late_account_updates: AtomicU64::new(0),
+            release_free_memory: false,
 
             local_rpc_client: Some(local_rpc_client),
             remote_rpc_client: Some(remote_rpc_client),
@@ -852,6 +855,7 @@ impl State {
             late_account_updates: AtomicU64::new(
                 self.late_account_updates.load(AtomicOrdering::Relaxed),
             ),
+            release_free_memory: self.release_free_memory,
 
             // Cannot clone those
             local_rpc_client: None,
@@ -1201,6 +1205,19 @@ impl State {
 
     pub fn delete_startup_info(&mut self) {
         self.account_cache.end_startup();
+
+        // The startup layout was freed by the threads that converted it, which have exited, so
+        // mimalloc would otherwise keep that memory for the life of the process
+        let before = crate::heap::process_anonymous_memory();
+        let started = std::time::Instant::now();
+        crate::heap::release_free_memory();
+        info!(
+            "released free plugin memory after end of startup in {:?}: plugin_live_bytes={} process (rss_anon, swap) {:?} -> {:?}",
+            started.elapsed(),
+            crate::heap::live_bytes(),
+            before,
+            crate::heap::process_anonymous_memory()
+        );
     }
 
     // set_account populates the caches for set_account
@@ -1688,6 +1705,25 @@ impl State {
             PENDING_ACCOUNT_BLOCK_WRITES.load(Ordering::Relaxed),
             PENDING_WRITE_BYTES.load(Ordering::Relaxed),
         );
+        let (process_rss_anon, process_swap) = crate::heap::process_anonymous_memory()
+            .map_or((None, None), |(rss, swap)| (Some(rss), Some(swap)));
+        info!(
+            "heap stats at slot {}: plugin_live_bytes={} process_rss_anon={:?} process_swap={:?}",
+            slot,
+            crate::heap::live_bytes(),
+            process_rss_anon,
+            process_swap,
+        );
+        if self.release_free_memory {
+            let started = std::time::Instant::now();
+            crate::heap::release_free_memory();
+            info!(
+                "released free plugin memory at slot {} in {:?}: process (rss_anon, swap) now {:?}",
+                slot,
+                started.elapsed(),
+                crate::heap::process_anonymous_memory()
+            );
+        }
         info!(
             "callback timings since previous stats at slot {}: {} {} {} {} {} {}",
             slot,
