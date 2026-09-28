@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v4.3.0-fh3.0-4
 
 * The plugin returns to the OS the memory freed at end of startup. The threads that freed the startup layout of the account cache exit right after, so mimalloc kept that memory for the life of the process: about 1 GB per 20 million accounts in the throughput benchmark, roughly 60 GB on mainnet.
 * New `release_free_memory` config flag, off by default. When set, every 100 slots, after the `heap stats` line, the plugin makes mimalloc return the memory it holds but no longer uses and logs the process's heap afterwards. Comparing that with the `heap stats` line just before shows whether the plugin's heap was holding memory it did not use.
