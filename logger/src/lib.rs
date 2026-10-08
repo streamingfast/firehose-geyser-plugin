@@ -197,9 +197,7 @@ impl GeyserPlugin for LoggerPlugin {
         slot: u64,
     ) -> PluginResult<()> {
         let event = match transaction {
-            ReplicaTransactionInfoVersions::V0_0_1(_) => "notify_transaction:v1",
-            ReplicaTransactionInfoVersions::V0_0_2(_) => "notify_transaction:v2",
-            ReplicaTransactionInfoVersions::V0_0_3(_) => "notify_transaction:v3",
+            ReplicaTransactionInfoVersions::V0_0_4(_) => "notify_transaction:v4",
         };
 
         if let Some(mutex) = &self.inner {
@@ -221,10 +219,7 @@ impl GeyserPlugin for LoggerPlugin {
 
     fn notify_block_metadata(&self, block_info: ReplicaBlockInfoVersions<'_>) -> PluginResult<()> {
         let (slot, block_time) = match block_info {
-            ReplicaBlockInfoVersions::V0_0_1(b) => (b.slot, b.block_time),
-            ReplicaBlockInfoVersions::V0_0_2(b) => (b.slot, b.block_time),
-            ReplicaBlockInfoVersions::V0_0_3(b) => (b.slot, b.block_time),
-            ReplicaBlockInfoVersions::V0_0_4(b) => (b.slot, b.block_time),
+            ReplicaBlockInfoVersions::V0_0_5(b) => (b.slot, b.block_time),
         };
 
         if let Some(mutex) = &self.inner {

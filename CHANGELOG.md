@@ -11,6 +11,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 * Block and account block FIFO writes could land out of order: each slot was encoded on its own thread, and a smaller/faster slot could reach the FIFO before an earlier, larger one. This hit about 7.5% of account blocks on a devnet node, almost all at the last slot of a 4-slot leader window, and made firehose-core's relayer restart with `cannot link block after reconnection`. Each output (block, account block) now has a single writer thread that drains jobs in the order `print` was called, so writes stay in slot order while encoding stays parallel. The cursor file also now advances only once both outputs have reported a slot, instead of relying on two calls happening to carry the same value.
 
+## v4.4.0-beta.0-fh3.0
+
+* Bumped to [Agave 4.4.0-beta.0](https://github.com/anza-xyz/agave/releases/tag/v4.4.0-beta.0) (`solana-rpc-client`, `solana-rpc-client-api`, `solana-transaction-status`). The plugin must run in an Agave 4.4 validator: the Docker image's Solana validator is now `v4.4.0-beta.0-fh3.0` (was `v4.3.0-fh3.0`).
+* The Geyser plugin interface left the Agave repository ([#15388](https://github.com/anza-xyz/agave/pull/15388)) and is now `agave-geyser-plugin-interface` `5.0.0`, published from [anza-xyz/agave-sdk](https://github.com/anza-xyz/agave-sdk).
+  * Transactions only come as `ReplicaTransactionInfoV4` and block metadata only as `ReplicaBlockInfoV5`.
+  * The transaction status, rewards and token balances now come as the interface's own borrowed types (`transaction_status_meta`) instead of `solana-transaction-status` types. They carry the same fields, and the plugin's output is unchanged: the output regression test digest is identical.
+* Fixed a block sent twice, or the plugin no longer sending blocks, when a slot's Confirmed notification arrives after the slot was sent. Agave 4.4 ([#14936](https://github.com/anza-xyz/agave/pull/14936)) delivers a Confirmed it held back while the slot's bank was not frozen, even when later slots were confirmed meanwhile. The plugin had already sent that slot through its missing parent path, so it sent it again, or, once its block info was purged, kept it in `confirmed_slots` and stopped at it on every later slot. The plugin now ignores a Confirmed for a slot at or below the last sent block. The `send_processed` mode is unchanged.
+* Fields the plugin receives and the block model (`sf.solana.type.v1`) has no field for, now listed in `src/type_checks.rs` with the reason:
+  * `Reward.commission_bps`. Since mainnet activated SIMD-0291 (commission in basis points) at slot 433296000, Agave sends `commission: None` with the value in `commission_bps`, so `Reward.commission` is empty for every Voting and Staking reward. Since mainnet activated `custom_commission_collector` at slot 445392000, Voting and Staking rewards carry neither field, so a `commission_bps` field in the block model would stay empty for them too. See `ACTIVATIONS.md`.
+  * `RewardsAndNumPartitions.num_partitions` and `ReplicaBlockInfoV5.entry_count`.
+  * `ReplicaTransactionInfoV4.message_hash`, which is derived from the message the block carries.
+* Added `ACTIVATIONS.md`: every feature Agave 4.4.0-beta.0 defines, with its status on mainnet and testnet and its effect on the Firehose block.
+* `solana-message` and `solana-transaction` are now `5.0.0`, and `solana-clock` `4.0.0`, the versions the Agave 4.4.0-beta.0 validator compiles. The `solana-*` and `spl-*` crates in `Cargo.lock` match the validator's lock, including `solana-transaction-error` `4.0.0`, whose type crosses the plugin boundary.
+* `solana-transaction-status` is declared with its `agave-unstable-api` feature, which the 4.3 interface used to enable. The `solana-transaction-context` dependency is removed; the plugin no longer uses it.
+* The Rust toolchain is 1.98.1, matching the Agave 4.4 validator (was 1.97.1).
+
 ## v4.3.0-fh3.0-4
 
 * The plugin returns to the OS the memory freed at end of startup. The threads that freed the startup layout of the account cache exit right after, so mimalloc kept that memory for the life of the process: about 1 GB per 20 million accounts in the throughput benchmark, roughly 60 GB on mainnet.
