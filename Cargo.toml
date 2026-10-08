@@ -3,7 +3,7 @@ members = [".", "logger"]
 
 [package]
 name = "firehose-geyser-plugin"
-version = "4.4.0-beta.0-fh3.0-1"
+version = "4.4.0-beta.0-fh3.0-2"
 edition = "2021"
 
 [lib]

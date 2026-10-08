@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v4.4.0-beta.0-fh3.0-2
 
 * Fixed blocks sent with a LIB above their own slot, which firehose-core rejects (`libnum cannot be greater than block number`). The LIB comes from the latest Rooted notification, and a Rooted can pass a slot still waiting to go out, for example when its Confirmed comes late. With Alpenglow rooting right behind the head, as on devnet, this happens: slot 508940774 went out with `lib=508940775`. The LIB sent with a block is now capped at the block's slot.
 
