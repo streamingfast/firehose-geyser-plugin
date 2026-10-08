@@ -722,7 +722,6 @@ pub struct AccountWithWriteVersion {
 lazy_static! {
     pub static ref BLOCK_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
     pub static ref ACC_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    pub static ref CURSOR_MUTEX: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
 }
 
 #[derive(Default, Clone)]
