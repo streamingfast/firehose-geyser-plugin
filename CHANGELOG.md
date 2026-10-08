@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+* Fixed blocks sent with a LIB above their own slot, which firehose-core rejects (`libnum cannot be greater than block number`). The LIB comes from the latest Rooted notification, and a Rooted can pass a slot still waiting to go out, for example when its Confirmed comes late. With Alpenglow rooting right behind the head, as on devnet, this happens: slot 508940774 went out with `lib=508940775`. The LIB sent with a block is now capped at the block's slot.
+
 ## v4.4.0-beta.0-fh3.0-1
 
 * Fixed block and account block FIFO writes landing out of order: each slot was encoded on its own thread, and a smaller/faster slot could reach the FIFO before an earlier, larger one. This hit about 7.5% of account blocks on a devnet node, almost all at the last slot of a 4-slot leader window, and made firehose-core's relayer restart with `cannot link block after reconnection`. Each output (block, account block) now has a single writer thread that drains jobs in the order `print` was called, so writes stay in slot order while encoding stays parallel.
