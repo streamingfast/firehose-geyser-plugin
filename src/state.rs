@@ -719,10 +719,19 @@ pub struct AccountWithWriteVersion {
     pub data_hash: u64,
 }
 
+/// Tracks, per slot, how many of the two outputs (block, account block) have written it.
+/// `write_cursor` persists the slot to the cursor file only once both have reported in,
+/// which is also when `last` can advance.
+#[derive(Default)]
+pub struct CursorState {
+    pub last: u64,
+    pub pending: HashMap<u64, u8>,
+}
+
 lazy_static! {
     pub static ref BLOCK_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
     pub static ref ACC_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    pub static ref CURSOR_MUTEX: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
+    pub static ref CURSOR_MUTEX: std::sync::Mutex<CursorState> = std::sync::Mutex::new(CursorState::default());
 }
 
 #[derive(Default, Clone)]
