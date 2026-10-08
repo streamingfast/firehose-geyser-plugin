@@ -1032,6 +1032,23 @@ impl State {
         }
     }
 
+    // A Confirmed can arrive after the slot went out through the missing parent path: Agave
+    // holds it back until the slot's bank freezes, and later slots can be confirmed meanwhile.
+    // Taking it would send the slot again or leave it in `confirmed_slots` without block info,
+    // which stops `process_upto` for good.
+    pub fn set_confirmed_slot_unless_sent(&mut self, slot: u64, trace: bool) {
+        if let Some(last_sent) = self.last_sent_block {
+            if slot <= last_sent {
+                info!(
+                    "ignoring confirmed slot {} at or below last sent block {}",
+                    slot, last_sent
+                );
+                return;
+            }
+        }
+        self.set_confirmed_slot(slot, trace);
+    }
+
     pub fn has_block_info(&self, slot: u64) -> bool {
         self.block_infos.get(&slot).is_some()
     }
@@ -3740,6 +3757,35 @@ mod tests {
         );
 
         // Validate captured logs
+        assert_logs_contain_ordered(expected_logs);
+    }
+
+    #[test]
+    fn test_late_confirmed_for_sent_slot_does_not_stall() {
+        let mut state =
+            new_test_state(Some(100), setup_noop_block_printer_with_logging(true, true));
+
+        state.set_lib(99);
+        for slot in 100..=104 {
+            state.set_block_info(simple_block_info(slot), true);
+        }
+        state.set_confirmed_slot_unless_sent(100, true);
+
+        // Agave holds back the Confirmed of 101 until its bank freezes, and confirms 102 and 103
+        // first: 101 goes out with them, through the missing parent path
+        state.set_confirmed_slot_unless_sent(102, true);
+        state.set_confirmed_slot_unless_sent(103, true);
+        assert_eq!(state.last_sent_block, Some(103));
+
+        state.set_confirmed_slot_unless_sent(101, true);
+
+        state.set_confirmed_slot_unless_sent(104, true);
+        assert_eq!(state.last_sent_block, Some(104));
+
+        let mut expected_logs = Vec::new();
+        for slot in 100..=104 {
+            expected_logs.push(format!("printing block {} (noop mode)", slot));
+        }
         assert_logs_contain_ordered(expected_logs);
     }
 

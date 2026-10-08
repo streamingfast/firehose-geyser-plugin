@@ -503,7 +503,7 @@ impl GeyserPlugin for Plugin {
                         _parent.unwrap_or_default()
                     );
                     let mut lock_state = self.write_state("set_confirmed_slot");
-                    lock_state.set_confirmed_slot(slot, self.trace);
+                    lock_state.set_confirmed_slot_unless_sent(slot, self.trace);
                 }
             },
         }
