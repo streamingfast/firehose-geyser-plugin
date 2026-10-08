@@ -1594,6 +1594,11 @@ impl State {
             );
 
             if must_send {
+                // A Rooted can pass a slot still waiting to go out, for example when its
+                // Confirmed comes late, and Alpenglow roots right behind the head. Firehose
+                // rejects a block whose LIB is above its own number.
+                let lib = if lib > slot { slot } else { lib };
+
                 let tx_count = self
                     .transactions
                     .get_mut()
@@ -3786,6 +3791,36 @@ mod tests {
             expected_logs.push(format!("printing block {} (noop mode)", slot));
         }
         assert_logs_contain_ordered(expected_logs);
+    }
+
+    #[test]
+    fn test_lib_never_above_sent_slot() {
+        let mut state =
+            new_test_state(Some(100), setup_noop_block_printer_with_logging(true, true));
+
+        state.set_lib(99);
+        for slot in 100..=103 {
+            state.set_block_info(simple_block_info(slot), true);
+        }
+        state.set_confirmed_slot_unless_sent(100, true);
+        assert_eq!(state.last_sent_block, Some(100));
+
+        // 101's Confirmed comes late, after 102 is confirmed and rooted
+        state.set_confirmed_slot_unless_sent(102, true);
+        state.set_lib(102);
+        state.set_confirmed_slot_unless_sent(101, true);
+        state.set_confirmed_slot_unless_sent(103, true);
+        assert_eq!(state.last_sent_block, Some(103));
+
+        assert_logs_contain_ordered(vec![
+            "preparing to send slot 100 (account_changes=0, txs=0, parent=99, lib=99)".to_string(),
+            "preparing to send slot 101 (account_changes=0, txs=0, parent=100, lib=101)"
+                .to_string(),
+            "preparing to send slot 102 (account_changes=0, txs=0, parent=101, lib=102)"
+                .to_string(),
+            "preparing to send slot 103 (account_changes=0, txs=0, parent=102, lib=102)"
+                .to_string(),
+        ]);
     }
 
     #[test]
