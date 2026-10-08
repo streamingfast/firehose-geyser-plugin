@@ -1032,6 +1032,23 @@ impl State {
         }
     }
 
+    // A Confirmed can arrive after the slot went out through the missing parent path: Agave
+    // holds it back until the slot's bank freezes, and later slots can be confirmed meanwhile.
+    // Taking it would send the slot again or leave it in `confirmed_slots` without block info,
+    // which stops `process_upto` for good.
+    pub fn set_confirmed_slot_unless_sent(&mut self, slot: u64, trace: bool) {
+        if let Some(last_sent) = self.last_sent_block {
+            if slot <= last_sent {
+                info!(
+                    "ignoring confirmed slot {} at or below last sent block {}",
+                    slot, last_sent
+                );
+                return;
+            }
+        }
+        self.set_confirmed_slot(slot, trace);
+    }
+
     pub fn has_block_info(&self, slot: u64) -> bool {
         self.block_infos.get(&slot).is_some()
     }
@@ -3741,6 +3758,130 @@ mod tests {
 
         // Validate captured logs
         assert_logs_contain_ordered(expected_logs);
+    }
+
+    #[test]
+    fn test_late_confirmed_for_sent_slot_does_not_stall() {
+        let mut state =
+            new_test_state(Some(100), setup_noop_block_printer_with_logging(true, true));
+
+        state.set_lib(99);
+        for slot in 100..=104 {
+            state.set_block_info(simple_block_info(slot), true);
+        }
+        state.set_confirmed_slot_unless_sent(100, true);
+
+        // Agave holds back the Confirmed of 101 until its bank freezes, and confirms 102 and 103
+        // first: 101 goes out with them, through the missing parent path
+        state.set_confirmed_slot_unless_sent(102, true);
+        state.set_confirmed_slot_unless_sent(103, true);
+        assert_eq!(state.last_sent_block, Some(103));
+
+        state.set_confirmed_slot_unless_sent(101, true);
+
+        state.set_confirmed_slot_unless_sent(104, true);
+        assert_eq!(state.last_sent_block, Some(104));
+
+        let mut expected_logs = Vec::new();
+        for slot in 100..=104 {
+            expected_logs.push(format!("printing block {} (noop mode)", slot));
+        }
+        assert_logs_contain_ordered(expected_logs);
+    }
+
+    #[test]
+    fn test_alpenglow_migration_discards_vote_only_slots() {
+        let mut state =
+            new_test_state(Some(100), setup_noop_block_printer_with_logging(true, true));
+        let vote = || ConfirmTransactionWithIndex {
+            index: 0,
+            transaction: crate::pb::sf::solana::r#type::v1::ConfirmedTransaction::default(),
+        };
+        // Every slot writes the Clock sysvar
+        let clock: &[u8] = &[7; 32];
+        let sysvar: &[u8] = &[8; 32];
+        let mut write_version = 100;
+        let mut write_clock = |state: &mut State, slot: u64| {
+            write_version += 1;
+            state.set_account(
+                slot,
+                clock,
+                slot.to_le_bytes(),
+                sysvar,
+                write_version,
+                false,
+                slot,
+                true,
+            );
+        };
+
+        // TowerBFT up to 105, the block the cluster picks as Alpenglow genesis
+        state.set_lib(99);
+        for slot in 100..=105 {
+            write_clock(&mut state, slot);
+            state.set_block_info(simple_block_info(slot), true);
+            state.set_confirmed_slot_unless_sent(slot, true);
+        }
+        state.set_account(105, PUB_KEY_1, DATA_1, OWNER_KEY_1, 1, false, 12345, true);
+        assert_eq!(state.last_sent_block, Some(105));
+
+        // Migration: vote only slots, processed but never confirmed nor rooted, then discarded
+        for slot in 106..=109 {
+            write_clock(&mut state, slot);
+            let mut block_info = simple_block_info(slot);
+            block_info.transaction_count = 1;
+            state.set_block_info(block_info, true);
+            state.set_transaction(slot, vote(), true);
+        }
+        state.set_account(107, PUB_KEY_2, DATA_2, OWNER_KEY_1, 2, false, 23456, true);
+        assert_eq!(state.last_sent_block, Some(105));
+
+        // First Alpenglow block, built on the genesis block
+        write_clock(&mut state, 110);
+        state.set_block_info(test_block_info(110, 105), true);
+        state.set_account(110, PUB_KEY_3, DATA_3, OWNER_KEY_1, 3, false, 34567, true);
+        state.set_confirmed_slot_unless_sent(110, true);
+        assert_eq!(state.last_sent_block, Some(110));
+
+        state.set_lib(110);
+        write_clock(&mut state, 111);
+        state.set_block_info(test_block_info(111, 110), true);
+        state.set_confirmed_slot_unless_sent(111, true);
+        assert_eq!(state.last_sent_block, Some(111));
+
+        let mut expected_logs: Vec<String> = (100..=105)
+            .map(|slot| format!("printing block {} (noop mode)", slot))
+            .collect();
+        expected_logs.push("printing block 110 (noop mode)".to_string());
+        expected_logs.push("printing block 111 (noop mode)".to_string());
+        assert_logs_contain_ordered(expected_logs);
+        testing_logger::validate(|captured_logs| {
+            for slot in 106..=109 {
+                let printed = format!("printing block {} ", slot);
+                assert!(
+                    !captured_logs.iter().any(|log| log.body.contains(&printed)),
+                    "vote only slot {} was sent",
+                    slot
+                );
+            }
+        });
+
+        assert!(state
+            .account_cache
+            .get_by_key(&concat_keys(OWNER_KEY_1, PUB_KEY_2))
+            .is_none());
+        assert_eq!(
+            state
+                .account_cache
+                .get_by_key(&concat_keys(OWNER_KEY_1, PUB_KEY_3))
+                .unwrap(),
+            34567
+        );
+        for slot in 106..=109 {
+            assert!(!state.block_account_changes.contains_slot(slot));
+            assert!(!state.block_infos.contains_key(&slot));
+        }
+        assert!(state.transactions.get_mut().unwrap().is_empty());
     }
 
     #[test]

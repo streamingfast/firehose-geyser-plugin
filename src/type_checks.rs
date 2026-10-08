@@ -24,13 +24,14 @@
 ///
 /// To verify the checks work, temporarily comment out a field in one of the patterns
 /// and run `cargo check` - it should fail to compile.
+use agave_geyser_plugin_interface::transaction_status_meta as geyser_meta;
 
 #[allow(dead_code, invalid_value)]
 fn check_transaction_status_meta() {
-    let meta: solana_transaction_status::TransactionStatusMeta = unsafe { std::mem::zeroed() };
+    let meta: geyser_meta::TransactionStatusMeta = unsafe { std::mem::zeroed() };
 
     // Exhaustively match all fields - compiler will fail if fields are added/removed
-    let solana_transaction_status::TransactionStatusMeta {
+    let geyser_meta::TransactionStatusMeta {
         status: _,
         fee: _,
         pre_balances: _,
@@ -49,9 +50,9 @@ fn check_transaction_status_meta() {
 
 #[allow(dead_code, invalid_value)]
 fn check_transaction_token_balance() {
-    let balance: solana_transaction_status::TransactionTokenBalance = unsafe { std::mem::zeroed() };
+    let balance: geyser_meta::TransactionTokenBalance = unsafe { std::mem::zeroed() };
 
-    let solana_transaction_status::TransactionTokenBalance {
+    let geyser_meta::TransactionTokenBalance {
         account_index: _,
         mint: _,
         ui_token_amount: _,
@@ -62,14 +63,68 @@ fn check_transaction_token_balance() {
 
 #[allow(dead_code, invalid_value)]
 fn check_ui_token_amount() {
-    let amount: solana_rpc_client_api::response::UiTokenAmount = unsafe { std::mem::zeroed() };
+    let amount: geyser_meta::UiTokenAmount = unsafe { std::mem::zeroed() };
 
-    let solana_rpc_client_api::response::UiTokenAmount {
+    let geyser_meta::UiTokenAmount {
         ui_amount: _,
         decimals: _,
         amount: _,
         ui_amount_string: _,
     } = amount;
+}
+
+#[allow(dead_code, invalid_value)]
+fn check_geyser_reward() {
+    let reward: geyser_meta::Reward = unsafe { std::mem::zeroed() };
+
+    let geyser_meta::Reward {
+        pubkey: _,
+        lamports: _,
+        post_balance: _,
+        reward_type: _,
+        commission: _,
+        commission_bps: _, // sf.solana.type.v1.Reward has no field for it
+    } = reward;
+}
+
+#[allow(dead_code, invalid_value)]
+fn check_rewards_and_num_partitions() {
+    let rewards: geyser_meta::RewardsAndNumPartitions = unsafe { std::mem::zeroed() };
+
+    let geyser_meta::RewardsAndNumPartitions {
+        rewards: _,
+        num_partitions: _, // sf.solana.type.v1.Block has no field for it
+    } = rewards;
+}
+
+#[allow(dead_code, invalid_value)]
+fn check_inner_instructions() {
+    let inner: geyser_meta::InnerInstructions = unsafe { std::mem::zeroed() };
+
+    let geyser_meta::InnerInstructions {
+        index: _,
+        instructions: _,
+    } = inner;
+}
+
+#[allow(dead_code, invalid_value)]
+fn check_inner_instruction() {
+    let inner: geyser_meta::InnerInstruction = unsafe { std::mem::zeroed() };
+
+    let geyser_meta::InnerInstruction {
+        instruction: _,
+        stack_height: _,
+    } = inner;
+}
+
+#[allow(dead_code, invalid_value)]
+fn check_transaction_return_data() {
+    let return_data: geyser_meta::TransactionReturnData = unsafe { std::mem::zeroed() };
+
+    let geyser_meta::TransactionReturnData {
+        program_id: _,
+        data: _,
+    } = return_data;
 }
 
 #[allow(dead_code, invalid_value)]
@@ -82,7 +137,7 @@ fn check_reward() {
         post_balance: _,
         reward_type: _,
         commission: _,
-        commission_bps: _,
+        commission_bps: _, // sf.solana.type.v1.Reward has no field for it
     } = reward;
 }
 
@@ -99,37 +154,6 @@ fn check_reward_type() {
         solana_transaction_status::RewardType::DeactivatedStake => {}
         solana_transaction_status::RewardType::VATDebit => {}
     }
-}
-
-#[allow(dead_code, invalid_value)]
-fn check_inner_instructions() {
-    let inner: solana_transaction_status::InnerInstructions = unsafe { std::mem::zeroed() };
-
-    let solana_transaction_status::InnerInstructions {
-        index: _,
-        instructions: _,
-    } = inner;
-}
-
-#[allow(dead_code, invalid_value)]
-fn check_inner_instruction() {
-    let inner: solana_transaction_status::InnerInstruction = unsafe { std::mem::zeroed() };
-
-    let solana_transaction_status::InnerInstruction {
-        instruction: _,
-        stack_height: _,
-    } = inner;
-}
-
-#[allow(dead_code, invalid_value)]
-fn check_transaction_return_data() {
-    let return_data: solana_transaction_context::transaction::TransactionReturnData =
-        unsafe { std::mem::zeroed() };
-
-    let solana_transaction_context::transaction::TransactionReturnData {
-        program_id: _,
-        data: _,
-    } = return_data;
 }
 
 #[allow(dead_code, invalid_value)]
@@ -211,15 +235,28 @@ fn check_versioned_transaction() {
 }
 
 // Geyser plugin interface types
-#[allow(dead_code)]
+#[allow(dead_code, invalid_value)]
 fn check_replica_transaction_info_versions() {
     let versions: agave_geyser_plugin_interface::geyser_plugin_interface::ReplicaTransactionInfoVersions = unsafe { std::mem::zeroed() };
 
     match versions {
-        agave_geyser_plugin_interface::geyser_plugin_interface::ReplicaTransactionInfoVersions::V0_0_1(_) => {}
-        agave_geyser_plugin_interface::geyser_plugin_interface::ReplicaTransactionInfoVersions::V0_0_2(_) => {}
-        agave_geyser_plugin_interface::geyser_plugin_interface::ReplicaTransactionInfoVersions::V0_0_3(_) => {}
+        agave_geyser_plugin_interface::geyser_plugin_interface::ReplicaTransactionInfoVersions::V0_0_4(_) => {}
     }
+}
+
+#[allow(dead_code, invalid_value)]
+fn check_replica_transaction_info_v4() {
+    let info: agave_geyser_plugin_interface::geyser_plugin_interface::ReplicaTransactionInfoV4 =
+        unsafe { std::mem::zeroed() };
+
+    let agave_geyser_plugin_interface::geyser_plugin_interface::ReplicaTransactionInfoV4 {
+        signature: _,
+        message_hash: _, // derived from the message, which the block carries
+        is_vote: _,
+        transaction: _,
+        transaction_status_meta: _,
+        index: _,
+    } = info;
 }
 
 #[allow(dead_code)]
@@ -233,17 +270,32 @@ fn check_replica_account_info_versions() {
     }
 }
 
-#[allow(dead_code)]
+#[allow(dead_code, invalid_value)]
 fn check_replica_block_info_versions() {
     let versions: agave_geyser_plugin_interface::geyser_plugin_interface::ReplicaBlockInfoVersions =
         unsafe { std::mem::zeroed() };
 
     match versions {
-        agave_geyser_plugin_interface::geyser_plugin_interface::ReplicaBlockInfoVersions::V0_0_1(_) => {}
-        agave_geyser_plugin_interface::geyser_plugin_interface::ReplicaBlockInfoVersions::V0_0_2(_) => {}
-        agave_geyser_plugin_interface::geyser_plugin_interface::ReplicaBlockInfoVersions::V0_0_3(_) => {}
-        agave_geyser_plugin_interface::geyser_plugin_interface::ReplicaBlockInfoVersions::V0_0_4(_) => {}
+        agave_geyser_plugin_interface::geyser_plugin_interface::ReplicaBlockInfoVersions::V0_0_5(_) => {}
     }
+}
+
+#[allow(dead_code, invalid_value)]
+fn check_replica_block_info_v5() {
+    let info: agave_geyser_plugin_interface::geyser_plugin_interface::ReplicaBlockInfoV5 =
+        unsafe { std::mem::zeroed() };
+
+    let agave_geyser_plugin_interface::geyser_plugin_interface::ReplicaBlockInfoV5 {
+        parent_slot: _,
+        parent_blockhash: _,
+        slot: _,
+        blockhash: _,
+        rewards: _,
+        block_time: _,
+        block_height: _,
+        executed_transaction_count: _,
+        entry_count: _, // sf.solana.type.v1.Block has no field for it
+    } = info;
 }
 
 #[allow(dead_code)]

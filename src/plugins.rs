@@ -1,6 +1,7 @@
 use agave_geyser_plugin_interface::geyser_plugin_interface::{
-    ReplicaTransactionInfoV2, ReplicaTransactionInfoV3, SlotStatus,
+    ReplicaTransactionInfoV4, SlotStatus,
 };
+use agave_geyser_plugin_interface::transaction_status_meta as geyser_meta;
 use {
     crate::{config::Config as PluginConfig, state::BlockInfo, state::State},
     agave_geyser_plugin_interface::geyser_plugin_interface::{
@@ -35,10 +36,8 @@ use crate::block_printer::BlockPrinter;
 
 use solana_hash::Hash;
 use solana_message::v0::LoadedAddresses;
-use solana_message::AccountKeys;
 use solana_pubkey::Pubkey;
 use solana_transaction::versioned::VersionedTransaction;
-use solana_transaction_context::transaction::TransactionReturnData;
 use std::fmt;
 use std::fs::OpenOptions;
 use std::str::FromStr;
@@ -504,7 +503,7 @@ impl GeyserPlugin for Plugin {
                         _parent.unwrap_or_default()
                     );
                     let mut lock_state = self.write_state("set_confirmed_slot");
-                    lock_state.set_confirmed_slot(slot, self.trace);
+                    lock_state.set_confirmed_slot_unless_sent(slot, self.trace);
                 }
             },
         }
@@ -526,18 +525,9 @@ impl GeyserPlugin for Plugin {
         }
         let _timing = NOTIFY_TRANSACTION.start();
 
-        let index;
-        let compiled_transaction = match transaction {
-            ReplicaTransactionInfoVersions::V0_0_1(_info) => {
-                unreachable!("ReplicaAccountInfoVersions::V0_0_1 is not supported")
-            }
-            ReplicaTransactionInfoVersions::V0_0_2(info) => {
-                index = info.index;
-                v2_to_confirm_transaction(&info)
-            }
-            ReplicaTransactionInfoVersions::V0_0_3(info) => {
-                index = info.index;
-                v3_to_confirm_transaction(info)
+        let (index, compiled_transaction) = match transaction {
+            ReplicaTransactionInfoVersions::V0_0_4(info) => {
+                (info.index, v4_to_confirm_transaction(info))
             }
         };
 
@@ -575,39 +565,14 @@ impl GeyserPlugin for Plugin {
         }
 
         let block_info = match block_info {
-            ReplicaBlockInfoVersions::V0_0_1(_) => {
-                panic!("V0_0_1 not supported");
-            }
-            ReplicaBlockInfoVersions::V0_0_2(blockinfo) => BlockInfo {
+            ReplicaBlockInfoVersions::V0_0_5(blockinfo) => BlockInfo {
                 block_hash: blockinfo.blockhash.to_string(),
                 parent_hash: blockinfo.parent_blockhash.to_string(),
                 parent_slot: blockinfo.parent_slot,
                 slot: blockinfo.slot,
                 height: blockinfo.block_height,
                 timestamp: convert_sol_timestamp(blockinfo.block_time.unwrap_or_default()),
-                rewards: to_block_rewards_from_vec(blockinfo.rewards),
-                transaction_count: blockinfo.executed_transaction_count,
-            },
-
-            ReplicaBlockInfoVersions::V0_0_3(blockinfo) => BlockInfo {
-                block_hash: blockinfo.blockhash.to_string(),
-                parent_hash: blockinfo.parent_blockhash.to_string(),
-                parent_slot: blockinfo.parent_slot,
-                slot: blockinfo.slot,
-                height: blockinfo.block_height,
-                timestamp: convert_sol_timestamp(blockinfo.block_time.unwrap_or_default()),
-                rewards: to_block_rewards_from_vec(blockinfo.rewards),
-                transaction_count: blockinfo.executed_transaction_count,
-            },
-
-            ReplicaBlockInfoVersions::V0_0_4(blockinfo) => BlockInfo {
-                block_hash: blockinfo.blockhash.to_string(),
-                parent_hash: blockinfo.parent_blockhash.to_string(),
-                parent_slot: blockinfo.parent_slot,
-                slot: blockinfo.slot,
-                height: blockinfo.block_height,
-                timestamp: convert_sol_timestamp(blockinfo.block_time.unwrap_or_default()),
-                rewards: to_block_rewards(&Some(blockinfo.rewards.rewards.clone())),
+                rewards: to_block_rewards_from_vec(blockinfo.rewards.rewards),
                 transaction_count: blockinfo.executed_transaction_count,
             },
         };
@@ -631,7 +596,7 @@ impl GeyserPlugin for Plugin {
     }
 }
 
-pub fn to_block_rewards_from_vec(rewards: &[solana_transaction_status::Reward]) -> Vec<Reward> {
+pub fn to_block_rewards_from_vec(rewards: &[geyser_meta::Reward]) -> Vec<Reward> {
     rewards
         .iter()
         .map(|rw| {
@@ -640,7 +605,7 @@ pub fn to_block_rewards_from_vec(rewards: &[solana_transaction_status::Reward]) 
                 c => c,
             };
             Reward {
-                pubkey: rw.pubkey.clone(),
+                pubkey: rw.pubkey.to_string(),
                 lamports: rw.lamports,
                 post_balance: rw.post_balance,
                 reward_type: to_pb_reward_type(rw.reward_type) as i32,
@@ -696,39 +661,29 @@ pub unsafe extern "C" fn _create_plugin() -> *mut dyn GeyserPlugin {
 
 // Below are just transformation functions to help with decoding different versions of the data sent to the plugin
 
-fn v2_to_confirm_transaction(tx: &'_ ReplicaTransactionInfoV2<'_>) -> ConfirmedTransaction {
-    ConfirmedTransaction {
-        transaction: Some(to_transaction(
-            tx.transaction,
-            &tx.transaction_status_meta.loaded_addresses,
-        )),
-        meta: Some(to_transaction_meta_status(tx.transaction_status_meta)),
-    }
-}
-
-fn v3_to_confirm_transaction(tx: &'_ ReplicaTransactionInfoV3<'_>) -> ConfirmedTransaction {
+fn v4_to_confirm_transaction(tx: &'_ ReplicaTransactionInfoV4<'_>) -> ConfirmedTransaction {
     ConfirmedTransaction {
         transaction: Some(versioned_to_transaction(
             tx.transaction,
-            &tx.transaction_status_meta.loaded_addresses,
+            tx.transaction_status_meta.loaded_addresses,
         )),
         meta: Some(to_transaction_meta_status(tx.transaction_status_meta)),
     }
 }
 
 fn to_transaction_meta_status(
-    status: &solana_transaction_status::TransactionStatusMeta,
+    status: &geyser_meta::TransactionStatusMeta,
 ) -> TransactionStatusMeta {
     TransactionStatusMeta {
         err: to_transaction_err(status),
         fee: status.fee,
         pre_balances: status.pre_balances.to_vec(),
         post_balances: status.post_balances.to_vec(),
-        inner_instructions: to_inner_instructions(&status.inner_instructions),
-        log_messages: to_log_messages(&status.log_messages),
-        pre_token_balances: to_token_balances(&status.pre_token_balances),
-        post_token_balances: to_token_balances(&status.post_token_balances),
-        rewards: to_rewards(&status.rewards),
+        inner_instructions: to_inner_instructions(status.inner_instructions),
+        log_messages: to_log_messages(status.log_messages),
+        pre_token_balances: to_token_balances(status.pre_token_balances),
+        post_token_balances: to_token_balances(status.post_token_balances),
+        rewards: to_rewards(status.rewards),
         loaded_writable_addresses: status
             .loaded_addresses
             .writable
@@ -748,23 +703,22 @@ fn to_transaction_meta_status(
 }
 
 fn to_token_balances(
-    balances: &Option<Vec<solana_transaction_status::TransactionTokenBalance>>,
+    balances: Option<&[geyser_meta::TransactionTokenBalance]>,
 ) -> Vec<TokenBalance> {
     balances
-        .as_ref()
-        .map(|balances_vec| {
-            balances_vec
+        .map(|balances| {
+            balances
                 .iter()
                 .map(|balance| TokenBalance {
                     account_index: balance.account_index as u32,
-                    mint: balance.mint.clone(),
-                    owner: balance.owner.clone(),
-                    program_id: balance.program_id.clone(),
+                    mint: balance.mint.to_string(),
+                    owner: balance.owner.to_string(),
+                    program_id: balance.program_id.to_string(),
                     ui_token_amount: Some(UiTokenAmount {
                         ui_amount: balance.ui_token_amount.ui_amount.unwrap_or_default(),
                         decimals: balance.ui_token_amount.decimals as u32,
-                        amount: balance.ui_token_amount.amount.clone(),
-                        ui_amount_string: balance.ui_token_amount.ui_amount_string.clone(),
+                        amount: balance.ui_token_amount.amount.to_string(),
+                        ui_amount_string: balance.ui_token_amount.ui_amount_string.to_string(),
                     }),
                 })
                 .collect()
@@ -772,16 +726,14 @@ fn to_token_balances(
         .unwrap_or_else(Vec::new)
 }
 
-fn to_log_messages(logs: &Option<Vec<String>>) -> Vec<String> {
+fn to_log_messages(logs: Option<&[&str]>) -> Vec<String> {
     match logs {
-        Some(logs) => logs.clone(),
+        Some(logs) => logs.iter().map(|log| log.to_string()).collect(),
         None => vec![],
     }
 }
 
-fn to_transaction_err(
-    status: &solana_transaction_status::TransactionStatusMeta,
-) -> Option<TransactionError> {
+fn to_transaction_err(status: &geyser_meta::TransactionStatusMeta) -> Option<TransactionError> {
     match &status.status {
         Ok(_) => None,
         Err(e) => {
@@ -793,7 +745,7 @@ fn to_transaction_err(
 }
 
 fn to_inner_instructions(
-    inner_instructions: &Option<Vec<solana_transaction_status::InnerInstructions>>,
+    inner_instructions: Option<&[geyser_meta::InnerInstructions]>,
 ) -> Vec<InnerInstructions> {
     match inner_instructions {
         None => {
@@ -818,13 +770,12 @@ fn to_inner_instructions(
     }
 }
 
-fn to_rewards(rewards: &Option<solana_transaction_status::Rewards>) -> Vec<Reward> {
+fn to_rewards(rewards: Option<&[geyser_meta::Reward]>) -> Vec<Reward> {
     rewards
-        .as_ref()
         .map(|rws| {
             rws.iter()
                 .map(|rw| Reward {
-                    pubkey: rw.pubkey.clone(),
+                    pubkey: rw.pubkey.to_string(),
                     lamports: rw.lamports,
                     post_balance: rw.post_balance,
                     reward_type: to_pb_reward_type(rw.reward_type) as i32, // SCARY
@@ -849,23 +800,13 @@ fn to_pb_reward_type(reward_type: Option<solana_transaction_status::RewardType>)
     }
 }
 
-fn to_return_data(d: &Option<TransactionReturnData>) -> Option<ReturnData> {
+fn to_return_data(d: &Option<geyser_meta::TransactionReturnData>) -> Option<ReturnData> {
     match d {
         Some(d) => Some(ReturnData {
             program_id: d.program_id.to_bytes().to_vec(),
             data: d.data.to_vec(),
         }),
         None => None,
-    }
-}
-
-fn to_transaction(
-    tx: &solana_transaction::sanitized::SanitizedTransaction,
-    loaded_addresses: &LoadedAddresses,
-) -> Transaction {
-    Transaction {
-        signatures: to_signature(tx.signatures()),
-        message: Some(to_message(tx.message(), loaded_addresses)),
     }
 }
 
@@ -981,37 +922,6 @@ fn versioned_to_account_keys(keys: &[Pubkey], loaded_addresses: &LoadedAddresses
         .collect()
 }
 
-fn to_message(
-    msg: &solana_message::SanitizedMessage,
-    loaded_addresses: &LoadedAddresses,
-) -> Message {
-    Message {
-        header: Some(to_header(msg.header())),
-        account_keys: to_account_keys(msg.account_keys(), loaded_addresses),
-        recent_blockhash: to_recent_block_hash(msg.recent_blockhash()),
-        instructions: to_compiled_instructions(msg.instructions()),
-        versioned: msg.legacy_message().is_none(),
-        version: to_message_version(msg),
-        address_table_lookups: to_address_table_lookups(msg.message_address_table_lookups()),
-        transaction_config: match msg {
-            solana_message::SanitizedMessage::V1(cached_msg) => {
-                to_transaction_config(&cached_msg.message.config)
-            }
-            _ => None,
-        },
-    }
-}
-
-/// The transaction version as it appears on the wire. A legacy message carries no version
-/// prefix and maps to `None`.
-fn to_message_version(msg: &solana_message::SanitizedMessage) -> Option<u32> {
-    match msg {
-        solana_message::SanitizedMessage::Legacy(_) => None,
-        solana_message::SanitizedMessage::V0(_) => Some(0),
-        solana_message::SanitizedMessage::V1(_) => Some(1),
-    }
-}
-
 fn to_address_table_lookups(
     addresses: &[solana_message::v0::MessageAddressTableLookup],
 ) -> Vec<MessageAddressTableLookup> {
@@ -1042,20 +952,6 @@ fn to_recent_block_hash(h: &Hash) -> Vec<u8> {
     h.as_ref().to_vec()
 }
 
-fn to_account_keys(keys: AccountKeys, loaded_addresses: &LoadedAddresses) -> Vec<Vec<u8>> {
-    // Create a HashSet of all loaded addresses (address lookup table)
-    let lookup_keys: std::collections::HashSet<_> = loaded_addresses
-        .writable
-        .iter()
-        .chain(loaded_addresses.readonly.iter())
-        .collect();
-
-    // Filter and convert account keys
-    keys.iter()
-        .filter(|key| !lookup_keys.contains(key))
-        .map(|key| key.to_bytes().to_vec())
-        .collect()
-}
 fn to_header(h: &solana_message::MessageHeader) -> MessageHeader {
     MessageHeader {
         num_required_signatures: h.num_required_signatures as u32,

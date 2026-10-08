@@ -6,14 +6,17 @@
 //! `THROUGHPUT_SLOTS` overrides the number of slots sent after startup.
 
 use agave_geyser_plugin_interface::geyser_plugin_interface::{
-    GeyserPlugin, ReplicaAccountInfoV3, ReplicaAccountInfoVersions, ReplicaBlockInfoV4,
-    ReplicaBlockInfoVersions, ReplicaTransactionInfoV3, ReplicaTransactionInfoVersions, SlotStatus,
+    GeyserPlugin, ReplicaAccountInfoV3, ReplicaAccountInfoVersions, ReplicaBlockInfoV5,
+    ReplicaBlockInfoVersions, ReplicaTransactionInfoV4, ReplicaTransactionInfoVersions, SlotStatus,
+};
+use agave_geyser_plugin_interface::transaction_status_meta::{
+    RewardsAndNumPartitions, TransactionStatusMeta,
 };
 use firehose_geyser_plugin::plugins::Plugin;
 use solana_hash::Hash;
+use solana_message::v0::LoadedAddresses;
 use solana_signature::Signature;
 use solana_transaction::versioned::VersionedTransaction;
-use solana_transaction_status::{RewardsAndNumPartitions, TransactionStatusMeta};
 use std::io::Write;
 use std::time::{Duration, Instant};
 use tempfile::NamedTempFile;
@@ -193,13 +196,28 @@ fn test_throughput() {
         .unwrap();
 
     let rewards = RewardsAndNumPartitions {
-        rewards: vec![],
+        rewards: &[],
         num_partitions: None,
     };
     let signature = Signature::default();
     let message_hash = Hash::default();
     let transaction = VersionedTransaction::default();
-    let meta = TransactionStatusMeta::default();
+    let loaded_addresses = LoadedAddresses::default();
+    let meta = TransactionStatusMeta {
+        status: Ok(()),
+        fee: 0,
+        pre_balances: &[],
+        post_balances: &[],
+        inner_instructions: None,
+        log_messages: None,
+        pre_token_balances: None,
+        post_token_balances: None,
+        rewards: None,
+        loaded_addresses: &loaded_addresses,
+        return_data: None,
+        compute_units_consumed: None,
+        cost_units: None,
+    };
 
     let slots = std::env::var("THROUGHPUT_SLOTS")
         .map(|slots| slots.parse().expect("THROUGHPUT_SLOTS is a number"))
@@ -226,7 +244,7 @@ fn test_throughput() {
                     let mut next_transaction = 0;
                     for n in 0..UPDATES_PER_THREAD_PER_SLOT {
                         while next_transaction * UPDATES_PER_THREAD_PER_SLOT < n * transactions {
-                            let info = ReplicaTransactionInfoV3 {
+                            let info = ReplicaTransactionInfoV4 {
                                 signature,
                                 message_hash,
                                 is_vote: false,
@@ -236,7 +254,7 @@ fn test_throughput() {
                             };
                             plugin
                                 .notify_transaction_for_bank(
-                                    ReplicaTransactionInfoVersions::V0_0_3(&info),
+                                    ReplicaTransactionInfoVersions::V0_0_4(&info),
                                     slot,
                                     0,
                                 )
@@ -274,7 +292,7 @@ fn test_throughput() {
         let block_started = Instant::now();
         let blockhash = format!("hash{}", slot);
         let parent_blockhash = format!("hash{}", slot - 1);
-        let block_info = ReplicaBlockInfoV4 {
+        let block_info = ReplicaBlockInfoV5 {
             parent_slot: slot - 1,
             parent_blockhash: &parent_blockhash,
             slot,
@@ -286,7 +304,7 @@ fn test_throughput() {
             entry_count: 1,
         };
         plugin
-            .notify_block_metadata_for_bank(ReplicaBlockInfoVersions::V0_0_4(&block_info), 0)
+            .notify_block_metadata_for_bank(ReplicaBlockInfoVersions::V0_0_5(&block_info), 0)
             .unwrap();
         plugin
             .update_bank_status(slot - 32, None, &SlotStatus::Rooted, 0)
