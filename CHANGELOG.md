@@ -5,11 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v4.4.0-beta.0-fh3.0-1
 
-### Fixed
-
-* Block and account block FIFO writes could land out of order: each slot was encoded on its own thread, and a smaller/faster slot could reach the FIFO before an earlier, larger one. This hit about 7.5% of account blocks on a devnet node, almost all at the last slot of a 4-slot leader window, and made firehose-core's relayer restart with `cannot link block after reconnection`. Each output (block, account block) now has a single writer thread that drains jobs in the order `print` was called, so writes stay in slot order while encoding stays parallel. The cursor file also now advances only once both outputs have reported a slot, instead of relying on two calls happening to carry the same value.
+* Fixed block and account block FIFO writes landing out of order: each slot was encoded on its own thread, and a smaller/faster slot could reach the FIFO before an earlier, larger one. This hit about 7.5% of account blocks on a devnet node, almost all at the last slot of a 4-slot leader window, and made firehose-core's relayer restart with `cannot link block after reconnection`. Each output (block, account block) now has a single writer thread that drains jobs in the order `print` was called, so writes stay in slot order while encoding stays parallel.
+* The cursor file now holds the last slot both outputs have written, so it never moves past a slot one of them has not written yet.
+* A panic while encoding a block now stops the plugin at the next slot notification, like a failed FIFO write does. That block used to be skipped silently.
+* Validated against the `solana-battlefield` test suite (run locally against an Agave 4.4.0-beta.0 `solana-test-validator` built from upstream with the fork's patch), on top of the workspace unit tests.
 
 ## v4.4.0-beta.0-fh3.0
 
