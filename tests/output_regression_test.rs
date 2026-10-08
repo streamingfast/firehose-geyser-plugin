@@ -3,14 +3,17 @@
 //! change what gets written.
 
 use agave_geyser_plugin_interface::geyser_plugin_interface::{
-    GeyserPlugin, ReplicaAccountInfoV3, ReplicaAccountInfoVersions, ReplicaBlockInfoV4,
-    ReplicaBlockInfoVersions, ReplicaTransactionInfoV3, ReplicaTransactionInfoVersions, SlotStatus,
+    GeyserPlugin, ReplicaAccountInfoV3, ReplicaAccountInfoVersions, ReplicaBlockInfoV5,
+    ReplicaBlockInfoVersions, ReplicaTransactionInfoV4, ReplicaTransactionInfoVersions, SlotStatus,
+};
+use agave_geyser_plugin_interface::transaction_status_meta::{
+    RewardsAndNumPartitions, TransactionStatusMeta,
 };
 use firehose_geyser_plugin::plugins::Plugin;
 use solana_hash::Hash;
+use solana_message::v0::LoadedAddresses;
 use solana_signature::Signature;
 use solana_transaction::versioned::VersionedTransaction;
-use solana_transaction_status::{RewardsAndNumPartitions, TransactionStatusMeta};
 use std::io::Write;
 use std::time::{Duration, Instant};
 use tempfile::NamedTempFile;
@@ -190,13 +193,28 @@ fn run_workload(update_threads: usize, unique_write_versions: bool) -> (usize, u
         .unwrap();
 
     let rewards = RewardsAndNumPartitions {
-        rewards: vec![],
+        rewards: &[],
         num_partitions: None,
     };
     let signature = Signature::default();
     let message_hash = Hash::default();
     let transaction = VersionedTransaction::default();
-    let meta = TransactionStatusMeta::default();
+    let loaded_addresses = LoadedAddresses::default();
+    let meta = TransactionStatusMeta {
+        status: Ok(()),
+        fee: 0,
+        pre_balances: &[],
+        post_balances: &[],
+        inner_instructions: None,
+        log_messages: None,
+        pre_token_balances: None,
+        post_token_balances: None,
+        rewards: None,
+        loaded_addresses: &loaded_addresses,
+        return_data: None,
+        compute_units_consumed: None,
+        cost_units: None,
+    };
 
     let mut write_version = 1_000u64;
     let mut parent = FIRST_SLOT - 1;
@@ -258,7 +276,7 @@ fn run_workload(update_threads: usize, unique_write_versions: bool) -> (usize, u
                     (&signature, &message_hash, &transaction, &meta);
                 scope.spawn(move || {
                     for index in (0..transaction_count).skip(thread).step_by(update_threads) {
-                        let info = ReplicaTransactionInfoV3 {
+                        let info = ReplicaTransactionInfoV4 {
                             signature,
                             message_hash,
                             is_vote: false,
@@ -268,7 +286,7 @@ fn run_workload(update_threads: usize, unique_write_versions: bool) -> (usize, u
                         };
                         plugin
                             .notify_transaction_for_bank(
-                                ReplicaTransactionInfoVersions::V0_0_3(&info),
+                                ReplicaTransactionInfoVersions::V0_0_4(&info),
                                 slot,
                                 0,
                             )
@@ -284,7 +302,7 @@ fn run_workload(update_threads: usize, unique_write_versions: bool) -> (usize, u
 
         let blockhash = format!("hash{}", slot);
         let parent_blockhash = format!("hash{}", parent);
-        let block_info = ReplicaBlockInfoV4 {
+        let block_info = ReplicaBlockInfoV5 {
             parent_slot: parent,
             parent_blockhash: &parent_blockhash,
             slot,
@@ -296,7 +314,7 @@ fn run_workload(update_threads: usize, unique_write_versions: bool) -> (usize, u
             entry_count: 1,
         };
         plugin
-            .notify_block_metadata_for_bank(ReplicaBlockInfoVersions::V0_0_4(&block_info), 0)
+            .notify_block_metadata_for_bank(ReplicaBlockInfoVersions::V0_0_5(&block_info), 0)
             .unwrap();
         plugin
             .update_bank_status(slot - 32, None, &SlotStatus::Rooted, 0)
