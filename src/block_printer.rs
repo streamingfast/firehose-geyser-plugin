@@ -1,15 +1,55 @@
 use crate::pb::sf::solana::r#type::v1::{AccountBlock, Block};
-use crate::state::{BlockInfo, ACC_MUTEX, BLOCK_MUTEX, CURSOR_MUTEX};
+use crate::state::{BlockInfo, ACC_MUTEX, BLOCK_MUTEX};
 use crate::stats::{PENDING_ACCOUNT_BLOCK_WRITES, PENDING_BLOCK_WRITES, PENDING_WRITE_BYTES};
 use base64::Engine;
-use log::{debug, error, info, warn};
+use log::{debug, error, info};
 use prost::Message;
+use std::any::Any;
 use std::fs::File;
 use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Mutex;
+use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::Instant;
+
+#[derive(Clone, Copy)]
+enum Output {
+    Block,
+    AccountBlock,
+}
+
+impl Output {
+    fn label(self) -> &'static str {
+        match self {
+            Output::Block => "block",
+            Output::AccountBlock => "account_block",
+        }
+    }
+
+    fn mutex(self) -> &'static Mutex<()> {
+        match self {
+            Output::Block => &BLOCK_MUTEX,
+            Output::AccountBlock => &ACC_MUTEX,
+        }
+    }
+
+    fn pending(self) -> &'static AtomicUsize {
+        match self {
+            Output::Block => &PENDING_BLOCK_WRITES,
+            Output::AccountBlock => &PENDING_ACCOUNT_BLOCK_WRITES,
+        }
+    }
+}
+
+/// The last slot each output has written. Each output writes in slot order, so every slot up
+/// to the lower of the two is written to both, and `write_cursor` persists that lower value.
+#[derive(Default)]
+struct CursorState {
+    block: u64,
+    account: u64,
+    persisted: u64,
+}
 
 /// One formatted FIFO line, produced by a per-slot encoding thread and consumed by its
 /// output's writer thread once this job reaches the front of the queue.
@@ -25,36 +65,32 @@ struct EncodedLine {
 /// parallel, but the writer only picks up a job's line once it is that job's turn, so a
 /// faster-encoding later slot can never reach the FIFO ahead of an earlier one.
 struct OutputWriter {
-    jobs_tx: Sender<Receiver<EncodedLine>>,
+    output: Output,
+    jobs_tx: Sender<JoinHandle<EncodedLine>>,
 }
 
 impl OutputWriter {
-    fn spawn(
-        mut file: File,
-        mutex: &'static Mutex<()>,
-        label: &'static str,
-        pending: &'static AtomicUsize,
-    ) -> Self {
-        let (jobs_tx, jobs_rx) = mpsc::channel::<Receiver<EncodedLine>>();
+    fn spawn(mut file: File, output: Output, cursor: Arc<Mutex<CursorState>>) -> Self {
+        let label = output.label();
+        let (jobs_tx, jobs_rx) = mpsc::channel::<JoinHandle<EncodedLine>>();
 
         std::thread::spawn(move || {
             for job in jobs_rx {
-                let encoded = match job.recv() {
-                    Ok(encoded) => encoded,
-                    Err(_) => {
-                        error!("{} encoding thread dropped without a result", label);
-                        panic!("{} encoding thread dropped without a result", label);
-                    }
-                };
-
-                let _lock = match mutex.lock() {
+                // Held while waiting on the encoding thread too, so a panic there poisons the
+                // mutex, which update_slot_status and process_upto check.
+                let _lock = match output.mutex().lock() {
                     Ok(lock) => lock,
                     Err(e) => {
-                        error!(
-                            "{}_mutex poisoned while writing slot {}: {}",
-                            label, encoded.slot, e
-                        );
-                        panic!("{}_mutex lock poisoned while writing slot {}", label, encoded.slot);
+                        error!("{}_mutex poisoned: {}", label, e);
+                        panic!("{}_mutex lock poisoned", label);
+                    }
+                };
+                let encoded = match job.join() {
+                    Ok(encoded) => encoded,
+                    Err(cause) => {
+                        let cause = panic_message(cause.as_ref());
+                        error!("{} encoding thread panicked: {}", label, cause);
+                        panic!("{} encoding thread panicked: {}", label, cause);
                     }
                 };
                 if let Err(e) = writeln!(file, "{}", encoded.line) {
@@ -73,21 +109,48 @@ impl OutputWriter {
                 drop(_lock);
 
                 PENDING_WRITE_BYTES.fetch_sub(encoded.payload_len, Ordering::Relaxed);
-                pending.fetch_sub(1, Ordering::Relaxed);
+                output.pending().fetch_sub(1, Ordering::Relaxed);
                 info!("block_printer: wrote {} {} to fifo", label, encoded.slot);
-                write_cursor(&encoded.cursor_path, encoded.slot);
+                write_cursor(&cursor, &encoded.cursor_path, output, encoded.slot);
             }
         });
 
-        OutputWriter { jobs_tx }
+        OutputWriter { output, jobs_tx }
     }
 
-    /// Reserves this job's place in the write order before encoding has even started.
-    fn enqueue(&self, result_rx: Receiver<EncodedLine>) -> std::io::Result<()> {
-        self.jobs_tx
-            .send(result_rx)
-            .map_err(|_| std::io::Error::other("fifo writer thread is no longer running"))
+    /// Queues an encoding thread's result to be written after every job enqueued before it.
+    fn enqueue(&self, job: JoinHandle<EncodedLine>) -> std::io::Result<()> {
+        let pending = self.output.pending();
+        pending.fetch_add(1, Ordering::Relaxed);
+        self.jobs_tx.send(job).map_err(|_| {
+            pending.fetch_sub(1, Ordering::Relaxed);
+            std::io::Error::other("fifo writer thread is no longer running")
+        })
     }
+}
+
+fn panic_message(cause: &(dyn Any + Send)) -> &str {
+    if let Some(s) = cause.downcast_ref::<&str>() {
+        s
+    } else if let Some(s) = cause.downcast_ref::<String>() {
+        s
+    } else {
+        "unknown panic"
+    }
+}
+
+/// Encodes `message` as base64 directly after `header`, in a single allocation sized for the
+/// full line. Returns the line, the protobuf size and the base64 payload size.
+fn encode_line(header: String, message: impl Message) -> (String, usize, usize) {
+    let encoded = message.encode_to_vec();
+    drop(message);
+
+    let header_len = header.len();
+    let mut line = header;
+    line.reserve_exact(base64::encoded_len(encoded.len(), true).unwrap_or(0));
+    base64::engine::general_purpose::STANDARD.encode_string(&encoded, &mut line);
+    let payload_len = line.len() - header_len;
+    (line, encoded.len(), payload_len)
 }
 
 pub struct BlockPrinter {
@@ -96,24 +159,14 @@ pub struct BlockPrinter {
     out_account: Option<File>,
     block_writer: Option<OutputWriter>,
     account_writer: Option<OutputWriter>,
+    cursor: Arc<Mutex<CursorState>>,
 }
 
 impl BlockPrinter {
     pub fn new(out_block: Option<File>, out_account: Option<File>, noop: bool) -> Self {
-        let block_writer = Self::spawn_writer(
-            noop,
-            &out_block,
-            &BLOCK_MUTEX,
-            "block",
-            &PENDING_BLOCK_WRITES,
-        );
-        let account_writer = Self::spawn_writer(
-            noop,
-            &out_account,
-            &ACC_MUTEX,
-            "account_block",
-            &PENDING_ACCOUNT_BLOCK_WRITES,
-        );
+        let cursor = Arc::new(Mutex::new(CursorState::default()));
+        let block_writer = Self::spawn_writer(noop, &out_block, Output::Block, &cursor);
+        let account_writer = Self::spawn_writer(noop, &out_account, Output::AccountBlock, &cursor);
 
         BlockPrinter {
             noop,
@@ -121,24 +174,28 @@ impl BlockPrinter {
             out_account,
             block_writer,
             account_writer,
+            cursor,
         }
     }
 
     fn spawn_writer(
         noop: bool,
         out: &Option<File>,
-        mutex: &'static Mutex<()>,
-        label: &'static str,
-        pending: &'static AtomicUsize,
+        output: Output,
+        cursor: &Arc<Mutex<CursorState>>,
     ) -> Option<OutputWriter> {
         if noop {
             return None;
         }
         let file = out.as_ref()?;
         match file.try_clone() {
-            Ok(clone) => Some(OutputWriter::spawn(clone, mutex, label, pending)),
+            Ok(clone) => Some(OutputWriter::spawn(clone, output, cursor.clone())),
             Err(e) => {
-                error!("cannot clone out_{} for writer thread: {}", label, e);
+                error!(
+                    "cannot clone out_{} for writer thread: {}",
+                    output.label(),
+                    e
+                );
                 None
             }
         }
@@ -186,6 +243,10 @@ impl BlockPrinter {
         let noop = self.noop;
         let account_count = account_block.accounts.len();
         let tx_count = block.transactions.len();
+        let header = format!(
+            "FIRE BLOCK {slot} {} {parent_slot} {} {lib} {timestamp_nano} ",
+            block_info.block_hash, block_info.parent_hash
+        );
 
         info!(
             "block_printer: schedule slot {} (txs={}, accounts={}, noop={}, has_block_out={}, has_account_out={})",
@@ -198,144 +259,105 @@ impl BlockPrinter {
         );
 
         if self.out_block.is_none() {
-            write_cursor(cursor_path, slot); // must still be called twice
+            write_cursor(&self.cursor, cursor_path, Output::Block, slot);
         } else if noop {
             info!("printing block {} (noop mode)", slot);
-            write_cursor(cursor_path, slot);
+            write_cursor(&self.cursor, cursor_path, Output::Block, slot);
         } else {
             let writer = self.block_writer.as_ref().ok_or_else(|| {
                 std::io::Error::other(format!("out_block writer unavailable for slot {}", slot))
             })?;
             let block_hash = block_info.block_hash.clone();
-            let parent_hash = block_info.parent_hash.clone();
+            let header = header.clone();
             let cursor_path = cursor_path.to_string();
 
-            let (result_tx, result_rx) = mpsc::channel();
-            writer.enqueue(result_rx)?;
-            PENDING_BLOCK_WRITES.fetch_add(1, Ordering::Relaxed);
-
-            std::thread::spawn(move || {
+            writer.enqueue(std::thread::spawn(move || {
                 let started = Instant::now();
                 info!(
                     "printing block {} {} with transaction count of {} (encode starting)",
-                    block.slot,
-                    block_hash,
-                    block.transactions.len()
+                    slot, block_hash, tx_count
                 );
-                let encoded_block = block.encode_to_vec();
-                let encoded_len = encoded_block.len();
-                let payload = base64::engine::general_purpose::STANDARD.encode(&encoded_block);
-                PENDING_WRITE_BYTES.fetch_add(payload.len(), Ordering::Relaxed);
+                let (line, encoded_len, payload_len) = encode_line(header, block);
+                PENDING_WRITE_BYTES.fetch_add(payload_len, Ordering::Relaxed);
                 info!(
                     "block_printer: encoded block {} (protobuf_bytes={}, base64_bytes={}) in {:?}",
                     slot,
                     encoded_len,
-                    payload.len(),
+                    payload_len,
                     started.elapsed()
                 );
-
-                let line = format!(
-                    "FIRE BLOCK {slot} {block_hash} {parent_slot} {parent_hash} {lib} {timestamp_nano} {payload}"
-                );
-                let _ = result_tx.send(EncodedLine {
+                EncodedLine {
                     slot,
                     line,
-                    payload_len: payload.len(),
+                    payload_len,
                     cursor_path,
-                });
-            });
+                }
+            }))?;
         }
 
         if self.out_account.is_none() {
-            write_cursor(cursor_path, slot); // must still be called twice
+            write_cursor(&self.cursor, cursor_path, Output::AccountBlock, slot);
         } else if noop {
             info!("printing account_block {} (noop mode)", slot);
-            write_cursor(cursor_path, slot);
+            write_cursor(&self.cursor, cursor_path, Output::AccountBlock, slot);
         } else {
             let writer = self.account_writer.as_ref().ok_or_else(|| {
-                std::io::Error::other(format!(
-                    "out_account writer unavailable for slot {}",
-                    slot
-                ))
+                std::io::Error::other(format!("out_account writer unavailable for slot {}", slot))
             })?;
-            let block_hash = block_info.block_hash.clone();
-            let parent_hash = block_info.parent_hash.clone();
             let cursor_path = cursor_path.to_string();
 
-            let (result_tx, result_rx) = mpsc::channel();
-            writer.enqueue(result_rx)?;
-            PENDING_ACCOUNT_BLOCK_WRITES.fetch_add(1, Ordering::Relaxed);
-
-            std::thread::spawn(move || {
+            writer.enqueue(std::thread::spawn(move || {
                 let started = Instant::now();
                 info!(
                     "block_printer: encoding account_block {} (accounts={})",
                     slot, account_count
                 );
-                let encoded_account_block = account_block.encode_to_vec();
-                let encoded_len = encoded_account_block.len();
-                let payload =
-                    base64::engine::general_purpose::STANDARD.encode(&encoded_account_block);
-                PENDING_WRITE_BYTES.fetch_add(payload.len(), Ordering::Relaxed);
+                let (line, encoded_len, payload_len) = encode_line(header, account_block);
+                PENDING_WRITE_BYTES.fetch_add(payload_len, Ordering::Relaxed);
                 info!(
                     "block_printer: encoded account_block {} (protobuf_bytes={}, base64_bytes={}) in {:?}",
                     slot,
                     encoded_len,
-                    payload.len(),
+                    payload_len,
                     started.elapsed()
                 );
-
-                let line = format!(
-                    "FIRE BLOCK {slot} {block_hash} {parent_slot} {parent_hash} {lib} {timestamp_nano} {payload}"
-                );
-                let _ = result_tx.send(EncodedLine {
+                EncodedLine {
                     slot,
                     line,
-                    payload_len: payload.len(),
+                    payload_len,
                     cursor_path,
-                });
-            });
+                }
+            }))?;
         }
 
         // We are not waiting for the threads to finish, so that the plugin can be called again for the updates.
         // Each output has one writer thread that drains jobs in the order `print` enqueued them, so encoding
-        // stays parallel per slot while writes stay in call order. The write mutex only remains to let
-        // process_upto detect a write failure (lock poisoned -> error) the way it already does.
-        // The cursor only advances once both outputs have reported the same slot (see `write_cursor`).
+        // stays parallel per slot while writes stay in call order. A failed encode or write poisons the
+        // output's mutex, which process_upto checks.
         Ok(())
     }
 }
 
-// write_cursor is called once per output (block, account block) for a given slot. It persists
-// the slot to the cursor file only once both outputs have reported it, so the cursor never
-// advances past a slot that one of the two streams hasn't actually written yet.
-fn write_cursor(cursor_file: &str, cursor: u64) {
-    let mut state = match CURSOR_MUTEX.lock() {
+/// Records that `output` has written `slot`, then persists the highest slot both outputs have
+/// written, so the cursor never advances past a slot one of the two streams hasn't written yet.
+fn write_cursor(state: &Mutex<CursorState>, cursor_file: &str, output: Output, slot: u64) {
+    let mut state = match state.lock() {
         Ok(lock) => lock,
         Err(e) => {
-            error!(
-                "cursor_mutex poisoned while writing cursor {}: {}",
-                cursor, e
-            );
-            panic!("cursor_mutex lock poisoned while writing cursor {}", cursor);
+            error!("cursor_mutex poisoned while writing cursor {}: {}", slot, e);
+            panic!("cursor_mutex lock poisoned while writing cursor {}", slot);
         }
     };
 
-    let reports = state.pending.entry(cursor).or_insert(0);
-    *reports += 1;
-    if *reports < 2 {
+    match output {
+        Output::Block => state.block = state.block.max(slot),
+        Output::AccountBlock => state.account = state.account.max(slot),
+    }
+    let cursor = state.block.min(state.account);
+    if cursor <= state.persisted {
         return;
     }
-    state.pending.remove(&cursor);
-
-    if cursor <= state.last {
-        warn!(
-            "write_cursor: ignoring stale cursor {} (last={})",
-            cursor, state.last
-        );
-        return;
-    }
-    state.last = cursor;
+    state.persisted = cursor;
     if let Err(e) = std::fs::write(cursor_file, cursor.to_string()) {
         error!("cannot write cursor {} to {}: {}", cursor, cursor_file, e);
         panic!("cannot write cursor {} to {}: {}", cursor, cursor_file, e);
@@ -352,10 +374,9 @@ mod tests {
     use std::time::{Duration, Instant};
     use tempfile::NamedTempFile;
 
-    /// Reproduces the production bug: `print` is called for a parent slot with a large,
-    /// slow-to-encode account block, immediately followed by a child slot with a tiny one.
-    /// Before the fix, the child's writer thread finishes encoding first and reaches the
-    /// FIFO before the parent's, flipping the order firehose-core relies on.
+    /// `print` is called for a parent slot with a large, slow-to-encode account block,
+    /// immediately followed by a child slot with a tiny one. The child finishes encoding
+    /// first, but the parent must still reach the FIFO first: firehose-core relies on that order.
     #[test]
     fn test_account_blocks_are_written_in_call_order_even_when_child_encodes_faster() {
         let account_fifo = NamedTempFile::new().unwrap();
@@ -457,45 +478,67 @@ mod tests {
     fn test_write_cursor() {
         let temp_file = NamedTempFile::new().unwrap();
         let path = temp_file.path().to_str().unwrap().to_string();
+        let state = Mutex::new(CursorState::default());
+        let read = || std::fs::read_to_string(&path).unwrap_or_default();
 
-        // Use large, test-unique slot numbers: CURSOR_MUTEX is a process-wide global shared
-        // with every other test that calls write_cursor, so small numbers risk colliding.
-        let s1: u64 = 920_000_000_001;
-        let s2: u64 = 920_000_000_002;
-        let s3: u64 = 920_000_000_003;
+        // Only the block output has written slot 1: nothing persists yet.
+        write_cursor(&state, &path, Output::Block, 1);
+        assert_eq!(read(), "");
 
-        // Only the block output has reported slot s1: the account output hasn't, so nothing
-        // persists yet.
-        write_cursor(&path, s1);
-        let content = std::fs::read_to_string(&path).unwrap_or_default();
-        assert_eq!(content, "");
+        // The account output writes slot 1 too: cursor advances.
+        write_cursor(&state, &path, Output::AccountBlock, 1);
+        assert_eq!(read(), "1");
 
-        // The account output reports s1 too: both outputs are done, cursor advances.
-        write_cursor(&path, s1);
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(content, s1.to_string());
+        // The block output races ahead through 2 and 3 before the account output catches up.
+        write_cursor(&state, &path, Output::Block, 2);
+        write_cursor(&state, &path, Output::Block, 3);
+        assert_eq!(read(), "1");
 
-        // The block output races ahead through s2 and s3 before the account output catches up.
-        write_cursor(&path, s2);
-        write_cursor(&path, s3);
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(content, s1.to_string(), "s2 and s3 only have one report each so far");
+        // The account output catches up on 2: cursor advances to 2, not straight to 3.
+        write_cursor(&state, &path, Output::AccountBlock, 2);
+        assert_eq!(read(), "2");
 
-        // The account output catches up on s2: cursor advances to s2, not straight to s3.
-        write_cursor(&path, s2);
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(content, s2.to_string());
+        // The account output finishes 3: cursor advances to 3.
+        write_cursor(&state, &path, Output::AccountBlock, 3);
+        assert_eq!(read(), "3");
 
-        // The account output finishes s3: cursor advances to s3.
-        write_cursor(&path, s3);
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(content, s3.to_string());
+        // A late report for an older slot does not move the cursor back.
+        write_cursor(&state, &path, Output::Block, 2);
+        write_cursor(&state, &path, Output::AccountBlock, 2);
+        assert_eq!(read(), "3");
+    }
 
-        // A stale, already-passed slot reported twice (e.g. a late straggler) is ignored
-        // rather than regressing the cursor file.
-        write_cursor(&path, s2);
-        write_cursor(&path, s2);
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(content, s3.to_string());
+    #[test]
+    fn test_write_cursor_waits_for_both_outputs_when_one_reports_a_slot_twice() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let path = temp_file.path().to_str().unwrap().to_string();
+        let state = Mutex::new(CursorState::default());
+
+        write_cursor(&state, &path, Output::Block, 5);
+        write_cursor(&state, &path, Output::Block, 5);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+
+        write_cursor(&state, &path, Output::AccountBlock, 5);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "5");
+    }
+
+    #[test]
+    fn test_encode_line_matches_header_plus_base64() {
+        let block = Block {
+            slot: 42,
+            ..Default::default()
+        };
+        let expected_payload =
+            base64::engine::general_purpose::STANDARD.encode(block.encode_to_vec());
+
+        let (line, encoded_len, payload_len) =
+            encode_line("FIRE BLOCK 42 h 41 p 40 0 ".to_string(), block.clone());
+
+        assert_eq!(
+            line,
+            format!("FIRE BLOCK 42 h 41 p 40 0 {expected_payload}")
+        );
+        assert_eq!(encoded_len, block.encode_to_vec().len());
+        assert_eq!(payload_len, expected_payload.len());
     }
 }
