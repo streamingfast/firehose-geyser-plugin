@@ -2,8 +2,8 @@
 
 Every feature Agave defines, with its status on the clusters we serve and its effect on the Firehose block. Statuses are the activation slot, `not activated`, or `pending` (activation requested, takes effect at the next epoch).
 
-* Agave version: `v4.4.0-beta.0`
-* Statuses checked: 2026-10-08, on `api.mainnet-beta.solana.com` and `api.testnet.solana.com`
+* Agave version: `v4.4.0-beta.1`
+* Statuses checked: 2026-10-14, on `api.mainnet-beta.solana.com` and `api.testnet.solana.com`
 
 Effects:
 
@@ -29,7 +29,7 @@ On each bump, add the features that are new in the target version, review the on
 |---|---|---|---|---|---|
 | `alpenglow` | `A1pengvuM6JEcyNuTnMqepBKhwHE3N6PmUrdATGawhJS` | not activated | 444620256 | shape | Block time comes from the Alpenglow footer instead of PoH clock (runtime/src/bank.rs:2136-2143); the block footer is only delivered through notify_block_footer, with no model field; votes move to BLS certificates; vote rewards and VAT burn become account writes (bank.rs:2822). |
 | `alpenglow_fast_leader_handover` | `FastLeaderHandover11111111111111111111111111` | not activated | not activated | shape | UpdateParent markers let a slot's parent change after replay started and replay restart from a later FEC set (ledger/src/blockstore_processor.rs:1409,2051; core/src/replay_stage/update_parent.rs:152); transactions from the cleared bank reach the plugin, which keys by slot and ignores bank_id. Feature ID has no private key yet. |
-| `block_revenue_sharing` | `7MYx95UBiJufqnumyN7HfskJ9vKdcGMmhreVguqrE97K` | not activated | not activated | shape | Block fees split into up to two RewardType::Fee rewards, to the commission collector and the vote account, with commission_bps None (runtime/src/bank/fee_distribution.rs:183-240); a Fee reward can go to an address other than the leader. The model can carry it, consumers assuming one Fee reward to the leader cannot. |
+| `block_revenue_sharing` | `Crbnc267wkJvFhYakqwWWX57sx5bkrftJLekzy6yWKLT` | not activated | not activated | shape | Block fees split into up to two RewardType::Fee rewards, to the commission collector and the vote account, with commission_bps None (runtime/src/bank/fee_distribution.rs:183-240); a Fee reward can go to an address other than the leader. The model can carry it, consumers assuming one Fee reward to the leader cannot. |
 | `commission_rate_in_basis_points` | `Eg7tXEwMZzS98xaZ1YHUbdRHsaYZiCsSaR6sKgxreoaj` | 433296000 | 416540256 | shape | geyser-plugin-manager/src/block_metadata_notifier.rs:105-114 sends Reward.commission = None and the value in commission_bps; sf.solana.type.v1.Reward has only commission, so it is empty for every Voting and Staking reward. |
 | `custom_commission_collector` | `3HcSrCTGXTUnrTueHi4DAwNuMxZSsm5xui2Ax3mgxHqf` | 445392000 | 435116256 | shape | Voting and Staking rewards carry neither commission nor commission_bps ((!custom_commission_collector).then_some(..) in runtime/src/bank/partitioned_epoch_rewards/calculation.rs:715,785,796), so the commission rate is not in the block even with a commission_bps field; commission is paid to the vote account's collector (calculation.rs:787, fee_distribution.rs:157), which may not be the vote account. |
 | `relax_fee_payer_constraint` | `FEEXbxUuKobtrt1qNK5pjtzbPQhsppBTrNNG74xu4mai` | not activated | not activated | shape | Replay commits transactions whose fee payer is invalid or unfunded (svm/src/transaction_processor.rs:808-830, runtime/src/bank.rs:4739): status Err, fee 0, no logs, no inner instructions, and the fee payer account may not exist. Such transactions used to make the block invalid; they now appear in blocks. They are counted in executed_transaction_count (runtime/src/bank.rs:4327, was_processed) and sent to Geyser like other committed transactions (rpc/src/transaction_status_service.rs:168), so the plugin's transaction count check still completes the block. |
