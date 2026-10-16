@@ -82,7 +82,7 @@ fn check_reward() {
         post_balance: _,
         reward_type: _,
         commission: _,
-        commission_bps: _,
+        commission_bps: _, // sf.solana.type.v1.Reward has no field for it
     } = reward;
 }
 

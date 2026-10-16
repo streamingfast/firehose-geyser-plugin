@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v4.3.2-fh3.0
+
+* Bumped to [Agave 4.3.2](https://github.com/anza-xyz/agave/releases/tag/v4.3.2) (`agave-geyser-plugin-interface`, `solana-rpc-client`, `solana-rpc-client-api`, `solana-transaction-status`, `solana-transaction-context`). The Docker image's Solana validator is now `v4.3.2-fh3.0` (was `v4.3.0-fh3.0`). The 23 upstream commits since `v4.3.0` do not touch the Geyser plugin interface, the transaction status types, the RPC client crates or the feature set, so no plugin code change was required. The `Cargo.lock` change is limited to the 34 Agave-versioned crates; `solana-vote-program` now also depends on `wincode` `0.6.1`, already in the lock at the version the validator uses.
+* Fixed block and account block FIFO writes landing out of order: each slot was encoded on its own thread, and a smaller/faster slot could reach the FIFO before an earlier, larger one. This hit about 7.5% of account blocks on a devnet node, almost all at the last slot of a 4-slot leader window, and made firehose-core's relayer restart with `cannot link block after reconnection`. Each output (block, account block) now has a single writer thread that drains jobs in the order `print` was called, so writes stay in slot order while encoding stays parallel.
+* The cursor file now holds the last slot both outputs have written, so it never moves past a slot one of them has not written yet.
+* A panic while encoding a block now stops the plugin at the next slot notification, like a failed FIFO write does. That block used to be skipped silently.
+* Fixed blocks sent with a LIB above their own slot, which firehose-core rejects (`libnum cannot be greater than block number`). The LIB comes from the latest Rooted notification, and a Rooted can pass a slot still waiting to go out, for example when its Confirmed comes late. The LIB sent with a block is now capped at the block's slot.
+* The plugin ignores a Confirmed notification for a slot at or below the last sent block. Taking it sent the slot twice or, once its block info was purged, stopped the plugin from sending blocks. Agave 4.4 delivers such late Confirmed notifications ([#14936](https://github.com/anza-xyz/agave/pull/14936)); Agave 4.3.2 does not include that change, so on 4.3 this is a safeguard. The `send_processed` mode is unchanged.
+* Added `ACTIVATIONS.md`: every feature Agave 4.3.2 defines (287), with its status on mainnet and testnet checked on 2026-10-16 and its effect on the Firehose block. No feature active or pending on mainnet changes the block in a way the plugin does not already handle. `Reward.commission` stays empty for Voting and Staking rewards since `commission_rate_in_basis_points` and `custom_commission_collector` activated; `src/type_checks.rs` now notes that the block model has no field for `commission_bps`.
+* These fixes come from the `v4.4.0-beta.0-fh3.0` to `v4.4.0-beta.0-fh3.0-2` releases; `src/state.rs` and `src/block_printer.rs` are now identical to `release/4.x`.
+
 ## v4.3.0-fh3.0-4
 
 * The plugin returns to the OS the memory freed at end of startup. The threads that freed the startup layout of the account cache exit right after, so mimalloc kept that memory for the life of the process: about 1 GB per 20 million accounts in the throughput benchmark, roughly 60 GB on mainnet.
