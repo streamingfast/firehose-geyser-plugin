@@ -1211,6 +1211,7 @@ dependencies = [
  "serde_json",
  "solana-clock",
  "solana-commitment-config",
+ "solana-entry",
  "solana-hash",
  "solana-message",
  "solana-pubkey 4.3.0",

@@ -750,6 +750,28 @@ pub struct BlockInfo {
     pub height: Option<u64>,
     pub rewards: Vec<Reward>,
     pub transaction_count: u64,
+    /// From the Alpenglow block footer, which Agave notifies separately from the block metadata.
+    pub block_producer_time_nanos: Option<u64>,
+    /// Block info fetched from RPC, for a slot whose notifications were never received.
+    pub from_rpc: bool,
+}
+
+impl BlockInfo {
+    /// The footer time when the block has one, else the whole-second block time.
+    pub fn timestamp_nanos(&self) -> i64 {
+        match self.block_producer_time_nanos {
+            Some(nanos) => nanos as i64,
+            None => self.timestamp.seconds * 1_000_000_000,
+        }
+    }
+
+    pub fn firehose_timestamp(&self) -> Timestamp {
+        let nanos = self.timestamp_nanos();
+        Timestamp {
+            seconds: nanos.div_euclid(1_000_000_000),
+            nanos: nanos.rem_euclid(1_000_000_000) as i32,
+        }
+    }
 }
 
 const DEFAULT_RPC_BLOCK_CONFIG: RpcBlockConfig = RpcBlockConfig {
@@ -783,6 +805,11 @@ pub struct State {
     /// Banks cleared by an Alpenglow UpdateParent, with their slot. Their transactions and
     /// account updates can still arrive after the UpdateParent, on other validator threads.
     pub cleared_banks: HashMap<BankId, u64>,
+    /// Footer times received before the block info of their slot.
+    pub block_producer_times: HashMap<u64, u64>,
+    /// Lowest slot a block footer was received for. Every block after it is an Alpenglow
+    /// block, and Agave rejects an Alpenglow block without a footer.
+    pub first_footer_slot: Option<u64>,
 
     pub with_block: bool,
     //with_account: bool,
@@ -831,6 +858,8 @@ impl State {
             block_infos: HashMap::default(),
             confirmed_slots: HashMap::default(),
             cleared_banks: HashMap::default(),
+            block_producer_times: HashMap::default(),
+            first_footer_slot: None,
             last_sent_block: None,
 
             transactions: CachePadded(Mutex::new(HashMap::default())),
@@ -865,6 +894,8 @@ impl State {
             block_infos: self.block_infos.clone(),
             confirmed_slots: self.confirmed_slots.clone(),
             cleared_banks: self.cleared_banks.clone(),
+            block_producer_times: self.block_producer_times.clone(),
+            first_footer_slot: self.first_footer_slot,
             with_block: self.with_block,
             transactions: CachePadded(Mutex::new(self.transactions.lock().unwrap().clone())),
             processed_slots: self.processed_slots.clone(),
@@ -945,6 +976,8 @@ impl State {
                         height: block.block_height,
                         rewards: to_block_rewards(&block.rewards),
                         transaction_count: block.transactions.unwrap_or_default().len() as u64,
+                        block_producer_time_nanos: None,
+                        from_rpc: true,
                     },
                     trace,
                 )
@@ -971,6 +1004,8 @@ impl State {
                                 rewards: to_block_rewards(&block.rewards),
                                 transaction_count: block.transactions.unwrap_or_default().len()
                                     as u64,
+                                block_producer_time_nanos: None,
+                                from_rpc: true,
                             },
                             trace,
                         )
@@ -1080,6 +1115,13 @@ impl State {
         match self.block_infos.get(&slot) {
             None => false,
             Some(blk) => {
+                if blk.block_producer_time_nanos.is_none()
+                    && !blk.from_rpc
+                    && self.first_footer_slot.is_some_and(|first| slot > first)
+                {
+                    debug!("slot {} is confirmed, waiting for its block footer", slot);
+                    return false;
+                }
                 if !self.with_block {
                     return true; // if we only track account changes, we don't need to count the transactions
                 }
@@ -1127,8 +1169,44 @@ impl State {
         }
     }
 
-    pub fn set_block_info(&mut self, block_info: BlockInfo, trace: bool) {
+    pub fn set_block_producer_time(&mut self, slot: u64, nanos: u64, trace: bool) {
+        if self
+            .last_sent_block
+            .is_some_and(|last_sent| slot <= last_sent)
+        {
+            debug!(
+                "ignoring block footer of slot {} at or below last sent block",
+                slot
+            );
+            return;
+        }
+        if self.first_footer_slot.is_none_or(|first| slot < first) {
+            info!("block footer received for slot {}", slot);
+            self.first_footer_slot = Some(slot);
+        }
+        match self.block_infos.get_mut(&slot) {
+            Some(block_info) => block_info.block_producer_time_nanos = Some(nanos),
+            None => {
+                self.block_producer_times.insert(slot, nanos);
+                return;
+            }
+        }
+
+        if self.is_ready(slot) {
+            if let Err(e) = self.process_upto(trace, slot) {
+                panic!(
+                    "process_upto failed after set_block_producer_time({}): {}",
+                    slot, e
+                )
+            }
+        }
+    }
+
+    pub fn set_block_info(&mut self, mut block_info: BlockInfo, trace: bool) {
         let slot = block_info.slot;
+        if let Some(nanos) = self.block_producer_times.remove(&slot) {
+            block_info.block_producer_time_nanos = Some(nanos);
+        }
         if slot >= self.last_stats_slot + MEMORY_STATS_INTERVAL_SLOTS {
             self.last_stats_slot = slot;
             self.log_memory_stats(slot);
@@ -1462,6 +1540,7 @@ impl State {
             self.block_infos.remove(&block);
         }
         self.cleared_banks.retain(|_, &mut slot| slot > upto);
+        self.block_producer_times.retain(|&slot, _| slot > upto);
 
         let slots = self.confirmed_slots.keys().cloned().collect::<Vec<u64>>();
         for slot in slots {
@@ -2998,6 +3077,7 @@ mod tests {
             height: Some(slot),
             rewards: vec![],
             transaction_count: 0,
+            ..Default::default()
         }
     }
 
@@ -3014,6 +3094,7 @@ mod tests {
             height: Some(100),
             rewards: vec![],
             transaction_count: 0,
+            ..Default::default()
         }
     }
 
@@ -4042,6 +4123,74 @@ mod tests {
     }
 
     #[test]
+    fn test_block_waits_for_its_footer() {
+        let mut state =
+            new_test_state(Some(100), setup_noop_block_printer_with_logging(true, true));
+
+        state.set_lib(99);
+        state.set_block_producer_time(100, 1_760_000_000_123_456_789, true);
+        state.set_block_info(simple_block_info(100), true);
+        state.set_confirmed_slot_unless_sent(100, true);
+        assert_eq!(state.last_sent_block, Some(100));
+
+        state.set_block_info(simple_block_info(101), true);
+        state.set_confirmed_slot_unless_sent(101, true);
+        assert_eq!(state.last_sent_block, Some(100));
+
+        state.set_block_producer_time(101, 1_760_000_000_523_456_789, true);
+        assert_eq!(state.last_sent_block, Some(101));
+        assert!(state.block_producer_times.is_empty());
+    }
+
+    #[test]
+    fn test_block_info_from_rpc_does_not_wait_for_footer() {
+        let mut state =
+            new_test_state(Some(100), setup_noop_block_printer_with_logging(true, true));
+
+        state.set_lib(99);
+        state.set_block_producer_time(100, 1_760_000_000_123_456_789, true);
+        state.set_block_info(simple_block_info(100), true);
+        state.set_confirmed_slot_unless_sent(100, true);
+
+        state.set_block_info(
+            BlockInfo {
+                from_rpc: true,
+                ..simple_block_info(101)
+            },
+            true,
+        );
+        state.set_confirmed_slot_unless_sent(101, true);
+        assert_eq!(state.last_sent_block, Some(101));
+    }
+
+    #[test]
+    fn test_block_time_from_footer() {
+        let without_footer = simple_block_info(100);
+        assert_eq!(without_footer.timestamp_nanos(), 1_100_000_000_000);
+        assert_eq!(
+            compose_and_purge_block(100, &without_footer, vec![]).block_producer_time_nanos,
+            None
+        );
+
+        let with_footer = BlockInfo {
+            block_producer_time_nanos: Some(1_100_123_456_789),
+            ..simple_block_info(100)
+        };
+        assert_eq!(with_footer.timestamp_nanos(), 1_100_123_456_789);
+        assert_eq!(
+            with_footer.firehose_timestamp(),
+            Timestamp {
+                seconds: 1100,
+                nanos: 123_456_789
+            }
+        );
+
+        let block = compose_and_purge_block(100, &with_footer, vec![]);
+        assert_eq!(block.block_producer_time_nanos, Some(1_100_123_456_789));
+        assert_eq!(block.block_time.unwrap().timestamp, 1100);
+    }
+
+    #[test]
     fn test_lib_never_above_sent_slot() {
         let mut state =
             new_test_state(Some(100), setup_noop_block_printer_with_logging(true, true));
@@ -4629,5 +4778,6 @@ fn compose_and_purge_block(
             }),
             None => None,
         },
+        block_producer_time_nanos: block_info.block_producer_time_nanos,
     }
 }
