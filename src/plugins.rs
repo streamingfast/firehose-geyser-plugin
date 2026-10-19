@@ -1,3 +1,4 @@
+use agave_geyser_plugin_interface::block_footer::VersionedBlockFooter;
 use agave_geyser_plugin_interface::geyser_plugin_interface::{
     ReplicaTransactionInfoV4, SlotStatus,
 };
@@ -5,8 +6,10 @@ use agave_geyser_plugin_interface::transaction_status_meta as geyser_meta;
 use {
     crate::{config::Config as PluginConfig, state::BlockInfo, state::State},
     agave_geyser_plugin_interface::geyser_plugin_interface::{
-        GeyserPlugin, GeyserPluginError, ReplicaAccountInfoVersions, ReplicaBlockInfoVersions,
-        ReplicaEntryInfoVersions, ReplicaTransactionInfoVersions, Result as PluginResult,
+        GeyserPlugin, GeyserPluginError, ReplicaAccountInfoVersions,
+        ReplicaBlockFooterInfoVersions, ReplicaBlockInfoVersions, ReplicaEntryInfoVersions,
+        ReplicaEntryUpdateParentInfoVersions, ReplicaTransactionInfoVersions,
+        Result as PluginResult,
     },
     gxhash::gxhash64,
     std::{
@@ -34,6 +37,7 @@ use solana_rpc_client::rpc_client::RpcClient;
 
 use crate::block_printer::BlockPrinter;
 
+use solana_clock::BankId;
 use solana_hash::Hash;
 use solana_message::v0::LoadedAddresses;
 use solana_pubkey::Pubkey;
@@ -47,6 +51,9 @@ const SEED: i64 = 76;
 #[derive(Clone)]
 pub struct ConfirmTransactionWithIndex {
     pub index: usize,
+    /// Bank that executed the transaction, so the transactions of a bank an UpdateParent
+    /// clears can be dropped.
+    pub bank_id: BankId,
     pub transaction: ConfirmedTransaction,
 }
 
@@ -149,6 +156,7 @@ impl Plugin {
     fn set_account(
         &self,
         slot: u64,
+        bank_id: BankId,
         pub_key: &[u8],
         data: &[u8],
         owner: &[u8],
@@ -173,6 +181,7 @@ impl Plugin {
             let data = data.to_vec();
             let attempt = self.read_state("set_account").try_set_account(
                 slot,
+                bank_id,
                 pub_key,
                 data,
                 owner,
@@ -184,6 +193,7 @@ impl Plugin {
             if let Err(data) = attempt {
                 self.write_state("set_account").set_account(
                     slot,
+                    bank_id,
                     pub_key,
                     data,
                     owner,
@@ -205,6 +215,64 @@ impl Plugin {
 }
 
 impl Plugin {
+    // handle_account_update
+    // * decodes the ReplicaAccountInfoVersions
+    // * calls self.set_account()
+    fn handle_account_update(
+        &self,
+        account: ReplicaAccountInfoVersions,
+        slot: u64,
+        bank_id: BankId,
+        is_startup: bool,
+    ) -> PluginResult<()> {
+        if !self.with_account {
+            return Ok(());
+        }
+        let _timing = UPDATE_ACCOUNT.start();
+        match account {
+            ReplicaAccountInfoVersions::V0_0_1(account) => {
+                self.set_account(
+                    slot,
+                    bank_id,
+                    account.pubkey,
+                    account.data,
+                    account.owner,
+                    account.write_version,
+                    account.lamports == 0,
+                    is_startup,
+                );
+            }
+
+            ReplicaAccountInfoVersions::V0_0_2(account) => {
+                self.set_account(
+                    slot,
+                    bank_id,
+                    account.pubkey,
+                    account.data,
+                    account.owner,
+                    account.write_version,
+                    account.lamports == 0,
+                    is_startup,
+                );
+            }
+
+            ReplicaAccountInfoVersions::V0_0_3(account) => {
+                self.set_account(
+                    slot,
+                    bank_id,
+                    account.pubkey,
+                    account.data,
+                    account.owner,
+                    account.write_version,
+                    account.lamports == 0,
+                    is_startup,
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     // Out of line so the startup path stays out of the per-transaction account update path
     #[inline(never)]
     fn set_account_on_startup(
@@ -368,58 +436,22 @@ impl GeyserPlugin for Plugin {
     // NOOP
     fn on_unload(&mut self) {}
 
-    // update_account
-    // * decodes the ReplicaAccountInfoVersions
-    // * calls self.set_account()
-    fn update_account(
+    // No bank wrote the accounts restored from the snapshot
+    fn update_account_from_snapshot(
         &self,
         account: ReplicaAccountInfoVersions,
         slot: u64,
-        is_startup: bool,
     ) -> PluginResult<()> {
-        if !self.with_account {
-            return Ok(());
-        }
-        let _timing = UPDATE_ACCOUNT.start();
-        match account {
-            ReplicaAccountInfoVersions::V0_0_1(account) => {
-                self.set_account(
-                    slot,
-                    account.pubkey,
-                    account.data,
-                    account.owner,
-                    account.write_version,
-                    account.lamports == 0,
-                    is_startup,
-                );
-            }
+        self.handle_account_update(account, slot, 0, true)
+    }
 
-            ReplicaAccountInfoVersions::V0_0_2(account) => {
-                self.set_account(
-                    slot,
-                    account.pubkey,
-                    account.data,
-                    account.owner,
-                    account.write_version,
-                    account.lamports == 0,
-                    is_startup,
-                );
-            }
-
-            ReplicaAccountInfoVersions::V0_0_3(account) => {
-                self.set_account(
-                    slot,
-                    account.pubkey,
-                    account.data,
-                    account.owner,
-                    account.write_version,
-                    account.lamports == 0,
-                    is_startup,
-                );
-            }
-        }
-
-        Ok(())
+    fn update_account_for_bank(
+        &self,
+        account: ReplicaAccountInfoVersions,
+        slot: u64,
+        bank_id: BankId,
+    ) -> PluginResult<()> {
+        self.handle_account_update(account, slot, bank_id, false)
     }
 
     fn notify_end_of_startup(&self) -> PluginResult<()> {
@@ -511,14 +543,15 @@ impl GeyserPlugin for Plugin {
         Ok(())
     }
 
-    // notify_transaction:
+    // notify_transaction_for_bank:
     // * gates if we are with_block
     // * decodes the transaction version
     // * calls state.set_transaction
-    fn notify_transaction(
+    fn notify_transaction_for_bank(
         &self,
         transaction: ReplicaTransactionInfoVersions<'_>,
         slot: u64,
+        bank_id: BankId,
     ) -> PluginResult<()> {
         if !self.with_block {
             return Ok(());
@@ -533,6 +566,7 @@ impl GeyserPlugin for Plugin {
 
         let tx = ConfirmTransactionWithIndex {
             index,
+            bank_id,
             transaction: compiled_transaction,
         };
 
@@ -548,6 +582,16 @@ impl GeyserPlugin for Plugin {
 
     // NOOP
     fn notify_entry(&self, _entry: ReplicaEntryInfoVersions) -> PluginResult<()> {
+        Ok(())
+    }
+
+    fn notify_entry_update_parent(
+        &self,
+        update_parent: ReplicaEntryUpdateParentInfoVersions<'_>,
+    ) -> PluginResult<()> {
+        let ReplicaEntryUpdateParentInfoVersions::V0_0_1(info) = update_parent;
+        self.write_state("notify_entry_update_parent")
+            .clear_bank(info.slot, info.cleared_bank_id);
         Ok(())
     }
 
@@ -574,11 +618,26 @@ impl GeyserPlugin for Plugin {
                 timestamp: convert_sol_timestamp(blockinfo.block_time.unwrap_or_default()),
                 rewards: to_block_rewards_from_vec(blockinfo.rewards.rewards),
                 transaction_count: blockinfo.executed_transaction_count,
+                ..Default::default()
             },
         };
         let mut lock_state = self.write_state("notify_block_metadata");
 
         lock_state.set_block_info(block_info, self.trace);
+
+        Ok(())
+    }
+
+    fn notify_block_footer(
+        &self,
+        block_footer: ReplicaBlockFooterInfoVersions<'_>,
+        _bank_id: BankId,
+    ) -> PluginResult<()> {
+        let ReplicaBlockFooterInfoVersions::V0_0_2(info) = block_footer;
+        let VersionedBlockFooter::V1(footer) = info.block_footer;
+
+        let mut lock_state = self.write_state("notify_block_footer");
+        lock_state.set_block_producer_time(info.slot, footer.block_producer_time_nanos, self.trace);
 
         Ok(())
     }
@@ -591,8 +650,13 @@ impl GeyserPlugin for Plugin {
         true
     }
 
+    // Agave sends UpdateParent notifications only to plugins with entry notifications on
     fn entry_notifications_enabled(&self) -> bool {
-        false
+        true
+    }
+
+    fn block_footer_notifications_enabled(&self) -> bool {
+        true
     }
 }
 

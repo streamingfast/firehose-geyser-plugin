@@ -15,7 +15,7 @@ fn test_plugin_as_geyser_plugin_basic() {
     assert_eq!(plugin.account_data_notifications_enabled(), true);
     assert_eq!(plugin.account_data_snapshot_notifications_enabled(), true);
     assert_eq!(plugin.transaction_notifications_enabled(), true);
-    assert_eq!(plugin.entry_notifications_enabled(), false);
+    assert_eq!(plugin.entry_notifications_enabled(), true);
 }
 
 fn test_plugin_config(
