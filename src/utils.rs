@@ -15,6 +15,6 @@ pub fn create_account_block(account_changes: Vec<Account>, block_info: &BlockInf
         parent_hash: block_info.parent_hash.clone(),
         parent_slot: block_info.parent_slot,
         accounts: account_changes,
-        timestamp: Some(block_info.timestamp.clone()),
+        timestamp: Some(block_info.firehose_timestamp()),
     }
 }

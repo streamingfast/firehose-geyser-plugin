@@ -239,7 +239,7 @@ impl BlockPrinter {
     ) -> std::io::Result<()> {
         let slot = block_info.slot;
         let parent_slot = block_info.parent_slot;
-        let timestamp_nano = block_info.timestamp.seconds * 1_000_000_000;
+        let timestamp_nano = block_info.timestamp_nanos();
         let noop = self.noop;
         let account_count = account_block.accounts.len();
         let tx_count = block.transactions.len();
