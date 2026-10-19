@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v4.3.2-fh3.0-1
 
 * Handle the Alpenglow UpdateParent marker of `alpenglow_fast_leader_handover`. When a leader switches the parent of a slot partway through the block, Agave clears the slot's bank and replays the slot in a new bank. The plugin now drops the transactions and account updates of the cleared bank, including those that arrive after the UpdateParent notification. It keeps those of the new bank. It used to send both banks' data in one block. Pending transactions and account changes now record the bank that produced them, which adds 8 bytes to each.
 * Turned on Agave's entry notifications, which Agave requires to send UpdateParent notifications to a plugin. The plugin still ignores the entries themselves.
