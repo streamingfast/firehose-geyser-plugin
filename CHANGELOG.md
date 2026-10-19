@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+* Handle the Alpenglow UpdateParent marker of `alpenglow_fast_leader_handover`. When a leader switches the parent of a slot partway through the block, Agave clears the slot's bank and replays the slot in a new bank. The plugin now drops the transactions and account updates of the cleared bank, including those that arrive after the UpdateParent notification. It keeps those of the new bank. It used to send both banks' data in one block. Pending transactions and account changes now record the bank that produced them, which adds 8 bytes to each.
+* Turned on Agave's entry notifications, which Agave requires to send UpdateParent notifications to a plugin. The plugin still ignores the entries themselves.
+* The plugin now implements `update_account_for_bank`, `update_account_from_snapshot` and `notify_transaction_for_bank` in place of the deprecated `update_account` and `notify_transaction`.
+
 ## v4.4.0-beta.1-fh3.0
 
 * Bumped to [Agave 4.4.0-beta.1](https://github.com/anza-xyz/agave/releases/tag/v4.4.0-beta.1) (`solana-rpc-client`, `solana-rpc-client-api`, `solana-transaction-status`). The Docker image's Solana validator is now `v4.4.0-beta.1-fh3.0`. The Geyser plugin interface stays at `agave-geyser-plugin-interface` `5.0.0`.
