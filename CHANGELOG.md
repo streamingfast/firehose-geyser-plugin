@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+* Handle the Alpenglow UpdateParent marker of `alpenglow_fast_leader_handover`. When a leader switches the parent of a slot partway through the block, Agave clears the slot's bank and replays the slot in a new bank. The plugin now drops the transactions and account updates of the cleared bank, including those that arrive after the UpdateParent notification. It keeps those of the new bank. It used to send both banks' data in one block. Pending transactions and account changes now record the bank that produced them, which adds 8 bytes to each.
+* Turned on Agave's entry notifications, which Agave requires to send UpdateParent notifications to a plugin. The plugin still ignores the entries themselves.
+* The plugin now implements `update_account_for_bank`, `update_account_from_snapshot` and `notify_transaction_for_bank` in place of the deprecated `update_account` and `notify_transaction`.
+* Blocks now carry `block_producer_time_nanos`, the time in nanoseconds that the leader wrote in the Alpenglow block footer. The plugin turns on Agave's block footer notifications to read it. The timestamp in the `FIRE BLOCK` line, which becomes the Firehose block time, and the `AccountBlock` timestamp now use it when the block has a footer, instead of the whole-second `block_time`. `block_time` itself is unchanged. Blocks without a footer, which means every block before Alpenglow, are unchanged.
+* Agave sends the footer on its entry notification thread, separately from the block metadata, so a block can be confirmed before its footer arrives. Once the plugin has received a footer, it holds each later block until that block's footer arrives, because every block after an Alpenglow block is also an Alpenglow block and Agave rejects one without a footer. Block info the plugin fetches from RPC, for a slot whose notifications it never received, is sent without waiting.
+* Adds the optional `block_producer_time_nanos` field to `sf.solana.type.v1.Block`, from [firehose-solana#101](https://github.com/streamingfast/firehose-solana/pull/101).
+
 ## v4.3.2-fh3.0
 
 * Bumped to [Agave 4.3.2](https://github.com/anza-xyz/agave/releases/tag/v4.3.2) (`agave-geyser-plugin-interface`, `solana-rpc-client`, `solana-rpc-client-api`, `solana-transaction-status`, `solana-transaction-context`). The Docker image's Solana validator is now `v4.3.2-fh3.0` (was `v4.3.0-fh3.0`). The 23 upstream commits since `v4.3.0` do not touch the Geyser plugin interface, the transaction status types, the RPC client crates or the feature set, so no plugin code change was required. The `Cargo.lock` change is limited to the 34 Agave-versioned crates; `solana-vote-program` now also depends on `wincode` `0.6.1`, already in the lock at the version the validator uses.

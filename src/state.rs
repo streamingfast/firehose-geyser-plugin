@@ -7,6 +7,7 @@ use pb::sf::solana::r#type::v1::Account;
 use prost_types::Timestamp;
 use rustc_hash::FxHashMap as HashMap;
 use rustc_hash::FxHashSet;
+use solana_clock::BankId;
 use solana_rpc_client::rpc_client::RpcClient;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Mutex, RwLock};
@@ -142,6 +143,19 @@ impl PendingAccountChanges {
             }
         }
         changes
+    }
+
+    /// Removes the changes `bank_id` made in `slot`.
+    fn remove_bank_changes(&mut self, slot: u64, bank_id: BankId) {
+        for shard in self.shards.iter_mut() {
+            if let Some(slot_changes) = shard
+                .get_mut()
+                .expect("pending account changes lock poisoned")
+                .get_mut(&slot)
+            {
+                slot_changes.retain(|_, change| change.bank_id != bank_id);
+            }
+        }
     }
 
     /// Removes the slots at or below `upto` and returns them.
@@ -717,6 +731,8 @@ pub struct AccountWithWriteVersion {
     pub account: AccountFixed,
     pub write_version: u64,
     pub data_hash: u64,
+    /// Bank that wrote the change, so the changes of a bank an UpdateParent clears can be dropped.
+    pub bank_id: BankId,
 }
 
 lazy_static! {
@@ -734,6 +750,28 @@ pub struct BlockInfo {
     pub height: Option<u64>,
     pub rewards: Vec<Reward>,
     pub transaction_count: u64,
+    /// From the Alpenglow block footer, which Agave notifies separately from the block metadata.
+    pub block_producer_time_nanos: Option<u64>,
+    /// Block info fetched from RPC, for a slot whose notifications were never received.
+    pub from_rpc: bool,
+}
+
+impl BlockInfo {
+    /// The footer time when the block has one, else the whole-second block time.
+    pub fn timestamp_nanos(&self) -> i64 {
+        match self.block_producer_time_nanos {
+            Some(nanos) => nanos as i64,
+            None => self.timestamp.seconds * 1_000_000_000,
+        }
+    }
+
+    pub fn firehose_timestamp(&self) -> Timestamp {
+        let nanos = self.timestamp_nanos();
+        Timestamp {
+            seconds: nanos.div_euclid(1_000_000_000),
+            nanos: nanos.rem_euclid(1_000_000_000) as i32,
+        }
+    }
 }
 
 const DEFAULT_RPC_BLOCK_CONFIG: RpcBlockConfig = RpcBlockConfig {
@@ -764,6 +802,14 @@ pub struct State {
 
     pub block_infos: BlockInfoMap,
     pub confirmed_slots: ConfirmedSlotsMap,
+    /// Banks cleared by an Alpenglow UpdateParent, with their slot. Their transactions and
+    /// account updates can still arrive after the UpdateParent, on other validator threads.
+    pub cleared_banks: HashMap<BankId, u64>,
+    /// Footer times received before the block info of their slot.
+    pub block_producer_times: HashMap<u64, u64>,
+    /// Lowest slot a block footer was received for. Every block after it is an Alpenglow
+    /// block, and Agave rejects an Alpenglow block without a footer.
+    pub first_footer_slot: Option<u64>,
 
     pub with_block: bool,
     //with_account: bool,
@@ -811,6 +857,9 @@ impl State {
             account_cache: AccountCache::default(),
             block_infos: HashMap::default(),
             confirmed_slots: HashMap::default(),
+            cleared_banks: HashMap::default(),
+            block_producer_times: HashMap::default(),
+            first_footer_slot: None,
             last_sent_block: None,
 
             transactions: CachePadded(Mutex::new(HashMap::default())),
@@ -844,6 +893,9 @@ impl State {
             account_cache: self.account_cache.clone(),
             block_infos: self.block_infos.clone(),
             confirmed_slots: self.confirmed_slots.clone(),
+            cleared_banks: self.cleared_banks.clone(),
+            block_producer_times: self.block_producer_times.clone(),
+            first_footer_slot: self.first_footer_slot,
             with_block: self.with_block,
             transactions: CachePadded(Mutex::new(self.transactions.lock().unwrap().clone())),
             processed_slots: self.processed_slots.clone(),
@@ -924,6 +976,8 @@ impl State {
                         height: block.block_height,
                         rewards: to_block_rewards(&block.rewards),
                         transaction_count: block.transactions.unwrap_or_default().len() as u64,
+                        block_producer_time_nanos: None,
+                        from_rpc: true,
                     },
                     trace,
                 )
@@ -950,6 +1004,8 @@ impl State {
                                 rewards: to_block_rewards(&block.rewards),
                                 transaction_count: block.transactions.unwrap_or_default().len()
                                     as u64,
+                                block_producer_time_nanos: None,
+                                from_rpc: true,
                             },
                             trace,
                         )
@@ -1059,6 +1115,13 @@ impl State {
         match self.block_infos.get(&slot) {
             None => false,
             Some(blk) => {
+                if blk.block_producer_time_nanos.is_none()
+                    && !blk.from_rpc
+                    && self.first_footer_slot.is_some_and(|first| slot > first)
+                {
+                    debug!("slot {} is confirmed, waiting for its block footer", slot);
+                    return false;
+                }
                 if !self.with_block {
                     return true; // if we only track account changes, we don't need to count the transactions
                 }
@@ -1090,8 +1153,60 @@ impl State {
         }
     }
 
-    pub fn set_block_info(&mut self, block_info: BlockInfo, trace: bool) {
+    /// Drops what a bank cleared by an Alpenglow UpdateParent sent for its slot. Agave replays
+    /// the slot again in a new bank, whose notifications may already be here, so only the
+    /// cleared bank's are removed.
+    pub fn clear_bank(&mut self, slot: u64, bank_id: BankId) {
+        info!(
+            "clearing bank {} of slot {} after an UpdateParent",
+            bank_id, slot
+        );
+        self.cleared_banks.insert(bank_id, slot);
+        self.block_account_changes
+            .remove_bank_changes(slot, bank_id);
+        if let Some(transactions) = self.transactions.get_mut().unwrap().get_mut(&slot) {
+            transactions.retain(|tx| tx.bank_id != bank_id);
+        }
+    }
+
+    pub fn set_block_producer_time(&mut self, slot: u64, nanos: u64, trace: bool) {
+        if self
+            .last_sent_block
+            .is_some_and(|last_sent| slot <= last_sent)
+        {
+            debug!(
+                "ignoring block footer of slot {} at or below last sent block",
+                slot
+            );
+            return;
+        }
+        if self.first_footer_slot.is_none_or(|first| slot < first) {
+            info!("block footer received for slot {}", slot);
+            self.first_footer_slot = Some(slot);
+        }
+        match self.block_infos.get_mut(&slot) {
+            Some(block_info) => block_info.block_producer_time_nanos = Some(nanos),
+            None => {
+                self.block_producer_times.insert(slot, nanos);
+                return;
+            }
+        }
+
+        if self.is_ready(slot) {
+            if let Err(e) = self.process_upto(trace, slot) {
+                panic!(
+                    "process_upto failed after set_block_producer_time({}): {}",
+                    slot, e
+                )
+            }
+        }
+    }
+
+    pub fn set_block_info(&mut self, mut block_info: BlockInfo, trace: bool) {
         let slot = block_info.slot;
+        if let Some(nanos) = self.block_producer_times.remove(&slot) {
+            block_info.block_producer_time_nanos = Some(nanos);
+        }
         if slot >= self.last_stats_slot + MEMORY_STATS_INTERVAL_SLOTS {
             self.last_stats_slot = slot;
             self.log_memory_stats(slot);
@@ -1241,6 +1356,7 @@ impl State {
     pub fn set_account(
         &mut self,
         slot: u64,
+        bank_id: BankId,
         pub_key: &[u8],
         data: impl Into<Vec<u8>>,
         owner: &[u8],
@@ -1259,6 +1375,7 @@ impl State {
         }
         self.record_account(
             slot,
+            bank_id,
             pub_key,
             data.into(),
             owner,
@@ -1275,6 +1392,7 @@ impl State {
     pub fn try_set_account(
         &self,
         slot: u64,
+        bank_id: BankId,
         pub_key: &[u8],
         data: Vec<u8>,
         owner: &[u8],
@@ -1289,6 +1407,7 @@ impl State {
         }
         self.record_account(
             slot,
+            bank_id,
             pub_key,
             data,
             owner,
@@ -1303,6 +1422,7 @@ impl State {
     fn record_account(
         &self,
         slot: u64,
+        bank_id: BankId,
         pub_key: &[u8],
         data: Vec<u8>,
         owner: &[u8],
@@ -1311,6 +1431,13 @@ impl State {
         data_hash: u64,
         trace: bool,
     ) {
+        if self.cleared_banks.contains_key(&bank_id) {
+            debug!(
+                "dropping account update of cleared bank {} at slot {}",
+                bank_id, slot
+            );
+            return;
+        }
         if let Some(last_sent) = self.last_sent_block {
             if last_sent >= slot {
                 self.late_account_updates
@@ -1338,6 +1465,7 @@ impl State {
             },
             write_version,
             data_hash,
+            bank_id,
         };
 
         self.block_account_changes
@@ -1378,6 +1506,13 @@ impl State {
     }
 
     fn record_transaction(&self, slot: u64, transaction: ConfirmTransactionWithIndex) {
+        if self.cleared_banks.contains_key(&transaction.bank_id) {
+            debug!(
+                "dropping transaction of cleared bank {} at slot {}",
+                transaction.bank_id, slot
+            );
+            return;
+        }
         if self.processed_slots.get(&slot).is_some() {
             error!(
                 "slot {} already processed should not receive transaction for it",
@@ -1404,6 +1539,8 @@ impl State {
         for block in self.block_account_changes.purge_up_to(upto) {
             self.block_infos.remove(&block);
         }
+        self.cleared_banks.retain(|_, &mut slot| slot > upto);
+        self.block_producer_times.retain(|&slot, _| slot > upto);
 
         let slots = self.confirmed_slots.keys().cloned().collect::<Vec<u64>>();
         for slot in slots {
@@ -2029,6 +2166,7 @@ mod tests {
             account,
             write_version,
             data_hash,
+            bank_id: 0,
         }
     }
 
@@ -2939,6 +3077,7 @@ mod tests {
             height: Some(slot),
             rewards: vec![],
             transaction_count: 0,
+            ..Default::default()
         }
     }
 
@@ -2955,6 +3094,7 @@ mod tests {
             height: Some(100),
             rewards: vec![],
             transaction_count: 0,
+            ..Default::default()
         }
     }
 
@@ -3106,6 +3246,7 @@ mod tests {
         // Second call with incremented slot
         state.set_account(
             slot,
+            0,
             PUB_KEY_1,
             DATA_1,
             OWNER_KEY_1,
@@ -3300,6 +3441,7 @@ mod tests {
         // create account there
         state.set_account(
             slot,
+            0,
             PUB_KEY_1,
             DATA_1,
             OWNER_KEY_1,
@@ -3312,6 +3454,7 @@ mod tests {
         // delete account here
         state.set_account(
             slot,
+            0,
             PUB_KEY_1,
             DATA_1,
             OWNER_KEY_11111111111111111111111111111111,
@@ -3344,6 +3487,7 @@ mod tests {
         // create account there
         state.set_account(
             slot,
+            0,
             PUB_KEY_1,
             DATA_1,
             OWNER_KEY_1,
@@ -3356,6 +3500,7 @@ mod tests {
         // delete account here
         state.set_account(
             slot,
+            0,
             PUB_KEY_1,
             DATA_1,
             OWNER_KEY_1,
@@ -3368,6 +3513,7 @@ mod tests {
         // delete account here
         state.set_account(
             slot,
+            0,
             PUB_KEY_1,
             DATA_1,
             OWNER_KEY_11111111111111111111111111111111,
@@ -3400,6 +3546,7 @@ mod tests {
         // create account there
         state.set_account(
             slot,
+            0,
             PUB_KEY_1,
             DATA_1,
             OWNER_KEY_1,
@@ -3412,6 +3559,7 @@ mod tests {
         // delete account here
         state.set_account(
             slot,
+            0,
             PUB_KEY_1,
             DATA_1,
             OWNER_KEY_11111111111111111111111111111111,
@@ -3424,6 +3572,7 @@ mod tests {
         // delete account here
         state.set_account(
             slot,
+            0,
             PUB_KEY_1,
             DATA_1,
             OWNER_KEY_11111111111111111111111111111111,
@@ -3472,9 +3621,39 @@ mod tests {
 
         state.set_lib(99);
 
-        state.set_account(100, PUB_KEY_1, DATA_1, OWNER_KEY_1, 1, false, 12345, true);
-        state.set_account(101, PUB_KEY_2, DATA_2, OWNER_KEY_1, 1, false, 23456, true);
-        state.set_account(102, PUB_KEY_3, DATA_3, OWNER_KEY_1, 1, false, 34567, true);
+        state.set_account(
+            100,
+            0,
+            PUB_KEY_1,
+            DATA_1,
+            OWNER_KEY_1,
+            1,
+            false,
+            12345,
+            true,
+        );
+        state.set_account(
+            101,
+            0,
+            PUB_KEY_2,
+            DATA_2,
+            OWNER_KEY_1,
+            1,
+            false,
+            23456,
+            true,
+        );
+        state.set_account(
+            102,
+            0,
+            PUB_KEY_3,
+            DATA_3,
+            OWNER_KEY_1,
+            1,
+            false,
+            34567,
+            true,
+        );
 
         state.set_block_info(simple_block_info(100), true);
         state.set_confirmed_slot(100, true);
@@ -3509,9 +3688,39 @@ mod tests {
 
         state.set_lib(99);
 
-        state.set_account(100, PUB_KEY_1, DATA_1, OWNER_KEY_1, 1, false, 12345, true);
-        state.set_account(101, PUB_KEY_2, DATA_2, OWNER_KEY_1, 1, false, 23456, true);
-        state.set_account(102, PUB_KEY_3, DATA_3, OWNER_KEY_1, 1, false, 34567, true);
+        state.set_account(
+            100,
+            0,
+            PUB_KEY_1,
+            DATA_1,
+            OWNER_KEY_1,
+            1,
+            false,
+            12345,
+            true,
+        );
+        state.set_account(
+            101,
+            0,
+            PUB_KEY_2,
+            DATA_2,
+            OWNER_KEY_1,
+            1,
+            false,
+            23456,
+            true,
+        );
+        state.set_account(
+            102,
+            0,
+            PUB_KEY_3,
+            DATA_3,
+            OWNER_KEY_1,
+            1,
+            false,
+            34567,
+            true,
+        );
 
         state.set_block_info(simple_block_info(100), true);
         state.set_confirmed_slot(100, true);
@@ -3561,9 +3770,39 @@ mod tests {
 
         state.set_lib(100);
 
-        state.set_account(100, PUB_KEY_1, DATA_1, OWNER_KEY_1, 1, false, 12345, true);
-        state.set_account(101, PUB_KEY_2, DATA_2, OWNER_KEY_1, 1, false, 23456, true);
-        state.set_account(102, PUB_KEY_3, DATA_3, OWNER_KEY_1, 1, false, 34567, true);
+        state.set_account(
+            100,
+            0,
+            PUB_KEY_1,
+            DATA_1,
+            OWNER_KEY_1,
+            1,
+            false,
+            12345,
+            true,
+        );
+        state.set_account(
+            101,
+            0,
+            PUB_KEY_2,
+            DATA_2,
+            OWNER_KEY_1,
+            1,
+            false,
+            23456,
+            true,
+        );
+        state.set_account(
+            102,
+            0,
+            PUB_KEY_3,
+            DATA_3,
+            OWNER_KEY_1,
+            1,
+            false,
+            34567,
+            true,
+        );
 
         state.set_block_info(simple_block_info(100), true);
         state.set_confirmed_slot(100, true);
@@ -3610,9 +3849,39 @@ mod tests {
         // Create state with noop BlockPrinter
         let mut state = new_test_state(None, setup_noop_block_printer_with_logging(true, true));
 
-        state.set_account(100, PUB_KEY_1, DATA_1, OWNER_KEY_1, 1, false, 12345, true);
-        state.set_account(101, PUB_KEY_2, DATA_2, OWNER_KEY_1, 1, false, 23456, true);
-        state.set_account(102, PUB_KEY_3, DATA_3, OWNER_KEY_1, 1, false, 34567, true);
+        state.set_account(
+            100,
+            0,
+            PUB_KEY_1,
+            DATA_1,
+            OWNER_KEY_1,
+            1,
+            false,
+            12345,
+            true,
+        );
+        state.set_account(
+            101,
+            0,
+            PUB_KEY_2,
+            DATA_2,
+            OWNER_KEY_1,
+            1,
+            false,
+            23456,
+            true,
+        );
+        state.set_account(
+            102,
+            0,
+            PUB_KEY_3,
+            DATA_3,
+            OWNER_KEY_1,
+            1,
+            false,
+            34567,
+            true,
+        );
         state.set_block_info(simple_block_info(100), true);
         state.set_confirmed_slot(100, true);
         state.set_block_info(simple_block_info(101), true);
@@ -3661,9 +3930,39 @@ mod tests {
         // Create state with noop BlockPrinter
         let mut state = new_test_state(None, setup_noop_block_printer_with_logging(true, true));
 
-        state.set_account(100, PUB_KEY_1, DATA_1, OWNER_KEY_1, 1, false, 12345, true);
-        state.set_account(101, PUB_KEY_2, DATA_2, OWNER_KEY_1, 1, false, 23456, true);
-        state.set_account(102, PUB_KEY_3, DATA_3, OWNER_KEY_1, 1, false, 34567, true);
+        state.set_account(
+            100,
+            0,
+            PUB_KEY_1,
+            DATA_1,
+            OWNER_KEY_1,
+            1,
+            false,
+            12345,
+            true,
+        );
+        state.set_account(
+            101,
+            0,
+            PUB_KEY_2,
+            DATA_2,
+            OWNER_KEY_1,
+            1,
+            false,
+            23456,
+            true,
+        );
+        state.set_account(
+            102,
+            0,
+            PUB_KEY_3,
+            DATA_3,
+            OWNER_KEY_1,
+            1,
+            false,
+            34567,
+            true,
+        );
 
         state.set_lib(100);
 
@@ -3715,9 +4014,39 @@ mod tests {
         let mut state =
             new_test_state(Some(102), setup_noop_block_printer_with_logging(true, true));
 
-        state.set_account(100, PUB_KEY_1, DATA_1, OWNER_KEY_1, 1, false, 12345, true);
-        state.set_account(101, PUB_KEY_2, DATA_2, OWNER_KEY_1, 1, false, 23456, true);
-        state.set_account(102, PUB_KEY_3, DATA_3, OWNER_KEY_1, 1, false, 34567, true);
+        state.set_account(
+            100,
+            0,
+            PUB_KEY_1,
+            DATA_1,
+            OWNER_KEY_1,
+            1,
+            false,
+            12345,
+            true,
+        );
+        state.set_account(
+            101,
+            0,
+            PUB_KEY_2,
+            DATA_2,
+            OWNER_KEY_1,
+            1,
+            false,
+            23456,
+            true,
+        );
+        state.set_account(
+            102,
+            0,
+            PUB_KEY_3,
+            DATA_3,
+            OWNER_KEY_1,
+            1,
+            false,
+            34567,
+            true,
+        );
 
         // here we DON'T send block_info for slot 100
         // we DON'T send confirmed_slot either
@@ -3794,6 +4123,74 @@ mod tests {
     }
 
     #[test]
+    fn test_block_waits_for_its_footer() {
+        let mut state =
+            new_test_state(Some(100), setup_noop_block_printer_with_logging(true, true));
+
+        state.set_lib(99);
+        state.set_block_producer_time(100, 1_760_000_000_123_456_789, true);
+        state.set_block_info(simple_block_info(100), true);
+        state.set_confirmed_slot_unless_sent(100, true);
+        assert_eq!(state.last_sent_block, Some(100));
+
+        state.set_block_info(simple_block_info(101), true);
+        state.set_confirmed_slot_unless_sent(101, true);
+        assert_eq!(state.last_sent_block, Some(100));
+
+        state.set_block_producer_time(101, 1_760_000_000_523_456_789, true);
+        assert_eq!(state.last_sent_block, Some(101));
+        assert!(state.block_producer_times.is_empty());
+    }
+
+    #[test]
+    fn test_block_info_from_rpc_does_not_wait_for_footer() {
+        let mut state =
+            new_test_state(Some(100), setup_noop_block_printer_with_logging(true, true));
+
+        state.set_lib(99);
+        state.set_block_producer_time(100, 1_760_000_000_123_456_789, true);
+        state.set_block_info(simple_block_info(100), true);
+        state.set_confirmed_slot_unless_sent(100, true);
+
+        state.set_block_info(
+            BlockInfo {
+                from_rpc: true,
+                ..simple_block_info(101)
+            },
+            true,
+        );
+        state.set_confirmed_slot_unless_sent(101, true);
+        assert_eq!(state.last_sent_block, Some(101));
+    }
+
+    #[test]
+    fn test_block_time_from_footer() {
+        let without_footer = simple_block_info(100);
+        assert_eq!(without_footer.timestamp_nanos(), 1_100_000_000_000);
+        assert_eq!(
+            compose_and_purge_block(100, &without_footer, vec![]).block_producer_time_nanos,
+            None
+        );
+
+        let with_footer = BlockInfo {
+            block_producer_time_nanos: Some(1_100_123_456_789),
+            ..simple_block_info(100)
+        };
+        assert_eq!(with_footer.timestamp_nanos(), 1_100_123_456_789);
+        assert_eq!(
+            with_footer.firehose_timestamp(),
+            Timestamp {
+                seconds: 1100,
+                nanos: 123_456_789
+            }
+        );
+
+        let block = compose_and_purge_block(100, &with_footer, vec![]);
+        assert_eq!(block.block_producer_time_nanos, Some(1_100_123_456_789));
+        assert_eq!(block.block_time.unwrap().timestamp, 1100);
+    }
+
+    #[test]
     fn test_lib_never_above_sent_slot() {
         let mut state =
             new_test_state(Some(100), setup_noop_block_printer_with_logging(true, true));
@@ -3829,6 +4226,7 @@ mod tests {
             new_test_state(Some(100), setup_noop_block_printer_with_logging(true, true));
         let vote = || ConfirmTransactionWithIndex {
             index: 0,
+            bank_id: 0,
             transaction: crate::pb::sf::solana::r#type::v1::ConfirmedTransaction::default(),
         };
         // Every slot writes the Clock sysvar
@@ -3839,6 +4237,7 @@ mod tests {
             write_version += 1;
             state.set_account(
                 slot,
+                0,
                 clock,
                 slot.to_le_bytes(),
                 sysvar,
@@ -3856,7 +4255,17 @@ mod tests {
             state.set_block_info(simple_block_info(slot), true);
             state.set_confirmed_slot_unless_sent(slot, true);
         }
-        state.set_account(105, PUB_KEY_1, DATA_1, OWNER_KEY_1, 1, false, 12345, true);
+        state.set_account(
+            105,
+            0,
+            PUB_KEY_1,
+            DATA_1,
+            OWNER_KEY_1,
+            1,
+            false,
+            12345,
+            true,
+        );
         assert_eq!(state.last_sent_block, Some(105));
 
         // Migration: vote only slots, processed but never confirmed nor rooted, then discarded
@@ -3867,13 +4276,33 @@ mod tests {
             state.set_block_info(block_info, true);
             state.set_transaction(slot, vote(), true);
         }
-        state.set_account(107, PUB_KEY_2, DATA_2, OWNER_KEY_1, 2, false, 23456, true);
+        state.set_account(
+            107,
+            0,
+            PUB_KEY_2,
+            DATA_2,
+            OWNER_KEY_1,
+            2,
+            false,
+            23456,
+            true,
+        );
         assert_eq!(state.last_sent_block, Some(105));
 
         // First Alpenglow block, built on the genesis block
         write_clock(&mut state, 110);
         state.set_block_info(test_block_info(110, 105), true);
-        state.set_account(110, PUB_KEY_3, DATA_3, OWNER_KEY_1, 3, false, 34567, true);
+        state.set_account(
+            110,
+            0,
+            PUB_KEY_3,
+            DATA_3,
+            OWNER_KEY_1,
+            3,
+            false,
+            34567,
+            true,
+        );
         state.set_confirmed_slot_unless_sent(110, true);
         assert_eq!(state.last_sent_block, Some(110));
 
@@ -3923,9 +4352,39 @@ mod tests {
         let mut state =
             new_test_state(Some(100), setup_noop_block_printer_with_logging(true, true));
 
-        state.set_account(100, PUB_KEY_1, DATA_1, OWNER_KEY_1, 1, false, 12345, false);
-        state.set_account(101, PUB_KEY_2, DATA_2, OWNER_KEY_1, 1, false, 23456, false);
-        state.set_account(102, PUB_KEY_3, DATA_3, OWNER_KEY_1, 1, false, 34567, false);
+        state.set_account(
+            100,
+            0,
+            PUB_KEY_1,
+            DATA_1,
+            OWNER_KEY_1,
+            1,
+            false,
+            12345,
+            false,
+        );
+        state.set_account(
+            101,
+            0,
+            PUB_KEY_2,
+            DATA_2,
+            OWNER_KEY_1,
+            1,
+            false,
+            23456,
+            false,
+        );
+        state.set_account(
+            102,
+            0,
+            PUB_KEY_3,
+            DATA_3,
+            OWNER_KEY_1,
+            1,
+            false,
+            34567,
+            false,
+        );
 
         // Slots confirmed before the LIB is known pile up and go out in the first send
         state.set_block_info(simple_block_info(100), false);
@@ -3971,6 +4430,7 @@ mod tests {
         let mut state = create_test_state();
         let transaction = || ConfirmTransactionWithIndex {
             index: 0,
+            bank_id: 0,
             transaction: crate::pb::sf::solana::r#type::v1::ConfirmedTransaction::default(),
         };
         for slot in [50, 90, 95, 101, 150] {
@@ -3997,6 +4457,97 @@ mod tests {
             .collect();
         kept.sort();
         assert_eq!(kept, vec![95, 101, 150]);
+    }
+
+    #[test]
+    fn test_update_parent_drops_only_the_cleared_bank() {
+        let mut state =
+            new_test_state(Some(100), setup_noop_block_printer_with_logging(true, true));
+        state.set_lib(99);
+        let transaction = |index: usize, bank_id: BankId| ConfirmTransactionWithIndex {
+            index,
+            bank_id,
+            transaction: crate::pb::sf::solana::r#type::v1::ConfirmedTransaction::default(),
+        };
+        let (cleared, replacement) = (7, 8);
+
+        // The cleared bank starts slot 100
+        state.set_account(
+            100,
+            cleared,
+            PUB_KEY_1,
+            DATA_1,
+            OWNER_KEY_1,
+            1,
+            false,
+            12345,
+            true,
+        );
+        state.set_account(
+            100,
+            cleared,
+            PUB_KEY_2,
+            DATA_2,
+            OWNER_KEY_1,
+            2,
+            false,
+            23456,
+            true,
+        );
+        state.set_transaction(100, transaction(0, cleared), true);
+        // The replacement bank's notifications arrive before the UpdateParent
+        state.set_account(
+            100,
+            replacement,
+            PUB_KEY_3,
+            DATA_3,
+            OWNER_KEY_1,
+            3,
+            false,
+            34567,
+            true,
+        );
+        state.set_transaction(100, transaction(0, replacement), true);
+
+        state.clear_bank(100, cleared);
+
+        // A transaction of the cleared bank still in flight on another thread
+        state.set_transaction(100, transaction(1, cleared), true);
+        state.set_account(
+            100,
+            cleared,
+            PUB_KEY_1,
+            DATA_1,
+            OWNER_KEY_1,
+            4,
+            false,
+            12345,
+            true,
+        );
+        state.set_transaction(100, transaction(1, replacement), true);
+
+        let transactions = state.transactions.get_mut().unwrap().get(&100).unwrap();
+        assert_eq!(
+            transactions
+                .iter()
+                .map(|tx| (tx.index, tx.bank_id))
+                .collect::<Vec<_>>(),
+            vec![(0, replacement), (1, replacement)]
+        );
+        let changes = state.block_account_changes.get(&100).unwrap();
+        assert_eq!(changes.len(), 1);
+        assert!(changes.values().all(|change| change.bank_id == replacement));
+
+        state.set_block_info(
+            BlockInfo {
+                transaction_count: 2,
+                ..simple_block_info(100)
+            },
+            true,
+        );
+        state.set_confirmed_slot_unless_sent(100, true);
+        assert_eq!(state.last_sent_block, Some(100));
+        assert!(state.cleared_banks.is_empty());
     }
 
     /// The pending changes of a slot, merged across shards.
@@ -4227,5 +4778,6 @@ fn compose_and_purge_block(
             }),
             None => None,
         },
+        block_producer_time_nanos: block_info.block_producer_time_nanos,
     }
 }
