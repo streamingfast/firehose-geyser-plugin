@@ -415,6 +415,91 @@ impl Plugin {
     }
 }
 
+impl Plugin {
+    // handle_slot_status:
+    // * calls set_confirmed_slot() (for Processed/Confirmed depending on config send_processed),
+    //   after recording the bank Agave confirmed
+    // * calls set_lib() for Rooted state
+    // * records the bank of CreatedBank
+    fn handle_slot_status(
+        &self,
+        slot: u64,
+        _parent: Option<u64>,
+        status: &SlotStatus,
+        bank_id: Option<BankId>,
+    ) -> PluginResult<()> {
+        let _timing = UPDATE_SLOT_STATUS.start();
+        if ACC_MUTEX.is_poisoned() || BLOCK_MUTEX.is_poisoned() {
+            panic!(
+                "output mutex poisoned before update_slot_status(slot={}, status={:?}): block={}, acc={}",
+                slot,
+                status,
+                BLOCK_MUTEX.is_poisoned(),
+                ACC_MUTEX.is_poisoned()
+            )
+        }
+        match status {
+            SlotStatus::Processed => match self.send_processed {
+                true => {
+                    debug!(
+                        "slot processed {} (parent: {}) acting as confirmed",
+                        slot,
+                        _parent.unwrap_or_default()
+                    );
+                    let mut lock_state = self.write_state("update_slot_status");
+                    if let Some(bank_id) = bank_id {
+                        lock_state.set_confirmed_bank(slot, bank_id);
+                    }
+                    lock_state.set_confirmed_slot(slot, self.trace);
+                }
+                false => {
+                    debug!(
+                        "slot processed {} (parent: {}) (noop)",
+                        slot,
+                        _parent.unwrap_or_default()
+                    );
+                }
+            },
+            SlotStatus::Rooted => {
+                debug!("slot rooted {}", slot);
+                self.write_state("set_lib").set_lib(slot);
+            }
+            SlotStatus::Completed => {}
+            SlotStatus::FirstShredReceived => {}
+            SlotStatus::Dead(_) => {}
+            SlotStatus::CreatedBank => {
+                if let Some(bank_id) = bank_id {
+                    self.write_state("add_slot_bank")
+                        .add_slot_bank(slot, bank_id);
+                }
+            }
+            SlotStatus::Confirmed => match self.send_processed {
+                true => {
+                    debug!(
+                        "slot confirmed {} (parent: {}) (noop)",
+                        slot,
+                        _parent.unwrap_or_default()
+                    );
+                }
+                false => {
+                    debug!(
+                        "slot confirmed {} (parent: {})",
+                        slot,
+                        _parent.unwrap_or_default()
+                    );
+                    let mut lock_state = self.write_state("set_confirmed_slot");
+                    if let Some(bank_id) = bank_id {
+                        lock_state.set_confirmed_bank(slot, bank_id);
+                    }
+                    lock_state.set_confirmed_slot_unless_sent(slot, self.trace);
+                }
+            },
+        }
+
+        Ok(())
+    }
+}
+
 impl GeyserPlugin for Plugin {
     fn name(&self) -> &'static str {
         let n = concat!(env!("CARGO_PKG_NAME"), "-", env!("CARGO_PKG_VERSION"));
@@ -475,73 +560,24 @@ impl GeyserPlugin for Plugin {
         Ok(())
     }
 
-    // update_slot_status:
-    // * calls set_confirmed_slot() (for Processed/Confirmed depending on config send_processed)
-    // * Calls set_lib() for Rooted state
+    // Agave calls it directly for FirstShredReceived, Completed and Dead, which have no bank
     fn update_slot_status(
         &self,
         slot: u64,
-        _parent: Option<u64>,
+        parent: Option<u64>,
         status: &SlotStatus,
     ) -> PluginResult<()> {
-        let _timing = UPDATE_SLOT_STATUS.start();
-        if ACC_MUTEX.is_poisoned() || BLOCK_MUTEX.is_poisoned() {
-            panic!(
-                "output mutex poisoned before update_slot_status(slot={}, status={:?}): block={}, acc={}",
-                slot,
-                status,
-                BLOCK_MUTEX.is_poisoned(),
-                ACC_MUTEX.is_poisoned()
-            )
-        }
-        match status {
-            SlotStatus::Processed => match self.send_processed {
-                true => {
-                    debug!(
-                        "slot processed {} (parent: {}) acting as confirmed",
-                        slot,
-                        _parent.unwrap_or_default()
-                    );
-                    let mut lock_state = self.write_state("update_slot_status");
-                    lock_state.set_confirmed_slot(slot, self.trace);
-                }
-                false => {
-                    debug!(
-                        "slot processed {} (parent: {}) (noop)",
-                        slot,
-                        _parent.unwrap_or_default()
-                    );
-                }
-            },
-            SlotStatus::Rooted => {
-                debug!("slot rooted {}", slot);
-                self.write_state("set_lib").set_lib(slot);
-            }
-            SlotStatus::Completed => {}
-            SlotStatus::FirstShredReceived => {}
-            SlotStatus::Dead(_) => {}
-            SlotStatus::CreatedBank => {}
-            SlotStatus::Confirmed => match self.send_processed {
-                true => {
-                    debug!(
-                        "slot confirmed {} (parent: {}) (noop)",
-                        slot,
-                        _parent.unwrap_or_default()
-                    );
-                }
-                false => {
-                    debug!(
-                        "slot confirmed {} (parent: {})",
-                        slot,
-                        _parent.unwrap_or_default()
-                    );
-                    let mut lock_state = self.write_state("set_confirmed_slot");
-                    lock_state.set_confirmed_slot_unless_sent(slot, self.trace);
-                }
-            },
-        }
+        self.handle_slot_status(slot, parent, status, None)
+    }
 
-        Ok(())
+    fn update_bank_status(
+        &self,
+        slot: u64,
+        parent: Option<u64>,
+        status: &SlotStatus,
+        bank_id: BankId,
+    ) -> PluginResult<()> {
+        self.handle_slot_status(slot, parent, status, Some(bank_id))
     }
 
     // notify_transaction_for_bank:
@@ -605,10 +641,14 @@ impl GeyserPlugin for Plugin {
         Ok(())
     }
 
-    // notify_block_metadata:
+    // notify_block_metadata_for_bank:
     // * decodes the blockinfo version
     // * calls state.set_block_info (which will fill in missing block info from confirmed_slots from RPC)
-    fn notify_block_metadata(&self, block_info: ReplicaBlockInfoVersions<'_>) -> PluginResult<()> {
+    fn notify_block_metadata_for_bank(
+        &self,
+        block_info: ReplicaBlockInfoVersions<'_>,
+        bank_id: BankId,
+    ) -> PluginResult<()> {
         let _timing = NOTIFY_BLOCK_METADATA.start();
         if ACC_MUTEX.is_poisoned() || BLOCK_MUTEX.is_poisoned() {
             panic!(
@@ -618,7 +658,7 @@ impl GeyserPlugin for Plugin {
             )
         }
 
-        let block_info = match block_info {
+        let mut block_info = match block_info {
             ReplicaBlockInfoVersions::V0_0_1(_) => {
                 panic!("V0_0_1 not supported");
             }
@@ -658,6 +698,7 @@ impl GeyserPlugin for Plugin {
                 ..Default::default()
             },
         };
+        block_info.bank_id = Some(bank_id);
         let mut lock_state = self.write_state("notify_block_metadata");
 
         lock_state.set_block_info(block_info, self.trace);
