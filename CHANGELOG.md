@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v4.3.2-fh3.0-2
 
 * Fixed blocks and account blocks mixing the data of two banks of the same slot. During the Alpenglow migration, Agave purges the vote-only blocks above the Alpenglow genesis block without notifying plugins, and an Alpenglow block can then reuse one of those slot numbers. The plugin sent the vote-only block's vote transactions, and the account changes only that block made (mostly the balances of the validators that paid for the votes), inside the Alpenglow block. It also held the slot until a later slot went out, because its transaction count never matched.
 * The plugin now records the banks Agave creates, freezes and confirms for each slot. When a slot has more than one, it sends only the data of the confirmed bank, or, if the slot got no Confirmed of its own, of the bank whose block metadata came last, and logs a warning with what it dropped. Slots with a single bank, and data from a bank Agave never announced for the slot, are sent as before.
