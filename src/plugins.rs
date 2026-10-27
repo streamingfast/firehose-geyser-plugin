@@ -672,13 +672,18 @@ impl GeyserPlugin for Plugin {
     fn notify_block_footer(
         &self,
         block_footer: ReplicaBlockFooterInfoVersions<'_>,
-        _bank_id: BankId,
+        bank_id: BankId,
     ) -> PluginResult<()> {
         let ReplicaBlockFooterInfoVersions::V0_0_2(info) = block_footer;
         let VersionedBlockFooter::V1(footer) = info.block_footer;
 
         let mut lock_state = self.write_state("notify_block_footer");
-        lock_state.set_block_producer_time(info.slot, footer.block_producer_time_nanos, self.trace);
+        lock_state.set_block_producer_time(
+            info.slot,
+            bank_id,
+            footer.block_producer_time_nanos,
+            self.trace,
+        );
 
         Ok(())
     }
