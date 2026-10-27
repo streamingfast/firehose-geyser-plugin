@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v4.4.0-rc.1-fh3.0
+
+* Bumped to [Agave 4.4.0-rc.1](https://github.com/anza-xyz/agave/releases/tag/v4.4.0-rc.1) (`solana-rpc-client`, `solana-rpc-client-api`, `solana-transaction-status`). The Geyser plugin interface stays at `agave-geyser-plugin-interface` `5.0.0`. Agave 4.4.0-rc.1 changes no feature, and nothing in the Geyser plugin manager or `transaction-status`.
+* The Docker image no longer uses our Agave fork (`ghcr.io/streamingfast/solana`). It builds `agave-validator` and `solana-test-validator` from upstream Agave at the tag in the new `AGAVE_VERSION` build argument, which replaces `SOLANA_TAG`. Anza publishes no Docker image for Agave 4.x, and its release archive has no `agave-validator`. The fork's only code change skipped vote program accounts before they reached the plugin. The plugin already skips them itself, so its output is the same.
+* The image build fails when Agave's `rust-toolchain.toml` channel differs from the plugin's, because the plugin and the validator exchange Rust trait objects and must be built by the same compiler.
+* `ACTIVATIONS.md`: `alpenglow` is activated on mainnet at slot 459648000. `increase_tx_account_lock_limit` and `virtual_address_space_adjustments` on mainnet, and `enable_zk_proof_from_account` on testnet, were listed as `pending` but are not activated: their accounts are empty system accounts, not feature accounts. Statuses checked on 2026-10-27.
+
 ## v4.4.0-beta.1-fh3.0-1
 
 * Handle the Alpenglow UpdateParent marker of `alpenglow_fast_leader_handover`. When a leader switches the parent of a slot partway through the block, Agave clears the slot's bank and replays the slot in a new bank. The plugin now drops the transactions and account updates of the cleared bank, including those that arrive after the UpdateParent notification. It keeps those of the new bank. It used to send both banks' data in one block. Pending transactions and account changes now record the bank that produced them, which adds 8 bytes to each.
