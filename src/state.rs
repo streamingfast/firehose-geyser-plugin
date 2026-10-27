@@ -145,17 +145,21 @@ impl PendingAccountChanges {
         changes
     }
 
-    /// Removes the changes `bank_id` made in `slot`.
-    fn remove_bank_changes(&mut self, slot: u64, bank_id: BankId) {
+    /// Removes the changes `bank_id` made in `slot` and returns how many there were.
+    fn remove_bank_changes(&mut self, slot: u64, bank_id: BankId) -> usize {
+        let mut removed = 0;
         for shard in self.shards.iter_mut() {
             if let Some(slot_changes) = shard
                 .get_mut()
                 .expect("pending account changes lock poisoned")
                 .get_mut(&slot)
             {
+                let before = slot_changes.len();
                 slot_changes.retain(|_, change| change.bank_id != bank_id);
+                removed += before - slot_changes.len();
             }
         }
+        removed
     }
 
     /// Removes the slots at or below `upto` and returns them.
@@ -754,6 +758,8 @@ pub struct BlockInfo {
     pub block_producer_time_nanos: Option<u64>,
     /// Block info fetched from RPC, for a slot whose notifications were never received.
     pub from_rpc: bool,
+    /// Bank whose block metadata this is. None for block info fetched from RPC.
+    pub bank_id: Option<BankId>,
 }
 
 impl BlockInfo {
@@ -805,8 +811,14 @@ pub struct State {
     /// Banks cleared by an Alpenglow UpdateParent, with their slot. Their transactions and
     /// account updates can still arrive after the UpdateParent, on other validator threads.
     pub cleared_banks: HashMap<BankId, u64>,
-    /// Footer times received before the block info of their slot.
-    pub block_producer_times: HashMap<u64, u64>,
+    /// Banks Agave created, froze or confirmed for each slot. A slot has more than one when
+    /// Agave replays it again in a new bank: a slot number the Alpenglow migration purged and
+    /// an Alpenglow block reused, or another version of a duplicate block.
+    pub slot_banks: HashMap<u64, Vec<BankId>>,
+    /// Bank of each confirmed slot, from its Confirmed notification.
+    pub confirmed_banks: HashMap<u64, BankId>,
+    /// Footer times, with their bank, received before the block info of their bank.
+    pub block_producer_times: HashMap<u64, (BankId, u64)>,
     /// Lowest slot a block footer was received for. Every block after it is an Alpenglow
     /// block, and Agave rejects an Alpenglow block without a footer.
     pub first_footer_slot: Option<u64>,
@@ -858,6 +870,8 @@ impl State {
             block_infos: HashMap::default(),
             confirmed_slots: HashMap::default(),
             cleared_banks: HashMap::default(),
+            slot_banks: HashMap::default(),
+            confirmed_banks: HashMap::default(),
             block_producer_times: HashMap::default(),
             first_footer_slot: None,
             last_sent_block: None,
@@ -894,6 +908,8 @@ impl State {
             block_infos: self.block_infos.clone(),
             confirmed_slots: self.confirmed_slots.clone(),
             cleared_banks: self.cleared_banks.clone(),
+            slot_banks: self.slot_banks.clone(),
+            confirmed_banks: self.confirmed_banks.clone(),
             block_producer_times: self.block_producer_times.clone(),
             first_footer_slot: self.first_footer_slot,
             with_block: self.with_block,
@@ -978,6 +994,7 @@ impl State {
                         transaction_count: block.transactions.unwrap_or_default().len() as u64,
                         block_producer_time_nanos: None,
                         from_rpc: true,
+                        bank_id: None,
                     },
                     trace,
                 )
@@ -1006,6 +1023,7 @@ impl State {
                                     as u64,
                                 block_producer_time_nanos: None,
                                 from_rpc: true,
+                                bank_id: None,
                             },
                             trace,
                         )
@@ -1115,6 +1133,17 @@ impl State {
         match self.block_infos.get(&slot) {
             None => false,
             Some(blk) => {
+                if let (Some(&confirmed), Some(bank_id)) =
+                    (self.confirmed_banks.get(&slot), blk.bank_id)
+                {
+                    if confirmed != bank_id {
+                        debug!(
+                            "slot {} is confirmed in bank {}, waiting for its block info (have bank {})",
+                            slot, confirmed, bank_id
+                        );
+                        return false;
+                    }
+                }
                 if blk.block_producer_time_nanos.is_none()
                     && !blk.from_rpc
                     && self.first_footer_slot.is_some_and(|first| slot > first)
@@ -1126,14 +1155,20 @@ impl State {
                     return true; // if we only track account changes, we don't need to count the transactions
                 }
                 if let Some(trxs) = self.transactions.lock().unwrap().get(&slot) {
-                    if blk.transaction_count == trxs.len() as u64 {
+                    let replaced = self.replaced_banks(slot);
+                    let received = if replaced.is_empty() {
+                        trxs.len()
+                    } else {
+                        trxs.iter()
+                            .filter(|tx| !replaced.contains(&tx.bank_id))
+                            .count()
+                    } as u64;
+                    if blk.transaction_count == received {
                         true
                     } else {
                         debug!(
                             "slot {} has {} transactions, but {} were received, waiting for more",
-                            slot,
-                            blk.transaction_count,
-                            trxs.len()
+                            slot, blk.transaction_count, received
                         );
                         {
                             false
@@ -1153,6 +1188,79 @@ impl State {
         }
     }
 
+    /// Records a bank Agave created, froze or confirmed for `slot`.
+    pub fn add_slot_bank(&mut self, slot: u64, bank_id: BankId) {
+        let banks = self.slot_banks.entry(slot).or_default();
+        if !banks.contains(&bank_id) {
+            banks.push(bank_id);
+        }
+    }
+
+    /// Records the bank of a Confirmed notification, unless its slot was already sent.
+    pub fn set_confirmed_bank(&mut self, slot: u64, bank_id: BankId) {
+        if self
+            .last_sent_block
+            .is_some_and(|last_sent| slot <= last_sent)
+        {
+            return;
+        }
+        self.add_slot_bank(slot, bank_id);
+        self.confirmed_banks.insert(slot, bank_id);
+    }
+
+    /// The bank whose data is sent for `slot`: the confirmed one, else the one whose block
+    /// metadata came last. None when neither is known, as for block info fetched from RPC.
+    fn kept_bank(&self, slot: u64) -> Option<BankId> {
+        self.confirmed_banks
+            .get(&slot)
+            .copied()
+            .or_else(|| self.block_infos.get(&slot).and_then(|info| info.bank_id))
+    }
+
+    /// The banks Agave announced for `slot` other than the kept one. Data from a bank Agave
+    /// never announced for the slot is kept.
+    fn replaced_banks(&self, slot: u64) -> Vec<BankId> {
+        let Some(kept) = self.kept_bank(slot) else {
+            return Vec::new();
+        };
+        match self.slot_banks.get(&slot) {
+            Some(banks) => banks.iter().copied().filter(|&bank| bank != kept).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Drops the transactions and account changes of the banks `slot` was replayed away from.
+    /// After the Alpenglow migration purges its vote-only blocks, Agave sends no notification,
+    /// and an Alpenglow block can reuse the slot number.
+    fn drop_replaced_banks(&mut self, slot: u64) {
+        let replaced = self.replaced_banks(slot);
+        if replaced.is_empty() {
+            return;
+        }
+        let kept = self
+            .kept_bank(slot)
+            .expect("replaced banks imply a kept bank");
+
+        let mut dropped_changes = 0;
+        for &bank_id in &replaced {
+            dropped_changes += self
+                .block_account_changes
+                .remove_bank_changes(slot, bank_id);
+        }
+        let mut dropped_transactions = 0;
+        if let Some(transactions) = self.transactions.get_mut().unwrap().get_mut(&slot) {
+            let before = transactions.len();
+            transactions.retain(|tx| !replaced.contains(&tx.bank_id));
+            dropped_transactions = before - transactions.len();
+        }
+        if dropped_changes > 0 || dropped_transactions > 0 {
+            warn!(
+                "slot {} keeps bank {}, dropped {} transactions and {} account changes of replaced banks {:?}",
+                slot, kept, dropped_transactions, dropped_changes, replaced
+            );
+        }
+    }
+
     /// Drops what a bank cleared by an Alpenglow UpdateParent sent for its slot. Agave replays
     /// the slot again in a new bank, whose notifications may already be here, so only the
     /// cleared bank's are removed.
@@ -1169,7 +1277,10 @@ impl State {
         }
     }
 
-    pub fn set_block_producer_time(&mut self, slot: u64, nanos: u64, trace: bool) {
+    /// Sets the footer time of `bank_id`'s block. Agave sends the footer during replay and the
+    /// block info when the bank freezes, so a replacement bank's footer can arrive while the
+    /// slot still holds the block info of the bank it replaces: it waits for its own.
+    pub fn set_block_producer_time(&mut self, slot: u64, bank_id: BankId, nanos: u64, trace: bool) {
         if self
             .last_sent_block
             .is_some_and(|last_sent| slot <= last_sent)
@@ -1185,9 +1296,11 @@ impl State {
             self.first_footer_slot = Some(slot);
         }
         match self.block_infos.get_mut(&slot) {
-            Some(block_info) => block_info.block_producer_time_nanos = Some(nanos),
-            None => {
-                self.block_producer_times.insert(slot, nanos);
+            Some(block_info) if block_info.bank_id.is_none_or(|bank| bank == bank_id) => {
+                block_info.block_producer_time_nanos = Some(nanos)
+            }
+            _ => {
+                self.block_producer_times.insert(slot, (bank_id, nanos));
                 return;
             }
         }
@@ -1204,8 +1317,14 @@ impl State {
 
     pub fn set_block_info(&mut self, mut block_info: BlockInfo, trace: bool) {
         let slot = block_info.slot;
-        if let Some(nanos) = self.block_producer_times.remove(&slot) {
-            block_info.block_producer_time_nanos = Some(nanos);
+        if let Some(&(bank_id, nanos)) = self.block_producer_times.get(&slot) {
+            if block_info.bank_id.is_none_or(|bank| bank == bank_id) {
+                self.block_producer_times.remove(&slot);
+                block_info.block_producer_time_nanos = Some(nanos);
+            }
+        }
+        if let Some(bank_id) = block_info.bank_id {
+            self.add_slot_bank(slot, bank_id);
         }
         if slot >= self.last_stats_slot + MEMORY_STATS_INTERVAL_SLOTS {
             self.last_stats_slot = slot;
@@ -1540,6 +1659,8 @@ impl State {
             self.block_infos.remove(&block);
         }
         self.cleared_banks.retain(|_, &mut slot| slot > upto);
+        self.slot_banks.retain(|&slot, _| slot > upto);
+        self.confirmed_banks.retain(|&slot, _| slot > upto);
         self.block_producer_times.retain(|&slot, _| slot > upto);
 
         let slots = self.confirmed_slots.keys().cloned().collect::<Vec<u64>>();
@@ -1689,6 +1810,7 @@ impl State {
 
         for slot in confirmed_slots {
             let must_send = slot >= first_block_to_process || self.dev_config.force_send;
+            self.drop_replaced_banks(slot);
 
             let block_info = match self.block_infos.get(&slot) {
                 None => {
@@ -4128,7 +4250,7 @@ mod tests {
             new_test_state(Some(100), setup_noop_block_printer_with_logging(true, true));
 
         state.set_lib(99);
-        state.set_block_producer_time(100, 1_760_000_000_123_456_789, true);
+        state.set_block_producer_time(100, 0, 1_760_000_000_123_456_789, true);
         state.set_block_info(simple_block_info(100), true);
         state.set_confirmed_slot_unless_sent(100, true);
         assert_eq!(state.last_sent_block, Some(100));
@@ -4137,7 +4259,7 @@ mod tests {
         state.set_confirmed_slot_unless_sent(101, true);
         assert_eq!(state.last_sent_block, Some(100));
 
-        state.set_block_producer_time(101, 1_760_000_000_523_456_789, true);
+        state.set_block_producer_time(101, 0, 1_760_000_000_523_456_789, true);
         assert_eq!(state.last_sent_block, Some(101));
         assert!(state.block_producer_times.is_empty());
     }
@@ -4148,7 +4270,7 @@ mod tests {
             new_test_state(Some(100), setup_noop_block_printer_with_logging(true, true));
 
         state.set_lib(99);
-        state.set_block_producer_time(100, 1_760_000_000_123_456_789, true);
+        state.set_block_producer_time(100, 0, 1_760_000_000_123_456_789, true);
         state.set_block_info(simple_block_info(100), true);
         state.set_confirmed_slot_unless_sent(100, true);
 
@@ -4548,6 +4670,293 @@ mod tests {
         state.set_confirmed_slot_unless_sent(100, true);
         assert_eq!(state.last_sent_block, Some(100));
         assert!(state.cleared_banks.is_empty());
+    }
+
+    fn new_test_state_with_block() -> State {
+        let mut state =
+            new_test_state(Some(100), setup_noop_block_printer_with_logging(true, true));
+        state.with_block = true;
+        state.set_lib(99);
+        state
+    }
+
+    fn bank_transaction(index: usize, bank_id: BankId) -> ConfirmTransactionWithIndex {
+        ConfirmTransactionWithIndex {
+            index,
+            bank_id,
+            transaction: crate::pb::sf::solana::r#type::v1::ConfirmedTransaction::default(),
+        }
+    }
+
+    fn bank_block_info(
+        slot: u64,
+        parent_slot: u64,
+        transaction_count: u64,
+        bank_id: BankId,
+    ) -> BlockInfo {
+        BlockInfo {
+            transaction_count,
+            bank_id: Some(bank_id),
+            ..test_block_info(slot, parent_slot)
+        }
+    }
+
+    /// Sends 100 to 105, then replays 106 as a vote-only block in bank 1, which the Alpenglow
+    /// migration purges without notifying, and as an Alpenglow block in bank 2.
+    fn replay_reused_slot(state: &mut State) {
+        for slot in 100..=105 {
+            state.set_block_info(simple_block_info(slot), true);
+            state.set_confirmed_slot_unless_sent(slot, true);
+        }
+        assert_eq!(state.last_sent_block, Some(105));
+
+        let (vote_only, alpenglow) = (1, 2);
+        state.add_slot_bank(106, vote_only);
+        state.set_account(
+            106,
+            vote_only,
+            PUB_KEY_2,
+            DATA_2,
+            OWNER_KEY_1,
+            2,
+            false,
+            23456,
+            true,
+        );
+        state.set_transaction(106, bank_transaction(0, vote_only), true);
+        state.set_block_info(bank_block_info(106, 105, 1, vote_only), true);
+
+        state.add_slot_bank(106, alpenglow);
+        state.set_account(
+            106,
+            alpenglow,
+            PUB_KEY_3,
+            DATA_3,
+            OWNER_KEY_1,
+            3,
+            false,
+            34567,
+            true,
+        );
+        state.set_transaction(106, bank_transaction(0, alpenglow), true);
+        state.set_block_info(bank_block_info(106, 105, 1, alpenglow), true);
+    }
+
+    #[test]
+    fn test_reused_slot_keeps_only_the_confirmed_bank() {
+        let mut state = new_test_state_with_block();
+        replay_reused_slot(&mut state);
+
+        state.set_confirmed_bank(106, 2);
+        state.set_confirmed_slot_unless_sent(106, true);
+        assert_eq!(state.last_sent_block, Some(106));
+
+        assert_logs_contain_ordered(vec![
+            "slot 106 keeps bank 2, dropped 1 transactions and 1 account changes of replaced banks [1]".to_string(),
+            "preparing to send slot 106 (account_changes=1, txs=1, parent=105, lib=99)".to_string(),
+        ]);
+        assert!(state
+            .account_cache
+            .get_by_key(&concat_keys(OWNER_KEY_1, PUB_KEY_2))
+            .is_none());
+        assert_eq!(
+            state
+                .account_cache
+                .get_by_key(&concat_keys(OWNER_KEY_1, PUB_KEY_3))
+                .unwrap(),
+            34567
+        );
+        assert!(state.slot_banks.is_empty());
+        assert!(state.confirmed_banks.is_empty());
+    }
+
+    #[test]
+    fn test_reused_slot_without_its_own_confirmed_keeps_the_last_frozen_bank() {
+        let mut state = new_test_state_with_block();
+        replay_reused_slot(&mut state);
+
+        // Confirmed through an ancestor walk that did not carry the slot's bank
+        state.set_confirmed_slot_unless_sent(106, true);
+        assert_eq!(state.last_sent_block, Some(106));
+
+        assert_logs_contain_ordered(vec![
+            "slot 106 keeps bank 2, dropped 1 transactions and 1 account changes of replaced banks [1]".to_string(),
+            "preparing to send slot 106 (account_changes=1, txs=1, parent=105, lib=99)".to_string(),
+        ]);
+    }
+
+    #[test]
+    fn test_single_bank_slot_keeps_everything() {
+        let mut state = new_test_state_with_block();
+        let bank = 5;
+
+        state.add_slot_bank(100, bank);
+        // Confirmed can reach the plugin before the block metadata
+        state.set_confirmed_bank(100, bank);
+        state.set_confirmed_slot_unless_sent(100, true);
+        state.set_account(
+            100,
+            bank,
+            PUB_KEY_1,
+            DATA_1,
+            OWNER_KEY_1,
+            1,
+            false,
+            12345,
+            true,
+        );
+        state.set_account(
+            100,
+            bank,
+            PUB_KEY_2,
+            DATA_2,
+            OWNER_KEY_1,
+            2,
+            false,
+            23456,
+            true,
+        );
+        state.set_transaction(100, bank_transaction(0, bank), true);
+        state.set_transaction(100, bank_transaction(1, bank), true);
+        assert_eq!(state.last_sent_block, None);
+
+        state.set_block_info(bank_block_info(100, 99, 2, bank), true);
+        assert_eq!(state.last_sent_block, Some(100));
+
+        assert_logs_contain_ordered(vec![
+            "preparing to send slot 100 (account_changes=2, txs=2, parent=99, lib=99)".to_string(),
+        ]);
+        testing_logger::validate(|captured_logs| {
+            assert!(!captured_logs
+                .iter()
+                .any(|log| log.body.contains("replaced banks")));
+        });
+    }
+
+    #[test]
+    fn test_banks_never_announced_for_the_slot_are_kept() {
+        let mut state = new_test_state_with_block();
+
+        // Block info from RPC: no bank is known for the slot
+        state.set_transaction(100, bank_transaction(0, 1), true);
+        state.set_transaction(100, bank_transaction(1, 2), true);
+        state.set_block_info(
+            BlockInfo {
+                transaction_count: 2,
+                from_rpc: true,
+                ..test_block_info(100, 99)
+            },
+            true,
+        );
+        state.set_confirmed_slot_unless_sent(100, true);
+        assert_eq!(state.last_sent_block, Some(100));
+
+        // The kept bank is known, but Agave never announced bank 9 for the slot
+        state.add_slot_bank(101, 2);
+        state.set_transaction(101, bank_transaction(0, 2), true);
+        state.set_transaction(101, bank_transaction(1, 9), true);
+        state.set_block_info(bank_block_info(101, 100, 2, 2), true);
+        state.set_confirmed_bank(101, 2);
+        state.set_confirmed_slot_unless_sent(101, true);
+        assert_eq!(state.last_sent_block, Some(101));
+
+        assert_logs_contain_ordered(vec![
+            "preparing to send slot 100 (account_changes=0, txs=2, parent=99, lib=99)".to_string(),
+            "preparing to send slot 101 (account_changes=0, txs=2, parent=100, lib=99)".to_string(),
+        ]);
+    }
+
+    #[test]
+    fn test_replaced_bank_transactions_do_not_complete_the_block() {
+        let mut state = new_test_state_with_block();
+        let (replaced, kept) = (1, 2);
+        state.set_block_info(simple_block_info(100), true);
+        state.set_confirmed_slot_unless_sent(100, true);
+
+        state.add_slot_bank(101, replaced);
+        state.set_transaction(101, bank_transaction(0, replaced), true);
+        state.set_block_info(bank_block_info(101, 100, 1, replaced), true);
+
+        state.add_slot_bank(101, kept);
+        state.set_transaction(101, bank_transaction(0, kept), true);
+        state.set_block_info(bank_block_info(101, 100, 2, kept), true);
+        state.set_confirmed_bank(101, kept);
+        // Two transactions are in, but one is from the replaced bank
+        state.set_confirmed_slot_unless_sent(101, true);
+        assert_eq!(state.last_sent_block, Some(100));
+
+        // A transaction of the replaced bank still in flight
+        state.set_transaction(101, bank_transaction(1, replaced), true);
+        assert_eq!(state.last_sent_block, Some(100));
+
+        state.set_transaction(101, bank_transaction(1, kept), true);
+        assert_eq!(state.last_sent_block, Some(101));
+        assert_logs_contain_ordered(vec![
+            "slot 101 keeps bank 2, dropped 2 transactions and 0 account changes of replaced banks [1]".to_string(),
+            "preparing to send slot 101 (account_changes=0, txs=2, parent=100, lib=99)".to_string(),
+        ]);
+    }
+
+    #[test]
+    fn test_replaced_bank_block_info_does_not_complete_the_block() {
+        let mut state = new_test_state_with_block();
+        let (replaced, kept) = (1, 2);
+        state.set_block_info(simple_block_info(100), true);
+        state.set_confirmed_slot_unless_sent(100, true);
+
+        state.add_slot_bank(101, replaced);
+        state.set_transaction(101, bank_transaction(0, replaced), true);
+        state.set_block_info(bank_block_info(101, 100, 1, replaced), true);
+
+        state.add_slot_bank(101, kept);
+        state.set_confirmed_bank(101, kept);
+        state.set_confirmed_slot_unless_sent(101, true);
+        // The transaction count matches, but the block info is the replaced bank's
+        state.set_transaction(101, bank_transaction(0, kept), true);
+        assert_eq!(state.last_sent_block, Some(100));
+
+        state.set_block_info(bank_block_info(101, 100, 1, kept), true);
+        assert_eq!(state.last_sent_block, Some(101));
+        assert_logs_contain_ordered(vec![
+            "slot 101 keeps bank 2, dropped 1 transactions and 0 account changes of replaced banks [1]".to_string(),
+            "preparing to send slot 101 (account_changes=0, txs=1, parent=100, lib=99)".to_string(),
+        ]);
+    }
+
+    #[test]
+    fn test_replacement_bank_footer_waits_for_its_block_info() {
+        let mut state = new_test_state_with_block();
+        let (replaced, kept) = (1, 2);
+        let (replaced_time, kept_time) = (1_760_000_000_123_456_789, 1_760_000_000_523_456_789);
+        state.set_block_producer_time(100, 0, 1_760_000_000_000_000_000, true);
+        state.set_block_info(simple_block_info(100), true);
+        state.set_confirmed_slot_unless_sent(100, true);
+        assert_eq!(state.last_sent_block, Some(100));
+
+        state.add_slot_bank(101, replaced);
+        state.set_transaction(101, bank_transaction(0, replaced), true);
+        state.set_block_producer_time(101, replaced, replaced_time, true);
+        state.set_block_info(bank_block_info(101, 100, 1, replaced), true);
+
+        // Agave sends the footer during replay, before the bank freezes
+        state.add_slot_bank(101, kept);
+        state.set_transaction(101, bank_transaction(0, kept), true);
+        state.set_block_producer_time(101, kept, kept_time, true);
+        assert_eq!(
+            state.block_infos[&101].block_producer_time_nanos,
+            Some(replaced_time)
+        );
+
+        state.set_block_info(bank_block_info(101, 100, 1, kept), true);
+        assert_eq!(
+            state.block_infos[&101].block_producer_time_nanos,
+            Some(kept_time)
+        );
+        assert!(state.block_producer_times.is_empty());
+
+        state.set_confirmed_bank(101, kept);
+        state.set_confirmed_slot_unless_sent(101, true);
+        assert_eq!(state.last_sent_block, Some(101));
     }
 
     /// The pending changes of a slot, merged across shards.
