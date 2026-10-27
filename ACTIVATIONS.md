@@ -2,8 +2,8 @@
 
 Every feature Agave defines, with its status on the clusters we serve and its effect on the Firehose block. Statuses are the activation slot, `not activated`, or `pending` (activation requested, takes effect at the next epoch).
 
-* Agave version: `v4.4.0-beta.1`
-* Statuses checked: 2026-10-14, on `api.mainnet-beta.solana.com` and `api.testnet.solana.com`
+* Agave version: `v4.4.0-rc.1`
+* Statuses checked: 2026-10-27, on `api.mainnet-beta.solana.com` and `api.testnet.solana.com`
 
 Effects:
 
@@ -16,7 +16,7 @@ On each bump, add the features that are new in the target version, review the on
 
 ## Features with a shape effect
 
-* `alpenglow` (mainnet: not activated, testnet: 444620256): Block time comes from the Alpenglow footer instead of PoH clock (runtime/src/bank.rs:2136-2143); the block footer is only delivered through notify_block_footer, with no model field; votes move to BLS certificates; vote rewards and VAT burn become account writes (bank.rs:2822).
+* `alpenglow` (mainnet: 459648000, testnet: 444620256): Block time comes from the Alpenglow footer instead of PoH clock (runtime/src/bank.rs:2136-2143); the block footer is only delivered through notify_block_footer, with no model field; votes move to BLS certificates; vote rewards and VAT burn become account writes (bank.rs:2822).
 * `alpenglow_fast_leader_handover` (mainnet: not activated, testnet: not activated): UpdateParent markers let a slot's parent change after replay started and replay restart from a later FEC set (ledger/src/blockstore_processor.rs:1409,2051; core/src/replay_stage/update_parent.rs:152); transactions from the cleared bank reach the plugin, which keys by slot and ignores bank_id. Feature ID has no private key yet.
 * `block_revenue_sharing` (mainnet: not activated, testnet: not activated): Block fees split into up to two RewardType::Fee rewards, to the commission collector and the vote account, with commission_bps None (runtime/src/bank/fee_distribution.rs:183-240); a Fee reward can go to an address other than the leader. The model can carry it, consumers assuming one Fee reward to the leader cannot.
 * `commission_rate_in_basis_points` (mainnet: 433296000, testnet: 416540256): geyser-plugin-manager/src/block_metadata_notifier.rs:105-114 sends Reward.commission = None and the value in commission_bps; sf.solana.type.v1.Reward has only commission, so it is empty for every Voting and Staking reward.
@@ -27,7 +27,7 @@ On each bump, add the features that are new in the target version, review the on
 
 | Feature | ID | Mainnet | Testnet | Effect | Note |
 |---|---|---|---|---|---|
-| `alpenglow` | `A1pengvuM6JEcyNuTnMqepBKhwHE3N6PmUrdATGawhJS` | not activated | 444620256 | shape | Block time comes from the Alpenglow footer instead of PoH clock (runtime/src/bank.rs:2136-2143); the block footer is only delivered through notify_block_footer, with no model field; votes move to BLS certificates; vote rewards and VAT burn become account writes (bank.rs:2822). |
+| `alpenglow` | `A1pengvuM6JEcyNuTnMqepBKhwHE3N6PmUrdATGawhJS` | 459648000 | 444620256 | shape | Block time comes from the Alpenglow footer instead of PoH clock (runtime/src/bank.rs:2136-2143); the block footer is only delivered through notify_block_footer, with no model field; votes move to BLS certificates; vote rewards and VAT burn become account writes (bank.rs:2822). |
 | `alpenglow_fast_leader_handover` | `FastLeaderHandover11111111111111111111111111` | not activated | not activated | shape | UpdateParent markers let a slot's parent change after replay started and replay restart from a later FEC set (ledger/src/blockstore_processor.rs:1409,2051; core/src/replay_stage/update_parent.rs:152); transactions from the cleared bank reach the plugin, which keys by slot and ignores bank_id. Feature ID has no private key yet. |
 | `block_revenue_sharing` | `Crbnc267wkJvFhYakqwWWX57sx5bkrftJLekzy6yWKLT` | not activated | not activated | shape | Block fees split into up to two RewardType::Fee rewards, to the commission collector and the vote account, with commission_bps None (runtime/src/bank/fee_distribution.rs:183-240); a Fee reward can go to an address other than the leader. The model can carry it, consumers assuming one Fee reward to the leader cannot. |
 | `commission_rate_in_basis_points` | `Eg7tXEwMZzS98xaZ1YHUbdRHsaYZiCsSaR6sKgxreoaj` | 433296000 | 416540256 | shape | geyser-plugin-manager/src/block_metadata_notifier.rs:105-114 sends Reward.commission = None and the value in commission_bps; sf.solana.type.v1.Reward has only commission, so it is empty for every Voting and Staking reward. |
@@ -69,7 +69,7 @@ On each bump, add the features that are new in the target version, review the on
 | `full_inflation::mainnet::certusone::enable` | `7XRJcS5Ud5vxGB54JbK9N2vBZVwnwdBNeJW1ibRgD9gx` | 64800004 | not activated | values | Only feeds full_inflation_features_enabled() in runtime/src/bank.rs:3118/6477, changing inflation amounts (reward lamports) but not reward kinds. |
 | `get_sysvar_syscall_enabled` | `CLCoTADvV64PSrnR6QXty6Fwrt9Xc6EdxSJE4wLRePjq` | 321840000 | 316748256 | values | Enables a sysvar-read syscall; execution results only. |
 | `increase_cpi_account_info_limit` | `H6iVbVaDZgDphcPbcZwc5LoznMPWQfnJ1AM7L1xzqvt5` | 403056000 | 385868256 | values | Raises a CPI account info limit. |
-| `increase_tx_account_lock_limit` | `9LZdXeKGeBV6hRLdxS1rHbHoEUsKqesCC2ZAPTPKJAbK` | pending | not activated | values | Raises the per-transaction account lock cap from 64 to 128 (runtime/src/bank.rs:3849); account key lists are copied unchanged. |
+| `increase_tx_account_lock_limit` | `9LZdXeKGeBV6hRLdxS1rHbHoEUsKqesCC2ZAPTPKJAbK` | not activated | not activated | values | Raises the per-transaction account lock cap from 64 to 128 (runtime/src/bank.rs:3849); account key lists are copied unchanged. |
 | `last_restart_slot_sysvar` | `HooKD5NC9QNxk25QuzCssB8ecrEzGt6eXEPBUxWp1LaR` | 282096004 | 283916256 | values | Enables a sysvar syscall (syscalls/src/lib.rs:328). |
 | `loader_v3_minimum_extend_program_size` | `YbbRLkvenrocjGPGyoQE4wjnvYzTgfsk38NFmcYK7a5` | 432864000 | 416540256 | values | Loader-v3 ExtendProgram minimum size (programs/bpf_loader/src/lib.rs:893). |
 | `loader_v3_set_program_data_to_elf_length` | `EhisBfVtGvEA8bVCVN5VMaYEaX6iTfoUrmcDi8LY7Kxy` | not activated | not activated | values | Programdata account size on deploy (programs/bpf_loader/src/lib.rs:380). |
@@ -102,7 +102,7 @@ On each bump, add the features that are new in the target version, review the on
 | `syscall_parameter_address_restrictions` | `EDGMC5kxFxGk4ixsNkGt8bW7QL5hDMXnbwaZvYMwNfzF` | 429840000 | 407468256 | values | Stricter pointer checks in syscalls; transaction status, logs and compute units. |
 | `timely_vote_credits` | `tvcF6b1TRz353zKuhBjinZkKzjmihXmBAHJdjNYw1sQ` | 303696000 | 299036260 | values | Vote credit calculation; vote account data and reward amounts. |
 | `upgrade_bpf_stake_program_to_v5` | `STk5Xj8hdAx3sTzmtJ3QysKkq6X2A3yj73JtxttiRyk` | 427248000 | 407036256 | values | Replaces the Core BPF Stake program account at activation (runtime/src/bank.rs:6509). |
-| `virtual_address_space_adjustments` | `7VgiehxNxu53KdxgLspGQY8myE6f7UokaWa4jsGcaSz` | pending | 407900256 | values | Changes program input serialization/memory mapping in program-runtime (serialization.rs, vm.rs) so tx results/CUs/account data may differ, but no field or kind change. |
+| `virtual_address_space_adjustments` | `7VgiehxNxu53KdxgLspGQY8myE6f7UokaWa4jsGcaSz` | not activated | 407900256 | values | Changes program input serialization/memory mapping in program-runtime (serialization.rs, vm.rs) so tx results/CUs/account data may differ, but no field or kind change. |
 | `vote_account_initialize_v2` | `VoteAccount1nitia1izeV211111111111111111111` | not activated | not activated | values | New vote program InitializeAccountV2 instruction (programs/vote/src/vote_processor.rs:69). |
 | `vote_authorize_with_seed` | `6tRxEYKuy2L5nnv5bgn7iT28MxUbYxp5h7F3Ncf1exrT` | 148608004 | 144380257 | values | Vote program instruction; transaction success and vote account data. |
 | `vote_state_v4` | `Gx4XFcrVMt4HUvPzTpTSVkdDVgcDSjKhDN1RqRS6KDuZ` | 409968000 | 387596256 | values | New vote account data layout (programs/vote/src/vote_state/mod.rs:977); bytes copied unchanged. |
@@ -190,7 +190,7 @@ On each bump, add the features that are new in the target version, review the on
 | `enable_turbine_fanout_experiments` | `D31EFnLgdiysi84Woo3of4JMu7VmasUS3Z7j9HYXCeLY` | 247104008 | 247628260 | enable turbine fanout experiments #29393 |
 | `enable_tx_v1` | `txv1aq4pp281K9um3tnPgkfX8UqtFT6wcVW3hNezGLL` | 447120000 | 437276256 | SIMD-0385: Transaction V1 |
 | `enable_vote_address_leader_schedule` | `5JsG4NWH8Jbrqdd8uL6BNwnyZK3dQSoieRXG5vmofj9y` | 363312000 | 352604256 | SIMD-0180: Enable vote address leader schedule #4573 |
-| `enable_zk_proof_from_account` | `zkiTNuzBKxrCLMKehzuQeKZyLtX2yvFcEKMML8nExU8` | not activated | pending | Enable zk token proof program to read proof from accounts instead of instruction data #34750 |
+| `enable_zk_proof_from_account` | `zkiTNuzBKxrCLMKehzuQeKZyLtX2yvFcEKMML8nExU8` | not activated | not activated | Enable zk token proof program to read proof from accounts instead of instruction data #34750 |
 | `enable_zk_transfer_with_fee` | `zkNLP7EQALfC1TYeB3biDU7akDckj8iPkvh9y2Mt2K3` | not activated | not activated | enable Zk Token proof program transfer with fee |
 | `enforce_fixed_fec_set` | `fixfecLZYMfkGzwq6NJA11Yw6KYztzXiK9QcL3K78in` | 403920000 | 385868256 | SIMD-0317: Enforce 32 data + 32 coding shreds |
 | `epoch_accounts_hash` | `5GpmAKxaGsWWbPp4bNXFLJxZVvG92ctxf7jQnzTQjF3n` | 228528004 | 217388260 | enable epoch accounts hash calculation #27539 |
