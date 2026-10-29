@@ -52,7 +52,7 @@ On each bump, add the features that are new in the target version, review the on
 | `disable_sbpf_v0_execution` | `TestFeature11111111111111111111111111111111` | not activated | not activated | values | SBPFv0 programs fail to load (syscalls/src/lib.rs:335); transaction errors and logs. |
 | `disable_sbpf_v0_v1_v2_deployment` | `B8JJXCy5amZyWG9r7EnUYLwzXSXTxG7GZ1qZ1qggo83g` | not activated | not activated | values | Deploying old SBPF versions fails (program-runtime/src/deploy.rs:30). |
 | `disable_zk_elgamal_proof_program` | `zkdoVwnSFnSLtGJG7irJPEYUpmb4i7sGMGcnN6T9rnC` | 347760000 | 340508256 | values | The zk-elgamal proof program returns an error (programs/zk-elgamal-proof/src/lib.rs:178). |
-| `double_disinflation_rate` | `55oikhjJ2LUi1xdgJ17ueRyHFURZEw32asT3iAKfh7gg` | not activated | not activated | values | runtime/src/bank.rs:6357,6374,6483 changes the inflation taper, altering reward amounts only. |
+| `double_disinflation_rate` | `ddibiks7RHZR69QXYMCmk4EZNt6WckspTqEEWv6cS38` | not activated | not activated | values | runtime/src/bank.rs:6357,6374,6483 changes the inflation taper, altering reward amounts only. |
 | `enable_alt_bn128_compression_syscall` | `EJJewYSddEEtSZHiqugnvhQHiWyZKjkFDQASd7oKSagn` | 276912000 | 279164260 | values | Enables syscalls; transaction success, logs and compute units. |
 | `enable_alt_bn128_g2_syscalls` | `bn1hKNURMGQaQoEVxahcEAcqiX3NwRs6hgKKNSLeKxH` | 425520000 | 406604256 | values | Enables syscalls. |
 | `enable_alt_bn128_syscall` | `A16q37opZdQMCbe5qJ6xpBB9usykfv8jZaMkxvZQi4GJ` | 275616000 | 247628260 | values | Syscall registration gate in syscalls/src/lib.rs; changes which txs succeed and CUs. |

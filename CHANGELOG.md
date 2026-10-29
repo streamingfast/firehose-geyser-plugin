@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v4.4.0-fh3.0
+
+* Bumped to [Agave 4.4.0](https://github.com/anza-xyz/agave/releases/tag/v4.4.0) (`solana-rpc-client`, `solana-rpc-client-api`, `solana-transaction-status`). The Docker image's Solana validator is now `v4.4.0-fh3.0`. The Geyser plugin interface stays at `agave-geyser-plugin-interface` `5.0.0`. Agave 4.4.0 changes nothing in the Geyser plugin manager or `transaction-status`.
+* `ACTIVATIONS.md`: `double_disinflation_rate` has a new feature ID, `ddibiks7RHZR69QXYMCmk4EZNt6WckspTqEEWv6cS38`. It is not activated on mainnet or testnet.
+
 ## v4.4.0-rc.1-fh3.0-1
 
 * Fixed blocks and account blocks mixing the data of two banks of the same slot. During the Alpenglow migration, Agave purges the vote-only blocks above the Alpenglow genesis block without notifying plugins, and an Alpenglow block can then reuse one of those slot numbers. The plugin sent the vote-only block's vote transactions, and the account changes only that block made (mostly the balances of the validators that paid for the votes), inside the Alpenglow block. It also held the slot until a later slot went out, because its transaction count never matched.
