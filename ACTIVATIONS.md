@@ -2,8 +2,8 @@
 
 Every feature Agave defines, with its status on the clusters we serve and its effect on the Firehose block. Statuses are the activation slot, `not activated`, or `pending` (activation requested, takes effect at the next epoch).
 
-* Agave version: `v4.4.0-rc.1`
-* Statuses checked: 2026-10-27, on `api.mainnet-beta.solana.com` and `api.testnet.solana.com`
+* Agave version: `v4.4.1`
+* Statuses checked: 2026-11-05, on `api.mainnet-beta.solana.com` and `api.testnet.solana.com`
 
 Effects:
 
@@ -69,10 +69,11 @@ On each bump, add the features that are new in the target version, review the on
 | `full_inflation::mainnet::certusone::enable` | `7XRJcS5Ud5vxGB54JbK9N2vBZVwnwdBNeJW1ibRgD9gx` | 64800004 | not activated | values | Only feeds full_inflation_features_enabled() in runtime/src/bank.rs:3118/6477, changing inflation amounts (reward lamports) but not reward kinds. |
 | `get_sysvar_syscall_enabled` | `CLCoTADvV64PSrnR6QXty6Fwrt9Xc6EdxSJE4wLRePjq` | 321840000 | 316748256 | values | Enables a sysvar-read syscall; execution results only. |
 | `increase_cpi_account_info_limit` | `H6iVbVaDZgDphcPbcZwc5LoznMPWQfnJ1AM7L1xzqvt5` | 403056000 | 385868256 | values | Raises a CPI account info limit. |
-| `increase_tx_account_lock_limit` | `9LZdXeKGeBV6hRLdxS1rHbHoEUsKqesCC2ZAPTPKJAbK` | not activated | not activated | values | Raises the per-transaction account lock cap from 64 to 128 (runtime/src/bank.rs:3849); account key lists are copied unchanged. |
+| `increase_tx_account_lock_limit` | `9LZdXeKGeBV6hRLdxS1rHbHoEUsKqesCC2ZAPTPKJAbK` | pending | not activated | values | Raises the per-transaction account lock cap from 64 to 128 (runtime/src/bank.rs:3849); account key lists are copied unchanged. |
 | `last_restart_slot_sysvar` | `HooKD5NC9QNxk25QuzCssB8ecrEzGt6eXEPBUxWp1LaR` | 282096004 | 283916256 | values | Enables a sysvar syscall (syscalls/src/lib.rs:328). |
 | `loader_v3_minimum_extend_program_size` | `YbbRLkvenrocjGPGyoQE4wjnvYzTgfsk38NFmcYK7a5` | 432864000 | 416540256 | values | Loader-v3 ExtendProgram minimum size (programs/bpf_loader/src/lib.rs:893). |
 | `loader_v3_set_program_data_to_elf_length` | `EhisBfVtGvEA8bVCVN5VMaYEaX6iTfoUrmcDi8LY7Kxy` | not activated | not activated | values | Programdata account size on deploy (programs/bpf_loader/src/lib.rs:380). |
+| `loaderv3_programdata_size_floor` | `8whkDenELnfwYLirBc4Wb4H2Z1z5K7tiykpdxJS7cWg1` | not activated | not activated | values | Charges every loader-v3 ProgramData account a transaction implicitly loads at least the ProgramData metadata size, even when it does not exist (svm/src/account_loader.rs:572), so more transactions can fail with MaxLoadedAccountsDataSizeExceeded. Before activation, the bank adds implicit read locks on those accounts (runtime/src/bank.rs:3868,5819); locks are not in the transaction the plugin receives. |
 | `move_precompile_verification_to_svm` | `9ypxGLzkMxi89eDerRKXWDXe44UY2z4hBig4mDhNq5Dp` | 328320000 | 320636257 | values | Moves precompile signature verification into SVM; changes where precompile failures are detected and errors reported, but the tx is still carried with status/error. |
 | `move_stake_and_move_lamports_ixs` | `7bTK6Jis8Xpfrs8ZoUfiMDPazTcdPcTWheZFJTA5Z6X4` | 314064000 | 302060257 | values | New stake program instructions; transaction success and account data. |
 | `pico_inflation` | `4RWNif6C2WCNiKVW7otP4G7dkmkHGyKQWRpuZ1pxKU5m` | 57456000 | 49772256 | values | Only changes the inflation rate used for Voting/Staking reward amounts (runtime/src/bank.rs:3125). |
@@ -102,7 +103,7 @@ On each bump, add the features that are new in the target version, review the on
 | `syscall_parameter_address_restrictions` | `EDGMC5kxFxGk4ixsNkGt8bW7QL5hDMXnbwaZvYMwNfzF` | 429840000 | 407468256 | values | Stricter pointer checks in syscalls; transaction status, logs and compute units. |
 | `timely_vote_credits` | `tvcF6b1TRz353zKuhBjinZkKzjmihXmBAHJdjNYw1sQ` | 303696000 | 299036260 | values | Vote credit calculation; vote account data and reward amounts. |
 | `upgrade_bpf_stake_program_to_v5` | `STk5Xj8hdAx3sTzmtJ3QysKkq6X2A3yj73JtxttiRyk` | 427248000 | 407036256 | values | Replaces the Core BPF Stake program account at activation (runtime/src/bank.rs:6509). |
-| `virtual_address_space_adjustments` | `7VgiehxNxu53KdxgLspGQY8myE6f7UokaWa4jsGcaSz` | not activated | 407900256 | values | Changes program input serialization/memory mapping in program-runtime (serialization.rs, vm.rs) so tx results/CUs/account data may differ, but no field or kind change. |
+| `virtual_address_space_adjustments` | `7VgiehxNxu53KdxgLspGQY8myE6f7UokaWa4jsGcaSz` | pending | 407900256 | values | Changes program input serialization/memory mapping in program-runtime (serialization.rs, vm.rs) so tx results/CUs/account data may differ, but no field or kind change. |
 | `vote_account_initialize_v2` | `VoteAccount1nitia1izeV211111111111111111111` | not activated | not activated | values | New vote program InitializeAccountV2 instruction (programs/vote/src/vote_processor.rs:69). |
 | `vote_authorize_with_seed` | `6tRxEYKuy2L5nnv5bgn7iT28MxUbYxp5h7F3Ncf1exrT` | 148608004 | 144380257 | values | Vote program instruction; transaction success and vote account data. |
 | `vote_state_v4` | `Gx4XFcrVMt4HUvPzTpTSVkdDVgcDSjKhDN1RqRS6KDuZ` | 409968000 | 387596256 | values | New vote account data layout (programs/vote/src/vote_state/mod.rs:977); bytes copied unchanged. |
@@ -190,7 +191,7 @@ On each bump, add the features that are new in the target version, review the on
 | `enable_turbine_fanout_experiments` | `D31EFnLgdiysi84Woo3of4JMu7VmasUS3Z7j9HYXCeLY` | 247104008 | 247628260 | enable turbine fanout experiments #29393 |
 | `enable_tx_v1` | `txv1aq4pp281K9um3tnPgkfX8UqtFT6wcVW3hNezGLL` | 447120000 | 437276256 | SIMD-0385: Transaction V1 |
 | `enable_vote_address_leader_schedule` | `5JsG4NWH8Jbrqdd8uL6BNwnyZK3dQSoieRXG5vmofj9y` | 363312000 | 352604256 | SIMD-0180: Enable vote address leader schedule #4573 |
-| `enable_zk_proof_from_account` | `zkiTNuzBKxrCLMKehzuQeKZyLtX2yvFcEKMML8nExU8` | not activated | not activated | Enable zk token proof program to read proof from accounts instead of instruction data #34750 |
+| `enable_zk_proof_from_account` | `zkiTNuzBKxrCLMKehzuQeKZyLtX2yvFcEKMML8nExU8` | not activated | pending | Enable zk token proof program to read proof from accounts instead of instruction data #34750 |
 | `enable_zk_transfer_with_fee` | `zkNLP7EQALfC1TYeB3biDU7akDckj8iPkvh9y2Mt2K3` | not activated | not activated | enable Zk Token proof program transfer with fee |
 | `enforce_fixed_fec_set` | `fixfecLZYMfkGzwq6NJA11Yw6KYztzXiK9QcL3K78in` | 403920000 | 385868256 | SIMD-0317: Enforce 32 data + 32 coding shreds |
 | `epoch_accounts_hash` | `5GpmAKxaGsWWbPp4bNXFLJxZVvG92ctxf7jQnzTQjF3n` | 228528004 | 217388260 | enable epoch accounts hash calculation #27539 |
