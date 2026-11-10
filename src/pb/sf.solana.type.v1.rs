@@ -27,6 +27,13 @@ pub struct Account {
     pub data: ::prost::alloc::vec::Vec<u8>,
     #[prost(bool, tag="7")]
     pub deleted: bool,
+    /// Indexes of the transactions that wrote this account in the slot, in ascending order. An index
+    /// is the position Agave gave the transaction in the block, which is its position in
+    /// `Block.transactions` unless transactions were removed from the block afterwards. Empty when
+    /// no transaction wrote the account, for example a reward, a sysvar update or a feature
+    /// activation.
+    #[prost(uint32, repeated, tag="8")]
+    pub transaction_indexes: ::prost::alloc::vec::Vec<u32>,
 }
 /// This Block is backwards compatible with solana.storage.ConfirmedBlock.ConfirmedBlock from
 /// the Solana Labs repositories.
@@ -301,6 +308,9 @@ pub enum RewardType {
     DeactivatedStake = 5,
     /// Burn of the validator admission ticket. The reward carries a negative lamports value.
     VatDebit = 6,
+    /// Share of the block revenue a validator pays to a stake account (SIMD-0123). It comes in addition to the
+    /// stake account's Staking reward, under the same pubkey.
+    BlockRevenueSharing = 7,
 }
 impl RewardType {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -316,6 +326,7 @@ impl RewardType {
             RewardType::Voting => "Voting",
             RewardType::DeactivatedStake => "DeactivatedStake",
             RewardType::VatDebit => "VATDebit",
+            RewardType::BlockRevenueSharing => "BlockRevenueSharing",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -328,6 +339,7 @@ impl RewardType {
             "Voting" => Some(Self::Voting),
             "DeactivatedStake" => Some(Self::DeactivatedStake),
             "VATDebit" => Some(Self::VatDebit),
+            "BlockRevenueSharing" => Some(Self::BlockRevenueSharing),
             _ => None,
         }
     }

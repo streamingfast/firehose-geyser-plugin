@@ -26,7 +26,7 @@ use crate::pb::sf::solana::r#type::v1::{
     Transaction, TransactionConfig, TransactionError, TransactionStatusMeta, UiTokenAmount,
 };
 
-use crate::state::{ACC_MUTEX, BLOCK_MUTEX};
+use crate::state::{AccountWriter, ACC_MUTEX, BLOCK_MUTEX};
 use crate::stats::{
     NOTIFY_BLOCK_METADATA, NOTIFY_TRANSACTION, STATE_LOCK_WAIT, UPDATE_ACCOUNT, UPDATE_SLOT_STATUS,
 };
@@ -34,6 +34,7 @@ use crate::utils::convert_sol_timestamp;
 use env_logger::Target;
 use log::{debug, error, info, LevelFilter};
 use solana_rpc_client::rpc_client::RpcClient;
+use solana_signature::Signature;
 
 use crate::block_printer::BlockPrinter;
 
@@ -162,6 +163,7 @@ impl Plugin {
         owner: &[u8],
         write_version: u64,
         deleted: bool,
+        writer: Option<AccountWriter>,
         is_startup: bool,
     ) {
         if owner == Self::VOTE111111111111111111111111111111111111111 {
@@ -188,6 +190,7 @@ impl Plugin {
                 write_version,
                 deleted,
                 data_hash,
+                writer,
                 self.trace,
             );
             if let Err(data) = attempt {
@@ -200,6 +203,7 @@ impl Plugin {
                     write_version,
                     deleted,
                     data_hash,
+                    writer,
                     self.trace,
                 );
             }
@@ -229,6 +233,8 @@ impl Plugin {
             return Ok(());
         }
         let _timing = UPDATE_ACCOUNT.start();
+        let signature_writer =
+            |signature: &Signature| AccountWriter::Signature(<[u8; 64]>::from(*signature));
         match account {
             ReplicaAccountInfoVersions::V0_0_1(account) => {
                 self.set_account(
@@ -239,6 +245,7 @@ impl Plugin {
                     account.owner,
                     account.write_version,
                     account.lamports == 0,
+                    None,
                     is_startup,
                 );
             }
@@ -252,6 +259,7 @@ impl Plugin {
                     account.owner,
                     account.write_version,
                     account.lamports == 0,
+                    account.txn_signature.map(signature_writer),
                     is_startup,
                 );
             }
@@ -265,6 +273,26 @@ impl Plugin {
                     account.owner,
                     account.write_version,
                     account.lamports == 0,
+                    account.txn.map(|txn| signature_writer(txn.signature())),
+                    is_startup,
+                );
+            }
+
+            ReplicaAccountInfoVersions::V0_0_4(account) => {
+                let writer = match (account.txn_index, account.txn) {
+                    (Some(index), _) => Some(AccountWriter::Index(index as u32)),
+                    (None, Some(txn)) => Some(signature_writer(txn.signature())),
+                    (None, None) => None,
+                };
+                self.set_account(
+                    slot,
+                    bank_id,
+                    account.pubkey,
+                    account.data,
+                    account.owner,
+                    account.write_version,
+                    account.lamports == 0,
+                    writer,
                     is_startup,
                 );
             }
@@ -461,7 +489,7 @@ impl Plugin {
             },
             SlotStatus::Rooted => {
                 debug!("slot rooted {}", slot);
-                self.write_state("set_lib").set_lib(slot);
+                self.write_state("set_lib").set_lib(slot, self.trace);
             }
             SlotStatus::Completed => {}
             SlotStatus::FirstShredReceived => {}
@@ -559,7 +587,7 @@ impl GeyserPlugin for Plugin {
         Ok(())
     }
 
-    // Agave calls it directly for FirstShredReceived, Completed and Dead, which have no bank
+    // Agave calls it directly for FirstShredReceived and Completed, which have no bank
     fn update_slot_status(
         &self,
         slot: u64,
@@ -907,6 +935,12 @@ fn to_pb_reward_type(reward_type: Option<solana_transaction_status::RewardType>)
             RewardType::DeactivatedStake
         }
         Some(solana_transaction_status::RewardType::VATDebit) => RewardType::VatDebit,
+        Some(solana_transaction_status::RewardType::BlockRevenueSharing) => {
+            RewardType::BlockRevenueSharing
+        }
+        // RewardType is non_exhaustive; the RewardType::VARIANTS check in type_checks.rs fails
+        // the build when Agave adds a variant this match does not handle.
+        Some(other) => unreachable!("unhandled reward type {:?}", other),
     }
 }
 
@@ -1067,5 +1101,26 @@ fn to_header(h: &solana_message::MessageHeader) -> MessageHeader {
         num_required_signatures: h.num_required_signatures as u32,
         num_readonly_signed_accounts: h.num_readonly_signed_accounts as u32,
         num_readonly_unsigned_accounts: h.num_readonly_unsigned_accounts as u32,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_agave_reward_type_has_its_own_block_model_value() {
+        let mut seen = std::collections::HashSet::new();
+        for reward_type in solana_transaction_status::RewardType::VARIANTS {
+            let pb = to_pb_reward_type(Some(*reward_type));
+            assert_ne!(pb, RewardType::Unspecified, "{:?}", reward_type);
+            assert!(seen.insert(pb), "{:?} maps to {:?} twice", reward_type, pb);
+        }
+        assert_eq!(
+            to_pb_reward_type(Some(
+                solana_transaction_status::RewardType::BlockRevenueSharing
+            )),
+            RewardType::BlockRevenueSharing
+        );
     }
 }
