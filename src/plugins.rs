@@ -268,6 +268,19 @@ impl Plugin {
                     is_startup,
                 );
             }
+
+            ReplicaAccountInfoVersions::V0_0_4(account) => {
+                self.set_account(
+                    slot,
+                    bank_id,
+                    account.pubkey,
+                    account.data,
+                    account.owner,
+                    account.write_version,
+                    account.lamports == 0,
+                    is_startup,
+                );
+            }
         }
 
         Ok(())
@@ -559,7 +572,7 @@ impl GeyserPlugin for Plugin {
         Ok(())
     }
 
-    // Agave calls it directly for FirstShredReceived, Completed and Dead, which have no bank
+    // Agave calls it directly for FirstShredReceived and Completed, which have no bank
     fn update_slot_status(
         &self,
         slot: u64,
@@ -907,6 +920,13 @@ fn to_pb_reward_type(reward_type: Option<solana_transaction_status::RewardType>)
             RewardType::DeactivatedStake
         }
         Some(solana_transaction_status::RewardType::VATDebit) => RewardType::VatDebit,
+        // sf.solana.type.v1.RewardType has no value for block revenue sharing rewards yet.
+        Some(solana_transaction_status::RewardType::BlockRevenueSharing) => {
+            RewardType::Unspecified
+        }
+        // RewardType is non_exhaustive; check_reward_type() in type_checks.rs fails the build
+        // when Agave adds a variant, so this arm is never taken.
+        Some(_) => RewardType::Unspecified,
     }
 }
 

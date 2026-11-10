@@ -153,7 +153,14 @@ fn check_reward_type() {
         solana_transaction_status::RewardType::Staking => {}
         solana_transaction_status::RewardType::DeactivatedStake => {}
         solana_transaction_status::RewardType::VATDebit => {}
+        // sf.solana.type.v1.RewardType has no value for it; mapped to Unspecified
+        solana_transaction_status::RewardType::BlockRevenueSharing => {}
+        _ => {}
     }
+
+    // RewardType is non_exhaustive, so the match above cannot fail on a new variant. VARIANTS
+    // lists every variant: update the match and to_pb_reward_type() when this count changes.
+    const _: () = assert!(solana_transaction_status::RewardType::VARIANTS.len() == 7);
 }
 
 #[allow(dead_code, invalid_value)]
@@ -267,7 +274,26 @@ fn check_replica_account_info_versions() {
         agave_geyser_plugin_interface::geyser_plugin_interface::ReplicaAccountInfoVersions::V0_0_1(_) => {}
         agave_geyser_plugin_interface::geyser_plugin_interface::ReplicaAccountInfoVersions::V0_0_2(_) => {}
         agave_geyser_plugin_interface::geyser_plugin_interface::ReplicaAccountInfoVersions::V0_0_3(_) => {}
+        agave_geyser_plugin_interface::geyser_plugin_interface::ReplicaAccountInfoVersions::V0_0_4(_) => {}
     }
+}
+
+#[allow(dead_code, invalid_value)]
+fn check_replica_account_info_v4() {
+    let info: agave_geyser_plugin_interface::geyser_plugin_interface::ReplicaAccountInfoV4 =
+        unsafe { std::mem::zeroed() };
+
+    let agave_geyser_plugin_interface::geyser_plugin_interface::ReplicaAccountInfoV4 {
+        pubkey: _,
+        lamports: _,
+        owner: _,
+        executable: _,
+        rent_epoch: _,
+        data: _,
+        write_version: _,
+        txn: _,
+        txn_index: _, // the account block model has no transaction index; updates are ordered by write_version
+    } = info;
 }
 
 #[allow(dead_code, invalid_value)]

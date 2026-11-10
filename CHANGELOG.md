@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v4.5.0-beta.0-fh3.0
+
+* Bumped to [Agave 4.5.0-beta.0](https://github.com/anza-xyz/agave/releases/tag/v4.5.0-beta.0) (`solana-rpc-client`, `solana-rpc-client-api`, `solana-transaction-status`), an Anza testnet release. The Docker image's Solana validator is now `v4.5.0-beta.0-fh3.0`. The `solana-*` and `agave-*` crates in `Cargo.lock` match the validator's lock, and the Rust toolchain is 1.99.1 (was 1.98.1).
+* The Geyser plugin interface is now `agave-geyser-plugin-interface` `6.0.0` (was `5.0.0`). It adds `ReplicaAccountInfoV4`, which carries the index of the transaction that changed the account. The 4.5.0-beta.0 validator still sends `ReplicaAccountInfoV3`; the plugin handles both the same way, and the account block model has no transaction index.
+* Agave now reports the block revenue part of a stake account's epoch reward as a separate `BlockRevenueSharing` reward, once `block_revenue_sharing` (SIMD-0123) is active. The block model has no reward type for it, so the plugin sends it as `Unspecified`. The feature is not activated on mainnet, testnet or devnet.
+* `RewardType` is now `#[non_exhaustive]`. `src/type_checks.rs` checks the number of variants so the build still fails when Agave adds one.
+* Agave now sends `Dead` through `update_bank_status` with the bank, instead of `update_slot_status`. The plugin ignores `Dead` either way.
+* `ACTIVATIONS.md`: Agave 4.5.0-beta.0 adds 14 features, none activated on any cluster, and none changes the block shape. `alpenglow_fast_leader_handover` and `enable_big_mod_exp_syscall` have new feature IDs; `alpenglow_fast_leader_handover` can now be activated. `increase_tx_account_lock_limit` is removed, `enable_transaction_loading_failure_fees` is renamed `relax_transaction_loading_constraints`, and Agave no longer checks 11 features, all active on every cluster, including `commission_rate_in_basis_points`. `loaderv3_programdata_size_floor` is activated on mainnet at slot 466128000 and pending on testnet. Adds devnet statuses. Statuses checked on 2026-11-10.
+
 ## v4.4.1-fh3.0
 
 * Bumped to [Agave 4.4.1](https://github.com/anza-xyz/agave/releases/tag/v4.4.1) (`solana-rpc-client`, `solana-rpc-client-api`, `solana-transaction-status`). The Docker image's Solana validator is now `v4.4.1-fh3.0`. The Geyser plugin interface stays at `agave-geyser-plugin-interface` `5.0.0`. Agave 4.4.1 changes nothing in the Geyser plugin manager or `transaction-status`.
