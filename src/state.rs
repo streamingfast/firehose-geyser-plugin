@@ -7,8 +7,10 @@ use pb::sf::solana::r#type::v1::Account;
 use prost_types::Timestamp;
 use rustc_hash::FxHashMap as HashMap;
 use rustc_hash::FxHashSet;
+use smallvec::SmallVec;
 use solana_clock::BankId;
 use solana_rpc_client::rpc_client::RpcClient;
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Mutex, RwLock};
 
@@ -75,12 +77,13 @@ impl PendingAccountChanges {
     }
 
     /// Keeps the change unless one with a higher write version is already pending for the
-    /// same owner and account in that slot.
+    /// same owner and account in that slot. The kept change gets the writers of both when the
+    /// same bank made them.
     pub fn insert(
         &self,
         slot: u64,
         owner_account_key: [u8; 64],
-        change: AccountWithWriteVersion,
+        mut change: AccountWithWriteVersion,
         trace: bool,
     ) {
         let mut shard =
@@ -95,8 +98,14 @@ impl PendingAccountChanges {
             }
         };
 
-        if let Some(prev) = slot_entries.get(&owner_account_key) {
+        if let Some(prev) = slot_entries.get_mut(&owner_account_key) {
+            // Changes of different banks are different versions of the slot, one of which is
+            // dropped before the slot is sent
+            let same_bank = prev.bank_id == change.bank_id;
             if prev.write_version > change.write_version {
+                if same_bank {
+                    prev.writers.extend_from_slice(&change.writers);
+                }
                 if trace {
                     debug!(
                         "skipping slot because older version: {}, pub_key: {:?}, owner: {:?}, write_version: {}, prev_write_version: {}, deleted: {}, data_hash: {}",
@@ -104,6 +113,11 @@ impl PendingAccountChanges {
                     );
                 }
                 return; // skipping older write_versions
+            }
+            if same_bank {
+                let mut writers = std::mem::take(&mut prev.writers);
+                writers.extend_from_slice(&change.writers);
+                change.writers = writers;
             }
         }
 
@@ -718,6 +732,37 @@ use crate::pb::sf::solana::r#type::v1::{Block, BlockHeight, Reward, UnixTimestam
 use crate::plugins::{to_block_rewards, ConfirmTransactionWithIndex};
 use bs58;
 use log::{debug, error, info, warn};
+use solana_rpc_client_api::client_error::{Error as ClientError, ErrorKind as ClientErrorKind};
+use solana_rpc_client_api::custom_error::JSON_RPC_SERVER_ERROR_BLOCK_STATUS_NOT_AVAILABLE_YET;
+use solana_rpc_client_api::request::RpcError;
+use solana_transaction_status::UiConfirmedBlock;
+
+fn block_info_from_rpc(slot: u64, block: UiConfirmedBlock) -> BlockInfo {
+    BlockInfo {
+        timestamp: convert_sol_timestamp(block.block_time.unwrap_or_default()),
+        parent_slot: block.parent_slot,
+        slot,
+        block_hash: block.blockhash,
+        parent_hash: block.previous_blockhash,
+        height: block.block_height,
+        rewards: to_block_rewards(&block.rewards),
+        transaction_count: block.transactions.unwrap_or_default().len() as u64,
+        block_producer_time_nanos: None,
+        from_rpc: true,
+        bank_id: None,
+    }
+}
+
+/// Agave answers this to `getBlock` for a slot whose transaction statuses are not all written,
+/// which under Alpenglow means not rooted yet.
+fn is_block_status_not_available_yet(err: &ClientError) -> bool {
+    matches!(
+        err.kind(),
+        ClientErrorKind::RpcError(RpcError::RpcResponseError { code, .. })
+            if *code == JSON_RPC_SERVER_ERROR_BLOCK_STATUS_NOT_AVAILABLE_YET
+    )
+}
+
 use solana_commitment_config::CommitmentConfig;
 use solana_rpc_client_api::config::RpcBlockConfig;
 use solana_transaction_status::TransactionDetails;
@@ -737,6 +782,31 @@ pub struct AccountWithWriteVersion {
     pub data_hash: u64,
     /// Bank that wrote the change, so the changes of a bank an UpdateParent clears can be dropped.
     pub bank_id: BankId,
+    /// Transactions of the bank that wrote the account in the slot, this change and the older
+    /// ones it replaced.
+    pub writers: AccountWriters,
+}
+
+pub type AccountWriters = SmallVec<[AccountWriter; 1]>;
+
+/// A transaction that wrote an account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountWriter {
+    /// Position of the transaction in the block, from Agave.
+    Index(u32),
+    /// First 8 bytes of the transaction's signature (see `signature_prefix`), turned into its
+    /// index when the slot is sent, once all its transactions are known.
+    SignaturePrefix(u64),
+}
+
+/// The first 8 bytes of a signature, which identify a transaction within its slot.
+/// Signatures are effectively random, so two transactions of a slot share a prefix with a
+/// probability around 10^-12 for 10,000 transactions; `transaction_indexes_by_signature`
+/// detects it and leaves both out rather than guess.
+pub fn signature_prefix(signature: &[u8]) -> u64 {
+    let mut prefix = [0u8; 8];
+    prefix.copy_from_slice(&signature[..8]);
+    u64::from_le_bytes(prefix)
 }
 
 lazy_static! {
@@ -822,6 +892,10 @@ pub struct State {
     /// Lowest slot a block footer was received for. Every block after it is an Alpenglow
     /// block, and Agave rejects an Alpenglow block without a footer.
     pub first_footer_slot: Option<u64>,
+    /// Slots whose `getBlock` answered BlockStatusNotAvailableYet. Under Alpenglow, Agave serves
+    /// a confirmed block only once it has rooted it, so they are fetched again on the Rooted
+    /// that reaches them instead of on every block metadata.
+    pub rpc_blocks_waiting_for_root: BTreeSet<u64>,
 
     pub with_block: bool,
     //with_account: bool,
@@ -874,6 +948,7 @@ impl State {
             confirmed_banks: HashMap::default(),
             block_producer_times: HashMap::default(),
             first_footer_slot: None,
+            rpc_blocks_waiting_for_root: BTreeSet::new(),
             last_sent_block: None,
 
             transactions: CachePadded(Mutex::new(HashMap::default())),
@@ -912,6 +987,7 @@ impl State {
             confirmed_banks: self.confirmed_banks.clone(),
             block_producer_times: self.block_producer_times.clone(),
             first_footer_slot: self.first_footer_slot,
+            rpc_blocks_waiting_for_root: self.rpc_blocks_waiting_for_root.clone(),
             with_block: self.with_block,
             transactions: CachePadded(Mutex::new(self.transactions.lock().unwrap().clone())),
             processed_slots: self.processed_slots.clone(),
@@ -959,8 +1035,28 @@ impl State {
         }
     }
 
-    pub fn set_lib(&mut self, slot: u64) {
+    pub fn set_lib(&mut self, slot: u64, trace: bool) {
         self.lib = Some(slot);
+        self.retry_rpc_blocks_rooted_by(slot, trace);
+    }
+
+    /// Fetches again the blocks RPC did not serve before `root` was rooted.
+    fn retry_rpc_blocks_rooted_by(&mut self, root: u64, trace: bool) {
+        let rooted: Vec<u64> = self
+            .rpc_blocks_waiting_for_root
+            .range(..=root)
+            .copied()
+            .collect();
+        for slot in rooted {
+            self.rpc_blocks_waiting_for_root.remove(&slot);
+            if !self.has_block_info(slot) {
+                info!(
+                    "slot {} is rooted, fetching its block info from rpc again",
+                    slot
+                );
+                self.cache_block_from_rpc(slot, trace);
+            }
+        }
     }
 
     fn get_lib(&self) -> Option<u64> {
@@ -968,13 +1064,16 @@ impl State {
     }
 
     pub fn cache_block_from_rpc(&mut self, slot: u64, trace: bool) {
+        if self.rpc_blocks_waiting_for_root.contains(&slot) {
+            return;
+        }
         let started = std::time::Instant::now();
         self.fetch_block_from_rpc(slot, trace);
         crate::stats::RPC_BLOCK_FETCH.record_since(started);
     }
 
     fn fetch_block_from_rpc(&mut self, slot: u64, trace: bool) {
-        match self
+        let local_err = match self
             .local_rpc_client
             .as_ref()
             .expect("local_rpc_client not set")
@@ -982,53 +1081,33 @@ impl State {
         {
             Ok(block) => {
                 debug!("Block Info fetched locally for slot {}", slot);
-                self.set_block_info(
-                    BlockInfo {
-                        timestamp: convert_sol_timestamp(block.block_time.unwrap_or_default()),
-                        parent_slot: block.parent_slot.clone(),
-                        slot,
-                        block_hash: block.blockhash.clone(),
-                        parent_hash: block.previous_blockhash.clone(),
-                        height: block.block_height,
-                        rewards: to_block_rewards(&block.rewards),
-                        transaction_count: block.transactions.unwrap_or_default().len() as u64,
-                        block_producer_time_nanos: None,
-                        from_rpc: true,
-                        bank_id: None,
-                    },
-                    trace,
-                )
+                self.set_block_info(block_info_from_rpc(slot, block), trace);
+                return;
             }
-            Err(_err) => {
-                match self
-                    .remote_rpc_client
-                    .as_ref()
-                    .expect("remote_rpc_client not set")
-                    .get_block_with_config(slot, DEFAULT_RPC_BLOCK_CONFIG)
-                {
-                    Ok(block) => {
-                        debug!("Block Info fetched remotely for slot {}", slot);
-                        self.set_block_info(
-                            BlockInfo {
-                                timestamp: convert_sol_timestamp(
-                                    block.block_time.unwrap_or_default(),
-                                ),
-                                parent_slot: block.parent_slot.clone(),
-                                slot,
-                                block_hash: block.blockhash.clone(),
-                                parent_hash: block.previous_blockhash.clone(),
-                                height: block.block_height,
-                                rewards: to_block_rewards(&block.rewards),
-                                transaction_count: block.transactions.unwrap_or_default().len()
-                                    as u64,
-                                block_producer_time_nanos: None,
-                                from_rpc: true,
-                                bank_id: None,
-                            },
-                            trace,
-                        )
-                    }
-                    Err(_err) => return,
+            Err(err) => err,
+        };
+        match self
+            .remote_rpc_client
+            .as_ref()
+            .expect("remote_rpc_client not set")
+            .get_block_with_config(slot, DEFAULT_RPC_BLOCK_CONFIG)
+        {
+            Ok(block) => {
+                debug!("Block Info fetched remotely for slot {}", slot);
+                self.set_block_info(block_info_from_rpc(slot, block), trace);
+            }
+            Err(remote_err) => {
+                if is_block_status_not_available_yet(&local_err) {
+                    info!(
+                        "block info of slot {} not available from rpc until the slot is rooted, waiting for its Rooted (remote: {})",
+                        slot, remote_err
+                    );
+                    self.rpc_blocks_waiting_for_root.insert(slot);
+                } else {
+                    debug!(
+                        "cannot fetch block info of slot {} from rpc (local: {}, remote: {})",
+                        slot, local_err, remote_err
+                    );
                 }
             }
         }
@@ -1482,6 +1561,7 @@ impl State {
         write_version: u64,
         deleted: bool,
         data_hash: u64,
+        writer: Option<AccountWriter>,
         trace: bool,
     ) {
         // purge tail data on initialization
@@ -1501,6 +1581,7 @@ impl State {
             write_version,
             deleted,
             data_hash,
+            writer,
             trace,
         );
     }
@@ -1518,6 +1599,7 @@ impl State {
         write_version: u64,
         deleted: bool,
         data_hash: u64,
+        writer: Option<AccountWriter>,
         trace: bool,
     ) -> Result<(), Vec<u8>> {
         let initializing = self.cursor.is_none() && self.first_block_to_process.is_none();
@@ -1533,6 +1615,7 @@ impl State {
             write_version,
             deleted,
             data_hash,
+            writer,
             trace,
         );
         Ok(())
@@ -1548,6 +1631,7 @@ impl State {
         write_version: u64,
         deleted: bool,
         data_hash: u64,
+        writer: Option<AccountWriter>,
         trace: bool,
     ) {
         if self.cleared_banks.contains_key(&bank_id) {
@@ -1585,6 +1669,7 @@ impl State {
             write_version,
             data_hash,
             bank_id,
+            writers: writer.into_iter().collect(),
         };
 
         self.block_account_changes
@@ -1662,6 +1747,7 @@ impl State {
         self.slot_banks.retain(|&slot, _| slot > upto);
         self.confirmed_banks.retain(|&slot, _| slot > upto);
         self.block_producer_times.retain(|&slot, _| slot > upto);
+        self.rpc_blocks_waiting_for_root.retain(|&slot| slot > upto);
 
         let slots = self.confirmed_slots.keys().cloned().collect::<Vec<u64>>();
         for slot in slots {
@@ -1874,8 +1960,20 @@ impl State {
                     lib
                 );
 
+                let transaction_indexes = self
+                    .transactions
+                    .get_mut()
+                    .unwrap()
+                    .get(&slot)
+                    .map(|transactions| transaction_indexes_by_signature(transactions))
+                    .unwrap_or_default();
                 let acc_block = create_account_block(
-                    filtered_accounts(&effective_account_changes, slot_changes),
+                    filtered_accounts(
+                        &effective_account_changes,
+                        slot_changes,
+                        &transaction_indexes,
+                        slot,
+                    ),
                     &block_info,
                 );
 
@@ -2060,41 +2158,116 @@ struct FilteredAccount {
     owner: [u8; 32],
     source: usize,
     deleted: bool,
+    /// The change whose writers are the account's transactions. Stays when `source` moves to
+    /// a later change of the same address under another owner.
+    writers: usize,
 }
 
 impl FilteredAccount {
-    fn to_account(&self, data: Vec<u8>) -> Account {
+    fn to_account(&self, data: Vec<u8>, transaction_indexes: Vec<u32>) -> Account {
         Account {
             address: self.address.to_vec(),
             owner: self.owner.to_vec(),
             data,
             deleted: self.deleted,
+            transaction_indexes,
         }
     }
 }
 
-/// Builds the accounts of `filtered`, moving each data out of `changes` on its last use.
+/// Maps the signature prefix of each of the slot's transactions to its index. A prefix shared
+/// by two transactions maps to `None`, so neither is attributed.
+fn transaction_indexes_by_signature(
+    transactions: &[ConfirmTransactionWithIndex],
+) -> HashMap<u64, Option<u32>> {
+    let mut indexes = HashMap::with_capacity_and_hasher(transactions.len(), Default::default());
+    for tx in transactions {
+        let Some(signature) = tx
+            .transaction
+            .transaction
+            .as_ref()
+            .and_then(|trx| trx.signatures.first())
+            .filter(|signature| signature.len() >= 8)
+        else {
+            continue;
+        };
+        indexes
+            .entry(signature_prefix(signature))
+            .and_modify(|index| *index = None)
+            .or_insert(Some(tx.index as u32));
+    }
+    indexes
+}
+
+/// Builds the accounts of `filtered`, moving each data and list of transaction indexes out of
+/// `changes` on its last use. `transaction_indexes` comes from `transaction_indexes_by_signature`.
 fn filtered_accounts(
     filtered: &[FilteredAccount],
     changes: Vec<AccountWithWriteVersion>,
+    transaction_indexes: &HashMap<u64, Option<u32>>,
+    slot: u64,
 ) -> Vec<Account> {
-    let mut uses = vec![0usize; changes.len()];
+    let mut data_uses = vec![0usize; changes.len()];
+    let mut writer_uses = vec![0usize; changes.len()];
     for account in filtered {
-        uses[account.source] += 1;
+        data_uses[account.source] += 1;
+        writer_uses[account.writers] += 1;
     }
+
+    // Only for the changes the account block uses
+    let mut unresolved = 0usize;
+    let mut writer_indexes: Vec<Vec<u32>> = changes
+        .iter()
+        .zip(&writer_uses)
+        .map(|(change, &uses)| {
+            if uses == 0 || change.writers.is_empty() {
+                return Vec::new();
+            }
+            let mut indexes: Vec<u32> = change
+                .writers
+                .iter()
+                .filter_map(|writer| match writer {
+                    AccountWriter::Index(index) => Some(*index),
+                    AccountWriter::SignaturePrefix(prefix) => {
+                        let index = transaction_indexes.get(prefix).copied().flatten();
+                        if index.is_none() {
+                            unresolved += 1;
+                        }
+                        index
+                    }
+                })
+                .collect();
+            indexes.sort_unstable();
+            indexes.dedup();
+            indexes
+        })
+        .collect();
+    if unresolved > 0 {
+        warn!(
+            "slot {}: {} account writes name a transaction the slot does not have, or share a signature prefix with another, left out of transaction_indexes",
+            slot, unresolved
+        );
+    }
+
     let mut data: Vec<Vec<u8>> = changes.into_iter().map(|c| c.account.data).collect();
     filtered
         .iter()
         .map(|account| {
-            uses[account.source] -= 1;
-            let data = if uses[account.source] == 0 {
-                std::mem::take(&mut data[account.source])
-            } else {
-                data[account.source].clone()
-            };
-            account.to_account(data)
+            let data = take_on_last_use(&mut data, &mut data_uses, account.source);
+            let indexes = take_on_last_use(&mut writer_indexes, &mut writer_uses, account.writers);
+            account.to_account(data, indexes)
         })
         .collect()
+}
+
+/// Moves `values[i]` out on its last counted use, and clones it before that.
+fn take_on_last_use<T: Clone + Default>(values: &mut [T], uses: &mut [usize], i: usize) -> T {
+    uses[i] -= 1;
+    if uses[i] == 0 {
+        std::mem::take(&mut values[i])
+    } else {
+        values[i].clone()
+    }
 }
 
 fn filter_account_changes(
@@ -2172,6 +2345,7 @@ fn filter_account_changes(
                     owner: cached_owner,
                     source,
                     deleted: account.deleted,
+                    writers: source,
                 });
             }
 
@@ -2192,6 +2366,7 @@ fn filter_account_changes(
                 owner: account.owner,
                 source,
                 deleted: account.deleted,
+                writers: source,
             });
 
             if let Some(cached_owner) = different_previous_owner {
@@ -2289,7 +2464,214 @@ mod tests {
             write_version,
             data_hash,
             bank_id: 0,
+            writers: Default::default(),
         }
+    }
+
+    fn written_change(
+        address: u8,
+        owner: u8,
+        write_version: u64,
+        bank_id: BankId,
+        writers: &[AccountWriter],
+    ) -> AccountWithWriteVersion {
+        AccountWithWriteVersion {
+            account: create_test_account(vec![address; 32], vec![owner; 32], vec![address], false),
+            write_version,
+            data_hash: write_version,
+            bank_id,
+            writers: writers.iter().copied().collect(),
+        }
+    }
+
+    fn owner_account_key(address: u8, owner: u8) -> [u8; 64] {
+        let mut key = [owner; 64];
+        key[32..].fill(address);
+        key
+    }
+
+    fn pending_writers(pending: &mut PendingAccountChanges, slot: u64) -> Vec<AccountWriter> {
+        let changes: Vec<_> = pending.slot_changes(slot).collect();
+        assert_eq!(changes.len(), 1);
+        changes[0].writers.to_vec()
+    }
+
+    #[test]
+    fn test_pending_change_keeps_writers_of_replaced_changes() {
+        let (a, b, c) = (
+            AccountWriter::SignaturePrefix(1),
+            AccountWriter::SignaturePrefix(2),
+            AccountWriter::Index(7),
+        );
+
+        // In write version order
+        let mut pending = PendingAccountChanges::default();
+        pending.insert(
+            10,
+            owner_account_key(1, 9),
+            written_change(1, 9, 1, 0, &[a]),
+            false,
+        );
+        pending.insert(
+            10,
+            owner_account_key(1, 9),
+            written_change(1, 9, 2, 0, &[b]),
+            false,
+        );
+        pending.insert(
+            10,
+            owner_account_key(1, 9),
+            written_change(1, 9, 4, 0, &[]),
+            false,
+        );
+        assert_eq!(pending_writers(&mut pending, 10), vec![a, b]);
+        assert_eq!(pending.slot_changes(10).next().unwrap().write_version, 4);
+
+        // An older write arriving last still adds its writer
+        let mut pending = PendingAccountChanges::default();
+        pending.insert(
+            10,
+            owner_account_key(1, 9),
+            written_change(1, 9, 5, 0, &[b]),
+            false,
+        );
+        pending.insert(
+            10,
+            owner_account_key(1, 9),
+            written_change(1, 9, 2, 0, &[c]),
+            false,
+        );
+        assert_eq!(pending_writers(&mut pending, 10), vec![b, c]);
+        assert_eq!(pending.slot_changes(10).next().unwrap().write_version, 5);
+
+        // Another bank's writes are another version of the slot
+        let mut pending = PendingAccountChanges::default();
+        pending.insert(
+            10,
+            owner_account_key(1, 9),
+            written_change(1, 9, 1, 3, &[a]),
+            false,
+        );
+        pending.insert(
+            10,
+            owner_account_key(1, 9),
+            written_change(1, 9, 2, 4, &[b]),
+            false,
+        );
+        assert_eq!(pending_writers(&mut pending, 10), vec![b]);
+    }
+
+    fn transactions_with_signatures(
+        signatures: &[(usize, [u8; 64])],
+    ) -> Vec<ConfirmTransactionWithIndex> {
+        signatures
+            .iter()
+            .map(|(index, signature)| ConfirmTransactionWithIndex {
+                index: *index,
+                bank_id: 0,
+                transaction: pb::sf::solana::r#type::v1::ConfirmedTransaction {
+                    transaction: Some(pb::sf::solana::r#type::v1::Transaction {
+                        signatures: vec![signature.to_vec()],
+                        message: None,
+                    }),
+                    meta: None,
+                },
+            })
+            .collect()
+    }
+
+    fn by_signature(signature: [u8; 64]) -> AccountWriter {
+        AccountWriter::SignaturePrefix(signature_prefix(&signature))
+    }
+
+    fn written_by(changes: &[AccountWithWriteVersion]) -> Vec<FilteredAccount> {
+        (0..changes.len())
+            .map(|source| FilteredAccount {
+                address: changes[source].account.address,
+                owner: changes[source].account.owner,
+                source,
+                deleted: false,
+                writers: source,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_filtered_accounts_resolve_transaction_indexes() {
+        let indexes = transaction_indexes_by_signature(&transactions_with_signatures(&[
+            (3, [3; 64]),
+            (0, [5; 64]),
+        ]));
+
+        let changes = vec![
+            // Written by transactions 3 and 0 (by signature), 1 twice (by index), and one the
+            // slot does not have
+            written_change(
+                1,
+                9,
+                1,
+                0,
+                &[
+                    by_signature([3; 64]),
+                    AccountWriter::Index(1),
+                    by_signature([5; 64]),
+                    AccountWriter::Index(1),
+                    by_signature([6; 64]),
+                ],
+            ),
+            // Written by the runtime only
+            written_change(2, 9, 2, 0, &[]),
+        ];
+        let filtered = written_by(&changes);
+
+        let accounts = filtered_accounts(&filtered, changes, &indexes, 10);
+        assert_eq!(accounts[0].transaction_indexes, vec![0, 1, 3]);
+        assert!(accounts[1].transaction_indexes.is_empty());
+    }
+
+    #[test]
+    fn test_shared_signature_prefix_is_not_attributed() {
+        // Transactions 0 and 1 share their first 8 signature bytes, transaction 2 does not
+        let mut first = [7u8; 64];
+        let mut second = [7u8; 64];
+        first[63] = 1;
+        second[63] = 2;
+        let indexes = transaction_indexes_by_signature(&transactions_with_signatures(&[
+            (0, first),
+            (1, second),
+            (2, [9; 64]),
+        ]));
+        assert_eq!(indexes.get(&signature_prefix(&first)), Some(&None));
+
+        let changes = vec![written_change(
+            1,
+            9,
+            1,
+            0,
+            &[by_signature(first), by_signature([9; 64])],
+        )];
+        let filtered = written_by(&changes);
+        let accounts = filtered_accounts(&filtered, changes, &indexes, 10);
+        assert_eq!(accounts[0].transaction_indexes, vec![2]);
+    }
+
+    #[test]
+    fn test_owner_change_keeps_each_owner_writers() {
+        // Transaction 0 writes the account under owner 8, transaction 1 assigns it to owner 9
+        let changes = vec![
+            written_change(1, 8, 1, 0, &[AccountWriter::Index(0)]),
+            written_change(1, 9, 2, 0, &[AccountWriter::Index(1)]),
+        ];
+        let change_refs: Vec<&AccountWithWriteVersion> = changes.iter().collect();
+        let (filtered, _) =
+            filter_account_changes(&change_refs, &AccountCache::default(), 10, false);
+        let accounts = filtered_accounts(&filtered, changes, &HashMap::default(), 10);
+
+        let by_owner: Vec<(u8, Vec<u32>)> = accounts
+            .iter()
+            .map(|account| (account.owner[0], account.transaction_indexes.clone()))
+            .collect();
+        assert_eq!(by_owner, vec![(8, vec![0]), (9, vec![1])]);
     }
 
     #[test]
@@ -3220,6 +3602,92 @@ mod tests {
         }
     }
 
+    fn get_block_requests(requests: &[wiremock::Request]) -> usize {
+        requests
+            .iter()
+            .filter(|r| String::from_utf8_lossy(&r.body).contains("getBlock"))
+            .count()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_rpc_block_not_available_until_rooted_is_fetched_on_root() {
+        use wiremock::matchers::body_partial_json;
+
+        let mock_server = MockServer::start().await;
+        let not_available = Mock::given(method("POST"))
+            .and(body_partial_json(serde_json::json!({"method": "getBlock"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "error": {
+                    "code": JSON_RPC_SERVER_ERROR_BLOCK_STATUS_NOT_AVAILABLE_YET,
+                    "message": "Block status not yet available for slot 100"
+                },
+                "id": 1
+            })))
+            .mount_as_scoped(&mock_server)
+            .await;
+
+        let cursor_dir = tempfile::tempdir().unwrap();
+        let mut state = State::new(
+            RpcClient::new(mock_server.uri()),
+            RpcClient::new(mock_server.uri()),
+            None,
+            cursor_dir
+                .path()
+                .join("cursor")
+                .to_string_lossy()
+                .into_owned(),
+            BlockPrinter::new(None, None, false),
+            true,
+            DevelopmentConfig::default(),
+        );
+        state.set_lib(98, false);
+        state.set_block_info(simple_block_info(99), false);
+        state.set_confirmed_slot(99, false);
+        assert_eq!(state.last_sent_block, Some(99));
+
+        // Slot 100 is confirmed but its block metadata never comes, so 101 makes the plugin
+        // fetch it from RPC, which serves it only once rooted.
+        state.set_confirmed_slot(100, false);
+        state.set_block_info(simple_block_info(101), false);
+        assert!(!state.has_block_info(100));
+        assert!(state.rpc_blocks_waiting_for_root.contains(&100));
+        let requests = get_block_requests(&mock_server.received_requests().await.unwrap());
+        assert_eq!(requests, 2, "one local and one remote getBlock");
+
+        // Later block metadata does not ask again before the slot is rooted.
+        state.set_confirmed_slot(101, false);
+        state.set_block_info(simple_block_info(102), false);
+        let requests = get_block_requests(&mock_server.received_requests().await.unwrap());
+        assert_eq!(requests, 2);
+        drop(not_available);
+
+        Mock::given(method("POST"))
+            .and(body_partial_json(serde_json::json!({"method": "getBlock"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "result": {
+                    "blockhash": "hash100",
+                    "previousBlockhash": "hash99",
+                    "parentSlot": 99,
+                    "signatures": [],
+                    "rewards": [],
+                    "blockTime": 1100,
+                    "blockHeight": 100
+                },
+                "id": 1
+            })))
+            .mount(&mock_server)
+            .await;
+
+        state.set_lib(100, false);
+        assert!(state.rpc_blocks_waiting_for_root.is_empty());
+        let block_info = state.block_infos.get(&100).expect("block info of slot 100");
+        assert!(block_info.from_rpc);
+        assert_eq!(block_info.block_hash, "hash100");
+        assert_eq!(block_info.parent_slot, 99);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_set_block_info() {
         let mock_server = MockServer::start().await;
@@ -3375,6 +3843,7 @@ mod tests {
             0,
             false,
             data_hash,
+            None,
             false,
         );
 
@@ -3570,6 +4039,7 @@ mod tests {
             0,
             false, // deleted
             data_hash,
+            None,
             false,
         );
 
@@ -3583,6 +4053,7 @@ mod tests {
             0,
             true, // deleted
             data_hash,
+            None,
             false,
         );
 
@@ -3616,6 +4087,7 @@ mod tests {
             0,
             false, // deleted
             data_hash,
+            None,
             false,
         );
 
@@ -3629,6 +4101,7 @@ mod tests {
             0,
             true, // deleted
             data_hash,
+            None,
             false,
         );
 
@@ -3642,6 +4115,7 @@ mod tests {
             0,
             true, // deleted
             data_hash,
+            None,
             false,
         );
 
@@ -3675,6 +4149,7 @@ mod tests {
             0,
             false,
             data_hash,
+            None,
             false,
         );
 
@@ -3688,6 +4163,7 @@ mod tests {
             0,
             false,
             data_hash,
+            None,
             false,
         );
 
@@ -3701,6 +4177,7 @@ mod tests {
             0,
             true, // deleted
             data_hash,
+            None,
             false,
         );
 
@@ -3741,7 +4218,7 @@ mod tests {
     fn test_integration_simple() {
         let mut state = new_test_state(Some(99), setup_noop_block_printer_with_logging(true, true));
 
-        state.set_lib(99);
+        state.set_lib(99, false);
 
         state.set_account(
             100,
@@ -3752,6 +4229,7 @@ mod tests {
             1,
             false,
             12345,
+            None,
             true,
         );
         state.set_account(
@@ -3763,6 +4241,7 @@ mod tests {
             1,
             false,
             23456,
+            None,
             true,
         );
         state.set_account(
@@ -3774,6 +4253,7 @@ mod tests {
             1,
             false,
             34567,
+            None,
             true,
         );
 
@@ -3808,7 +4288,7 @@ mod tests {
         let mut state =
             new_test_state(Some(101), setup_noop_block_printer_with_logging(true, true));
 
-        state.set_lib(99);
+        state.set_lib(99, false);
 
         state.set_account(
             100,
@@ -3819,6 +4299,7 @@ mod tests {
             1,
             false,
             12345,
+            None,
             true,
         );
         state.set_account(
@@ -3830,6 +4311,7 @@ mod tests {
             1,
             false,
             23456,
+            None,
             true,
         );
         state.set_account(
@@ -3841,6 +4323,7 @@ mod tests {
             1,
             false,
             34567,
+            None,
             true,
         );
 
@@ -3890,7 +4373,7 @@ mod tests {
         // Create state with noop BlockPrinter
         let mut state = new_test_state(Some(50), setup_noop_block_printer_with_logging(true, true));
 
-        state.set_lib(100);
+        state.set_lib(100, false);
 
         state.set_account(
             100,
@@ -3901,6 +4384,7 @@ mod tests {
             1,
             false,
             12345,
+            None,
             true,
         );
         state.set_account(
@@ -3912,6 +4396,7 @@ mod tests {
             1,
             false,
             23456,
+            None,
             true,
         );
         state.set_account(
@@ -3923,6 +4408,7 @@ mod tests {
             1,
             false,
             34567,
+            None,
             true,
         );
 
@@ -3980,6 +4466,7 @@ mod tests {
             1,
             false,
             12345,
+            None,
             true,
         );
         state.set_account(
@@ -3991,6 +4478,7 @@ mod tests {
             1,
             false,
             23456,
+            None,
             true,
         );
         state.set_account(
@@ -4002,6 +4490,7 @@ mod tests {
             1,
             false,
             34567,
+            None,
             true,
         );
         state.set_block_info(simple_block_info(100), true);
@@ -4009,7 +4498,7 @@ mod tests {
         state.set_block_info(simple_block_info(101), true);
         state.set_confirmed_slot(101, true);
 
-        state.set_lib(50);
+        state.set_lib(50, false);
 
         state.set_block_info(simple_block_info(102), true);
         state.set_confirmed_slot(102, true);
@@ -4061,6 +4550,7 @@ mod tests {
             1,
             false,
             12345,
+            None,
             true,
         );
         state.set_account(
@@ -4072,6 +4562,7 @@ mod tests {
             1,
             false,
             23456,
+            None,
             true,
         );
         state.set_account(
@@ -4083,10 +4574,11 @@ mod tests {
             1,
             false,
             34567,
+            None,
             true,
         );
 
-        state.set_lib(100);
+        state.set_lib(100, false);
 
         // here we DON'T send block_info for slot 100
         state.set_confirmed_slot(100, true);
@@ -4145,6 +4637,7 @@ mod tests {
             1,
             false,
             12345,
+            None,
             true,
         );
         state.set_account(
@@ -4156,6 +4649,7 @@ mod tests {
             1,
             false,
             23456,
+            None,
             true,
         );
         state.set_account(
@@ -4167,6 +4661,7 @@ mod tests {
             1,
             false,
             34567,
+            None,
             true,
         );
 
@@ -4175,7 +4670,7 @@ mod tests {
         state.set_block_info(simple_block_info(101), true);
         state.set_confirmed_slot(101, true);
 
-        state.set_lib(101);
+        state.set_lib(101, false);
         state.set_block_info(simple_block_info(102), true);
         state.set_confirmed_slot(102, true);
 
@@ -4220,7 +4715,7 @@ mod tests {
         let mut state =
             new_test_state(Some(100), setup_noop_block_printer_with_logging(true, true));
 
-        state.set_lib(99);
+        state.set_lib(99, false);
         for slot in 100..=104 {
             state.set_block_info(simple_block_info(slot), true);
         }
@@ -4249,7 +4744,7 @@ mod tests {
         let mut state =
             new_test_state(Some(100), setup_noop_block_printer_with_logging(true, true));
 
-        state.set_lib(99);
+        state.set_lib(99, false);
         state.set_block_producer_time(100, 0, 1_760_000_000_123_456_789, true);
         state.set_block_info(simple_block_info(100), true);
         state.set_confirmed_slot_unless_sent(100, true);
@@ -4269,7 +4764,7 @@ mod tests {
         let mut state =
             new_test_state(Some(100), setup_noop_block_printer_with_logging(true, true));
 
-        state.set_lib(99);
+        state.set_lib(99, false);
         state.set_block_producer_time(100, 0, 1_760_000_000_123_456_789, true);
         state.set_block_info(simple_block_info(100), true);
         state.set_confirmed_slot_unless_sent(100, true);
@@ -4317,7 +4812,7 @@ mod tests {
         let mut state =
             new_test_state(Some(100), setup_noop_block_printer_with_logging(true, true));
 
-        state.set_lib(99);
+        state.set_lib(99, false);
         for slot in 100..=103 {
             state.set_block_info(simple_block_info(slot), true);
         }
@@ -4326,7 +4821,7 @@ mod tests {
 
         // 101's Confirmed comes late, after 102 is confirmed and rooted
         state.set_confirmed_slot_unless_sent(102, true);
-        state.set_lib(102);
+        state.set_lib(102, false);
         state.set_confirmed_slot_unless_sent(101, true);
         state.set_confirmed_slot_unless_sent(103, true);
         assert_eq!(state.last_sent_block, Some(103));
@@ -4366,12 +4861,13 @@ mod tests {
                 write_version,
                 false,
                 slot,
+                None,
                 true,
             );
         };
 
         // TowerBFT up to 105, the block the cluster picks as Alpenglow genesis
-        state.set_lib(99);
+        state.set_lib(99, false);
         for slot in 100..=105 {
             write_clock(&mut state, slot);
             state.set_block_info(simple_block_info(slot), true);
@@ -4386,6 +4882,7 @@ mod tests {
             1,
             false,
             12345,
+            None,
             true,
         );
         assert_eq!(state.last_sent_block, Some(105));
@@ -4407,6 +4904,7 @@ mod tests {
             2,
             false,
             23456,
+            None,
             true,
         );
         assert_eq!(state.last_sent_block, Some(105));
@@ -4423,12 +4921,13 @@ mod tests {
             3,
             false,
             34567,
+            None,
             true,
         );
         state.set_confirmed_slot_unless_sent(110, true);
         assert_eq!(state.last_sent_block, Some(110));
 
-        state.set_lib(110);
+        state.set_lib(110, false);
         write_clock(&mut state, 111);
         state.set_block_info(test_block_info(111, 110), true);
         state.set_confirmed_slot_unless_sent(111, true);
@@ -4483,6 +4982,7 @@ mod tests {
             1,
             false,
             12345,
+            None,
             false,
         );
         state.set_account(
@@ -4494,6 +4994,7 @@ mod tests {
             1,
             false,
             23456,
+            None,
             false,
         );
         state.set_account(
@@ -4505,6 +5006,7 @@ mod tests {
             1,
             false,
             34567,
+            None,
             false,
         );
 
@@ -4515,7 +5017,7 @@ mod tests {
         state.set_confirmed_slot(101, false);
         assert_eq!(state.last_sent_block, None);
 
-        state.set_lib(90);
+        state.set_lib(90, false);
         state.set_block_info(simple_block_info(102), false);
         state.set_confirmed_slot(102, false);
         assert_eq!(state.last_sent_block, Some(102));
@@ -4542,7 +5044,7 @@ mod tests {
             filter_account_changes(&changes, account_cache, slot, trace);
         let accounts = accounts
             .iter()
-            .map(|account| account.to_account(changes[account.source].account.data.clone()))
+            .map(|account| account.to_account(changes[account.source].account.data.clone(), vec![]))
             .collect();
         (accounts, state_changes)
     }
@@ -4585,7 +5087,7 @@ mod tests {
     fn test_update_parent_drops_only_the_cleared_bank() {
         let mut state =
             new_test_state(Some(100), setup_noop_block_printer_with_logging(true, true));
-        state.set_lib(99);
+        state.set_lib(99, false);
         let transaction = |index: usize, bank_id: BankId| ConfirmTransactionWithIndex {
             index,
             bank_id,
@@ -4603,6 +5105,7 @@ mod tests {
             1,
             false,
             12345,
+            None,
             true,
         );
         state.set_account(
@@ -4614,6 +5117,7 @@ mod tests {
             2,
             false,
             23456,
+            None,
             true,
         );
         state.set_transaction(100, transaction(0, cleared), true);
@@ -4627,6 +5131,7 @@ mod tests {
             3,
             false,
             34567,
+            None,
             true,
         );
         state.set_transaction(100, transaction(0, replacement), true);
@@ -4644,6 +5149,7 @@ mod tests {
             4,
             false,
             12345,
+            None,
             true,
         );
         state.set_transaction(100, transaction(1, replacement), true);
@@ -4676,7 +5182,7 @@ mod tests {
         let mut state =
             new_test_state(Some(100), setup_noop_block_printer_with_logging(true, true));
         state.with_block = true;
-        state.set_lib(99);
+        state.set_lib(99, false);
         state
     }
 
@@ -4721,6 +5227,7 @@ mod tests {
             2,
             false,
             23456,
+            None,
             true,
         );
         state.set_transaction(106, bank_transaction(0, vote_only), true);
@@ -4736,6 +5243,7 @@ mod tests {
             3,
             false,
             34567,
+            None,
             true,
         );
         state.set_transaction(106, bank_transaction(0, alpenglow), true);
@@ -4803,6 +5311,7 @@ mod tests {
             1,
             false,
             12345,
+            None,
             true,
         );
         state.set_account(
@@ -4814,6 +5323,7 @@ mod tests {
             2,
             false,
             23456,
+            None,
             true,
         );
         state.set_transaction(100, bank_transaction(0, bank), true);

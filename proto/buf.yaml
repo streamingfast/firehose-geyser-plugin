@@ -2,4 +2,4 @@ version: v2
 modules:
   - path: .
 deps:
-  - buf.build/streamingfast/firehose-solana
+  - buf.build/streamingfast/firehose-solana:v1.6.0

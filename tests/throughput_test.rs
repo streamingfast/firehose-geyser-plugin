@@ -3,7 +3,11 @@
 //!
 //! cargo test --release --test throughput_test -- --ignored --nocapture
 //!
-//! `THROUGHPUT_SLOTS` overrides the number of slots sent after startup.
+//! `THROUGHPUT_SLOTS` overrides the number of slots sent after startup, and
+//! `THROUGHPUT_STARTUP_ACCOUNTS` the number of accounts restored from the snapshot.
+//! `THROUGHPUT_WRITERS=1` sends each account update with the transaction that wrote it, which
+//! the plugin turns into `transaction_indexes`; without it, updates carry no transaction.
+//! Every transaction also writes one hot account, so it is written 1,000 times per slot.
 
 use agave_geyser_plugin_interface::geyser_plugin_interface::{
     GeyserPlugin, ReplicaAccountInfoV3, ReplicaAccountInfoVersions, ReplicaBlockInfoV5,
@@ -15,13 +19,17 @@ use agave_geyser_plugin_interface::transaction_status_meta::{
 use firehose_geyser_plugin::plugins::Plugin;
 use solana_hash::Hash;
 use solana_message::v0::LoadedAddresses;
+use solana_message::{LegacyMessage, Message, SanitizedMessage};
+use solana_pubkey::Pubkey;
 use solana_signature::Signature;
+use solana_transaction::sanitized::SanitizedTransaction;
 use solana_transaction::versioned::VersionedTransaction;
+use std::collections::HashSet;
 use std::io::Write;
 use std::time::{Duration, Instant};
 use tempfile::NamedTempFile;
 
-const STARTUP_ACCOUNTS: u64 = 20_000_000;
+const DEFAULT_STARTUP_ACCOUNTS: u64 = 20_000_000;
 const OWNERS: u64 = 2_000;
 const DEFAULT_SLOTS: u64 = 300;
 const UPDATE_THREADS: u64 = 8;
@@ -95,6 +103,39 @@ fn cpu_seconds() -> f64 {
         })
 }
 
+/// A transaction with a distinct signature, in the two forms Agave hands to plugins.
+struct TestTransaction {
+    signature: Signature,
+    versioned: VersionedTransaction,
+    sanitized: SanitizedTransaction,
+}
+
+fn test_transaction(i: u64) -> TestTransaction {
+    let mut bytes = [0u8; 64];
+    for word in 0..8 {
+        bytes[word * 8..word * 8 + 8].copy_from_slice(&splitmix(i * 8 + word as u64).to_le_bytes());
+    }
+    let signature = Signature::from(bytes);
+    let message = Message::new(&[], Some(&Pubkey::new_from_array(pubkey(i))));
+    let sanitized = SanitizedTransaction::try_new_from_fields(
+        SanitizedMessage::Legacy(LegacyMessage::new(message, &HashSet::new())),
+        Hash::default(),
+        false,
+        vec![signature],
+    )
+    .unwrap();
+    let versioned = VersionedTransaction {
+        signatures: vec![signature],
+        ..VersionedTransaction::default()
+    };
+    TestTransaction {
+        signature,
+        versioned,
+        sanitized,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn update_account(
     plugin: &Plugin,
     slot: u64,
@@ -103,6 +144,7 @@ fn update_account(
     data: &[u8],
     write_version: u64,
     is_startup: bool,
+    txn: Option<&SanitizedTransaction>,
 ) {
     let info = ReplicaAccountInfoV3 {
         pubkey: address,
@@ -112,7 +154,7 @@ fn update_account(
         rent_epoch: 0,
         data,
         write_version,
-        txn: None,
+        txn,
     };
     let account = ReplicaAccountInfoVersions::V0_0_3(&info);
     if is_startup {
@@ -144,6 +186,14 @@ fn test_throughput() {
     .unwrap();
     config_file.flush().unwrap();
 
+    let startup_accounts: u64 = std::env::var("THROUGHPUT_STARTUP_ACCOUNTS")
+        .map(|n| n.parse().expect("THROUGHPUT_STARTUP_ACCOUNTS is a number"))
+        .unwrap_or(DEFAULT_STARTUP_ACCOUNTS);
+    let with_writers = std::env::var("THROUGHPUT_WRITERS").is_ok_and(|v| v == "1");
+    let transactions_pool: Vec<TestTransaction> =
+        (0..TRANSACTIONS_PER_SLOT).map(test_transaction).collect();
+    let hot_account = pubkey(u64::MAX / 3);
+
     let mut plugin = Plugin::new(false, false);
     plugin
         .on_load(config_file.path().to_str().unwrap(), false)
@@ -161,7 +211,7 @@ fn test_throughput() {
             let data = &data;
             let owners = &owners;
             scope.spawn(move || {
-                for i in (thread..STARTUP_ACCOUNTS).step_by(UPDATE_THREADS as usize) {
+                for i in (thread..startup_accounts).step_by(UPDATE_THREADS as usize) {
                     let r = splitmix(i);
                     // Mostly small accounts at startup, like the snapshot
                     let data = &data[(r % 256) as usize];
@@ -178,6 +228,7 @@ fn test_throughput() {
                         data,
                         r >> 40,
                         true,
+                        None,
                     );
                 }
             });
@@ -199,9 +250,7 @@ fn test_throughput() {
         rewards: &[],
         num_partitions: None,
     };
-    let signature = Signature::default();
     let message_hash = Hash::default();
-    let transaction = VersionedTransaction::default();
     let loaded_addresses = LoadedAddresses::default();
     let meta = TransactionStatusMeta {
         status: Ok(()),
@@ -236,21 +285,23 @@ fn test_throughput() {
                 let plugin = &plugin;
                 let data = &data;
                 let owners = &owners;
-                let (signature, message_hash, transaction, meta) =
-                    (&signature, &message_hash, &transaction, &meta);
+                let (message_hash, meta, transactions_pool, hot_account) =
+                    (&message_hash, &meta, &transactions_pool, &hot_account);
                 scope.spawn(move || {
                     // Transactions interleaved with account updates, like replay threads send them
                     let transactions = TRANSACTIONS_PER_SLOT / UPDATE_THREADS;
                     let mut next_transaction = 0;
                     for n in 0..UPDATES_PER_THREAD_PER_SLOT {
                         while next_transaction * UPDATES_PER_THREAD_PER_SLOT < n * transactions {
+                            let index = thread * transactions + next_transaction;
+                            let trx = &transactions_pool[index as usize];
                             let info = ReplicaTransactionInfoV4 {
-                                signature,
+                                signature: &trx.signature,
                                 message_hash,
                                 is_vote: false,
-                                transaction,
+                                transaction: &trx.versioned,
                                 transaction_status_meta: meta,
-                                index: (thread * transactions + next_transaction) as usize,
+                                index: index as usize,
                             };
                             plugin
                                 .notify_transaction_for_bank(
@@ -259,16 +310,28 @@ fn test_throughput() {
                                     0,
                                 )
                                 .unwrap();
+                            update_account(
+                                plugin,
+                                slot,
+                                hot_account,
+                                &owners[0],
+                                &data[0][..165],
+                                slot * TRANSACTIONS_PER_SLOT + index,
+                                false,
+                                with_writers.then_some(&trx.sanitized),
+                            );
                             next_transaction += 1;
                         }
                         let i = (slot * UPDATE_THREADS + thread) * UPDATES_PER_THREAD_PER_SLOT + n;
                         let r = splitmix(i ^ 0xABCD);
                         // Mostly existing accounts, some new ones
                         let account = if r % 10 == 0 {
-                            STARTUP_ACCOUNTS + i
+                            startup_accounts + i
                         } else {
-                            r % STARTUP_ACCOUNTS
+                            r % startup_accounts
                         };
+                        // The transaction this thread sent last
+                        let writer = thread * transactions + next_transaction.max(1) - 1;
                         let owner = &owners[(splitmix(account) >> 16) as usize % owners.len()];
                         update_account(
                             plugin,
@@ -278,6 +341,7 @@ fn test_throughput() {
                             &data[(r >> 8) as usize % data.len()],
                             i,
                             false,
+                            with_writers.then_some(&transactions_pool[writer as usize].sanitized),
                         );
                     }
                 });
@@ -322,12 +386,14 @@ fn test_throughput() {
     // Let the printer threads of the last blocks finish
     std::thread::sleep(Duration::from_secs(1));
     let live_cpu = cpu_seconds() - cpu_before;
-    let callbacks = slots * (UPDATE_THREADS * UPDATES_PER_THREAD_PER_SLOT + TRANSACTIONS_PER_SLOT);
+    // Each transaction also writes the hot account
+    let callbacks =
+        slots * (UPDATE_THREADS * UPDATES_PER_THREAD_PER_SLOT + 2 * TRANSACTIONS_PER_SLOT);
 
     println!(
         "THROUGHPUT startup_load={:.2?} ({:.0} ns/account) end_of_startup={:.2?} startup_rss_mb={} running_rss_mb={}",
         startup_load,
-        startup_load.as_nanos() as f64 / STARTUP_ACCOUNTS as f64,
+        startup_load.as_nanos() as f64 / startup_accounts as f64,
         end_of_startup,
         startup_rss,
         running_rss,

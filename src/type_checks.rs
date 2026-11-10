@@ -141,20 +141,10 @@ fn check_reward() {
     } = reward;
 }
 
-#[allow(dead_code)]
-fn check_reward_type() {
-    let reward_type: solana_transaction_status::RewardType = unsafe { std::mem::zeroed() };
-
-    // Match all variants - compiler will fail if variants are added/removed
-    match reward_type {
-        solana_transaction_status::RewardType::Fee => {}
-        solana_transaction_status::RewardType::Rent => {}
-        solana_transaction_status::RewardType::Voting => {}
-        solana_transaction_status::RewardType::Staking => {}
-        solana_transaction_status::RewardType::DeactivatedStake => {}
-        solana_transaction_status::RewardType::VATDebit => {}
-    }
-}
+// RewardType is non_exhaustive, so a match cannot catch a new variant. Its VARIANTS list,
+// which Agave tests against the enum, can: when this fails, map the new variant in
+// to_pb_reward_type (plugins.rs) and update the count.
+const _: () = assert!(solana_transaction_status::RewardType::VARIANTS.len() == 7);
 
 #[allow(dead_code, invalid_value)]
 fn check_loaded_addresses() {
@@ -267,6 +257,7 @@ fn check_replica_account_info_versions() {
         agave_geyser_plugin_interface::geyser_plugin_interface::ReplicaAccountInfoVersions::V0_0_1(_) => {}
         agave_geyser_plugin_interface::geyser_plugin_interface::ReplicaAccountInfoVersions::V0_0_2(_) => {}
         agave_geyser_plugin_interface::geyser_plugin_interface::ReplicaAccountInfoVersions::V0_0_3(_) => {}
+        agave_geyser_plugin_interface::geyser_plugin_interface::ReplicaAccountInfoVersions::V0_0_4(_) => {}
     }
 }
 

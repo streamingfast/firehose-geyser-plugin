@@ -415,6 +415,7 @@ mod tests {
                 owner: vec![0u8; 32],
                 data: vec![0u8; 256],
                 deleted: false,
+                transaction_indexes: vec![],
             })
             .collect();
         let parent_account_block = AccountBlock {
@@ -429,6 +430,7 @@ mod tests {
                 owner: vec![0u8; 32],
                 data: vec![0u8; 4],
                 deleted: false,
+                transaction_indexes: vec![],
             }],
             ..Default::default()
         };
