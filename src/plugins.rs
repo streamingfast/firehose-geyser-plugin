@@ -26,7 +26,7 @@ use crate::pb::sf::solana::r#type::v1::{
     Transaction, TransactionConfig, TransactionError, TransactionStatusMeta, UiTokenAmount,
 };
 
-use crate::state::{AccountWriter, ACC_MUTEX, BLOCK_MUTEX};
+use crate::state::{signature_prefix, AccountWriter, ACC_MUTEX, BLOCK_MUTEX};
 use crate::stats::{
     NOTIFY_BLOCK_METADATA, NOTIFY_TRANSACTION, STATE_LOCK_WAIT, UPDATE_ACCOUNT, UPDATE_SLOT_STATUS,
 };
@@ -233,8 +233,9 @@ impl Plugin {
             return Ok(());
         }
         let _timing = UPDATE_ACCOUNT.start();
-        let signature_writer =
-            |signature: &Signature| AccountWriter::Signature(<[u8; 64]>::from(*signature));
+        let signature_writer = |signature: &Signature| {
+            AccountWriter::SignaturePrefix(signature_prefix(signature.as_ref()))
+        };
         match account {
             ReplicaAccountInfoVersions::V0_0_1(account) => {
                 self.set_account(

@@ -104,7 +104,7 @@ impl PendingAccountChanges {
             let same_bank = prev.bank_id == change.bank_id;
             if prev.write_version > change.write_version {
                 if same_bank {
-                    add_writers(&mut prev.writers, &change.writers);
+                    prev.writers.extend_from_slice(&change.writers);
                 }
                 if trace {
                     debug!(
@@ -116,7 +116,7 @@ impl PendingAccountChanges {
             }
             if same_bank {
                 let mut writers = std::mem::take(&mut prev.writers);
-                add_writers(&mut writers, &change.writers);
+                writers.extend_from_slice(&change.writers);
                 change.writers = writers;
             }
         }
@@ -794,17 +794,19 @@ pub type AccountWriters = SmallVec<[AccountWriter; 1]>;
 pub enum AccountWriter {
     /// Position of the transaction in the block, from Agave.
     Index(u32),
-    /// Signature of the transaction, turned into its index when the slot is sent, once all its
-    /// transactions are known.
-    Signature([u8; 64]),
+    /// First 8 bytes of the transaction's signature (see `signature_prefix`), turned into its
+    /// index when the slot is sent, once all its transactions are known.
+    SignaturePrefix(u64),
 }
 
-fn add_writers(writers: &mut AccountWriters, added: &[AccountWriter]) {
-    for writer in added {
-        if !writers.contains(writer) {
-            writers.push(*writer);
-        }
-    }
+/// The first 8 bytes of a signature, which identify a transaction within its slot.
+/// Signatures are effectively random, so two transactions of a slot share a prefix with a
+/// probability around 10^-12 for 10,000 transactions; `transaction_indexes_by_signature`
+/// detects it and leaves both out rather than guess.
+pub fn signature_prefix(signature: &[u8]) -> u64 {
+    let mut prefix = [0u8; 8];
+    prefix.copy_from_slice(&signature[..8]);
+    u64::from_le_bytes(prefix)
 }
 
 lazy_static! {
@@ -2173,46 +2175,63 @@ impl FilteredAccount {
     }
 }
 
-/// Builds the accounts of `filtered`, moving each data out of `changes` on its last use.
-/// `transaction_indexes` maps the signatures of the slot's transactions to their index.
+/// Maps the signature prefix of each of the slot's transactions to its index. A prefix shared
+/// by two transactions maps to `None`, so neither is attributed.
 fn transaction_indexes_by_signature(
     transactions: &[ConfirmTransactionWithIndex],
-) -> HashMap<[u8; 64], u32> {
-    transactions
-        .iter()
-        .filter_map(|tx| {
-            let signature = tx.transaction.transaction.as_ref()?.signatures.first()?;
-            Some((
-                <[u8; 64]>::try_from(signature.as_slice()).ok()?,
-                tx.index as u32,
-            ))
-        })
-        .collect()
+) -> HashMap<u64, Option<u32>> {
+    let mut indexes = HashMap::with_capacity_and_hasher(transactions.len(), Default::default());
+    for tx in transactions {
+        let Some(signature) = tx
+            .transaction
+            .transaction
+            .as_ref()
+            .and_then(|trx| trx.signatures.first())
+            .filter(|signature| signature.len() >= 8)
+        else {
+            continue;
+        };
+        indexes
+            .entry(signature_prefix(signature))
+            .and_modify(|index| *index = None)
+            .or_insert(Some(tx.index as u32));
+    }
+    indexes
 }
 
+/// Builds the accounts of `filtered`, moving each data and list of transaction indexes out of
+/// `changes` on its last use. `transaction_indexes` comes from `transaction_indexes_by_signature`.
 fn filtered_accounts(
     filtered: &[FilteredAccount],
     changes: Vec<AccountWithWriteVersion>,
-    transaction_indexes: &HashMap<[u8; 64], u32>,
+    transaction_indexes: &HashMap<u64, Option<u32>>,
     slot: u64,
 ) -> Vec<Account> {
-    let mut uses = vec![0usize; changes.len()];
+    let mut data_uses = vec![0usize; changes.len()];
+    let mut writer_uses = vec![0usize; changes.len()];
     for account in filtered {
-        uses[account.source] += 1;
+        data_uses[account.source] += 1;
+        writer_uses[account.writers] += 1;
     }
-    let mut unknown_signatures = 0usize;
-    let writer_indexes: Vec<Vec<u32>> = changes
+
+    // Only for the changes the account block uses
+    let mut unresolved = 0usize;
+    let mut writer_indexes: Vec<Vec<u32>> = changes
         .iter()
-        .map(|change| {
+        .zip(&writer_uses)
+        .map(|(change, &uses)| {
+            if uses == 0 || change.writers.is_empty() {
+                return Vec::new();
+            }
             let mut indexes: Vec<u32> = change
                 .writers
                 .iter()
                 .filter_map(|writer| match writer {
                     AccountWriter::Index(index) => Some(*index),
-                    AccountWriter::Signature(signature) => {
-                        let index = transaction_indexes.get(signature).copied();
+                    AccountWriter::SignaturePrefix(prefix) => {
+                        let index = transaction_indexes.get(prefix).copied().flatten();
                         if index.is_none() {
-                            unknown_signatures += 1;
+                            unresolved += 1;
                         }
                         index
                     }
@@ -2223,25 +2242,32 @@ fn filtered_accounts(
             indexes
         })
         .collect();
-    if unknown_signatures > 0 {
+    if unresolved > 0 {
         warn!(
-            "slot {}: {} account writes name a transaction the slot does not have, left out of transaction_indexes",
-            slot, unknown_signatures
+            "slot {}: {} account writes name a transaction the slot does not have, or share a signature prefix with another, left out of transaction_indexes",
+            slot, unresolved
         );
     }
+
     let mut data: Vec<Vec<u8>> = changes.into_iter().map(|c| c.account.data).collect();
     filtered
         .iter()
         .map(|account| {
-            uses[account.source] -= 1;
-            let data = if uses[account.source] == 0 {
-                std::mem::take(&mut data[account.source])
-            } else {
-                data[account.source].clone()
-            };
-            account.to_account(data, writer_indexes[account.writers].clone())
+            let data = take_on_last_use(&mut data, &mut data_uses, account.source);
+            let indexes = take_on_last_use(&mut writer_indexes, &mut writer_uses, account.writers);
+            account.to_account(data, indexes)
         })
         .collect()
+}
+
+/// Moves `values[i]` out on its last counted use, and clones it before that.
+fn take_on_last_use<T: Clone + Default>(values: &mut [T], uses: &mut [usize], i: usize) -> T {
+    uses[i] -= 1;
+    if uses[i] == 0 {
+        std::mem::take(&mut values[i])
+    } else {
+        values[i].clone()
+    }
 }
 
 fn filter_account_changes(
@@ -2473,12 +2499,12 @@ mod tests {
     #[test]
     fn test_pending_change_keeps_writers_of_replaced_changes() {
         let (a, b, c) = (
-            AccountWriter::Signature([1; 64]),
-            AccountWriter::Signature([2; 64]),
+            AccountWriter::SignaturePrefix(1),
+            AccountWriter::SignaturePrefix(2),
             AccountWriter::Index(7),
         );
 
-        // In write version order, a repeated writer counted once
+        // In write version order
         let mut pending = PendingAccountChanges::default();
         pending.insert(
             10,
@@ -2490,12 +2516,6 @@ mod tests {
             10,
             owner_account_key(1, 9),
             written_change(1, 9, 2, 0, &[b]),
-            false,
-        );
-        pending.insert(
-            10,
-            owner_account_key(1, 9),
-            written_change(1, 9, 3, 0, &[a]),
             false,
         );
         pending.insert(
@@ -2541,9 +2561,10 @@ mod tests {
         assert_eq!(pending_writers(&mut pending, 10), vec![b]);
     }
 
-    #[test]
-    fn test_filtered_accounts_resolve_transaction_indexes() {
-        let transactions: Vec<ConfirmTransactionWithIndex> = [(3usize, [3u8; 64]), (0, [5; 64])]
+    fn transactions_with_signatures(
+        signatures: &[(usize, [u8; 64])],
+    ) -> Vec<ConfirmTransactionWithIndex> {
+        signatures
             .iter()
             .map(|(index, signature)| ConfirmTransactionWithIndex {
                 index: *index,
@@ -2556,28 +2577,15 @@ mod tests {
                     meta: None,
                 },
             })
-            .collect();
-        let indexes = transaction_indexes_by_signature(&transactions);
+            .collect()
+    }
 
-        let changes = vec![
-            // Written by transactions 3 and 0 (by signature), 1 (by index), and one the slot
-            // does not have
-            written_change(
-                1,
-                9,
-                1,
-                0,
-                &[
-                    AccountWriter::Signature([3; 64]),
-                    AccountWriter::Index(1),
-                    AccountWriter::Signature([5; 64]),
-                    AccountWriter::Signature([6; 64]),
-                ],
-            ),
-            // Written by the runtime only
-            written_change(2, 9, 2, 0, &[]),
-        ];
-        let filtered: Vec<FilteredAccount> = (0..changes.len())
+    fn by_signature(signature: [u8; 64]) -> AccountWriter {
+        AccountWriter::SignaturePrefix(signature_prefix(&signature))
+    }
+
+    fn written_by(changes: &[AccountWithWriteVersion]) -> Vec<FilteredAccount> {
+        (0..changes.len())
             .map(|source| FilteredAccount {
                 address: changes[source].account.address,
                 owner: changes[source].account.owner,
@@ -2585,11 +2593,66 @@ mod tests {
                 deleted: false,
                 writers: source,
             })
-            .collect();
+            .collect()
+    }
+
+    #[test]
+    fn test_filtered_accounts_resolve_transaction_indexes() {
+        let indexes = transaction_indexes_by_signature(&transactions_with_signatures(&[
+            (3, [3; 64]),
+            (0, [5; 64]),
+        ]));
+
+        let changes = vec![
+            // Written by transactions 3 and 0 (by signature), 1 twice (by index), and one the
+            // slot does not have
+            written_change(
+                1,
+                9,
+                1,
+                0,
+                &[
+                    by_signature([3; 64]),
+                    AccountWriter::Index(1),
+                    by_signature([5; 64]),
+                    AccountWriter::Index(1),
+                    by_signature([6; 64]),
+                ],
+            ),
+            // Written by the runtime only
+            written_change(2, 9, 2, 0, &[]),
+        ];
+        let filtered = written_by(&changes);
 
         let accounts = filtered_accounts(&filtered, changes, &indexes, 10);
         assert_eq!(accounts[0].transaction_indexes, vec![0, 1, 3]);
         assert!(accounts[1].transaction_indexes.is_empty());
+    }
+
+    #[test]
+    fn test_shared_signature_prefix_is_not_attributed() {
+        // Transactions 0 and 1 share their first 8 signature bytes, transaction 2 does not
+        let mut first = [7u8; 64];
+        let mut second = [7u8; 64];
+        first[63] = 1;
+        second[63] = 2;
+        let indexes = transaction_indexes_by_signature(&transactions_with_signatures(&[
+            (0, first),
+            (1, second),
+            (2, [9; 64]),
+        ]));
+        assert_eq!(indexes.get(&signature_prefix(&first)), Some(&None));
+
+        let changes = vec![written_change(
+            1,
+            9,
+            1,
+            0,
+            &[by_signature(first), by_signature([9; 64])],
+        )];
+        let filtered = written_by(&changes);
+        let accounts = filtered_accounts(&filtered, changes, &indexes, 10);
+        assert_eq!(accounts[0].transaction_indexes, vec![2]);
     }
 
     #[test]
@@ -3569,7 +3632,11 @@ mod tests {
             RpcClient::new(mock_server.uri()),
             RpcClient::new(mock_server.uri()),
             None,
-            cursor_dir.path().join("cursor").to_string_lossy().into_owned(),
+            cursor_dir
+                .path()
+                .join("cursor")
+                .to_string_lossy()
+                .into_owned(),
             BlockPrinter::new(None, None, false),
             true,
             DevelopmentConfig::default(),
