@@ -2,5 +2,5 @@
 version: v2
 deps:
   - name: buf.build/streamingfast/firehose-solana
-    commit: b6d49a7d5648455fa87c3d91856036ec
+    commit: c02c436c56464c03b210e64453f7a964
     digest: b5:4dff1b71553481f8a31d044ce9e91d9dfa816c802122638a0001b7fe3345473f7ae51265dcd9dcd3bd5fd1584916983515f68ef791dc16a30ed140003abd190e
