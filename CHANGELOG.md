@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v4.5.0-rc.0-fh3.0
+
+* Bumped to [Agave 4.5.0-rc.0](https://github.com/anza-xyz/agave/releases/tag/v4.5.0-rc.0) (`solana-rpc-client`, `solana-rpc-client-api`, `solana-transaction-status`). The Docker image's Solana validator is now `v4.5.0-rc.0-fh3.0`. The Geyser plugin interface stays at `agave-geyser-plugin-interface` `6.0.0`, and Agave 4.5.0-rc.0 changes nothing in the Geyser plugin manager, the plugin host or `transaction-status`.
+* Agave 4.5.0-rc.0 reverts the early account checks of loader-v3 `DeployWithMaxDataLen` and `Upgrade` from 4.5.0-beta.0. Such an instruction with a read-only Program, ProgramData or Spill account fails again as in Agave 4.4, with a different error, logs and compute units. The block shape does not change.
+* `ACTIVATIONS.md`: Agave 4.5.0-rc.0 adds, removes and rekeys no feature. Added a Devnet column. Since the last check, `virtual_address_space_adjustments` is activated on mainnet at slot 473472000, and `account_data_direct_mapping` is pending on mainnet (it activates at the next epoch). On testnet, `disable_sbpf_v0_v1_v2_deployment`, `loader_v3_set_program_data_to_elf_length`, `loaderv3_programdata_size_floor`, `set_lamports_per_byte_to_2575` and `enforce_correct_proof_size` are activated. All of them change values or nothing the plugin receives, not the block's shape. Statuses checked on 2026-11-25.
+
 ## v4.5.0-beta.0-fh3.0
 
 * Bumped to [Agave 4.5.0-beta.0](https://github.com/anza-xyz/agave/releases/tag/v4.5.0-beta.0) (`solana-rpc-client`, `solana-rpc-client-api`, `solana-transaction-status`). The Docker image's Solana validator is now `v4.5.0-beta.0-fh3.0`. `rust-toolchain.toml` moves to Rust 1.99.1, the version Agave 4.5.0-beta.0 builds with, and `solana-hash`, `solana-pubkey`, `solana-signature`, `solana-message` and `solana-transaction` move to the versions Agave locks.
