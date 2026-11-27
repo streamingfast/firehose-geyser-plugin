@@ -2,8 +2,8 @@
 
 Every feature Agave defines, with its status on the clusters we serve and its effect on the Firehose block. Statuses are the activation slot, `not activated`, or `pending` (activation requested, takes effect at the next epoch).
 
-* Agave version: `v4.5.0-rc.0`
-* Statuses checked: 2026-11-25, on `api.mainnet-beta.solana.com`, `api.testnet.solana.com` and `api.devnet.solana.com`
+* Agave version: `v4.5.0-rc.1`
+* Statuses checked: 2026-11-27, on `api.mainnet-beta.solana.com`, `api.testnet.solana.com` and `api.devnet.solana.com`
 
 Effects:
 
@@ -32,7 +32,7 @@ On each bump, add the features that are new in the target version, review the on
 | `block_revenue_sharing` | `Crbnc267wkJvFhYakqwWWX57sx5bkrftJLekzy6yWKLT` | not activated | not activated | not activated | shape | Block fees split into up to two RewardType::Fee rewards, to the commission collector and the vote account, with commission_bps None (runtime/src/bank/fee_distribution.rs:183-240); a Fee reward can go to an address other than the leader. The model can carry it, consumers assuming one Fee reward to the leader cannot. In the epoch reward distribution blocks, a stake account's share of block revenue comes as a separate RewardType::BlockRevenueSharing reward next to its Staking reward, under the same pubkey (runtime/src/bank/partitioned_epoch_rewards/distribution.rs:229-254); the plugin maps it to sf.solana.type.v1.RewardType.BlockRevenueSharing (7). |
 | `custom_commission_collector` | `3HcSrCTGXTUnrTueHi4DAwNuMxZSsm5xui2Ax3mgxHqf` | 445392000 | 435116256 | 491616000 | shape | Voting and Staking rewards carry neither commission nor commission_bps ((!custom_commission_collector).then_some(..) in runtime/src/bank/partitioned_epoch_rewards/calculation.rs:713,769,780), so the commission rate is not in the block even with a commission_bps field; commission is paid to the vote account's collector (calculation.rs:771, fee_distribution.rs:157), which may not be the vote account. |
 | `relax_fee_payer_constraint` | `FEEXbxUuKobtrt1qNK5pjtzbPQhsppBTrNNG74xu4mai` | not activated | not activated | not activated | shape | Replay commits transactions whose fee payer is invalid or unfunded (svm/src/transaction_processor.rs:813-832, runtime/src/bank.rs:4767): status Err, fee 0, no logs, no inner instructions, and the fee payer account may not exist. Such transactions used to make the block invalid; they now appear in blocks. They are counted in executed_transaction_count (runtime/src/bank.rs:4382, was_processed) and sent to Geyser like other committed transactions (rpc/src/transaction_status_service.rs:308), so the plugin's transaction count check still completes the block. |
-| `account_data_direct_mapping` | `CR3dVN2Yoo95Y96kLSTaziWDAQT2MNEpiWh5cqVq2pNE` | pending | 408332256 | 463968000 | values | Changes how account data is mapped into the VM (program-runtime/src/cpi.rs, serialization.rs); account data, transaction success and compute units. |
+| `account_data_direct_mapping` | `CR3dVN2Yoo95Y96kLSTaziWDAQT2MNEpiWh5cqVq2pNE` | 473904000 | 408332256 | 463968000 | values | Changes how account data is mapped into the VM (program-runtime/src/cpi.rs, serialization.rs); account data, transaction success and compute units. |
 | `allow_commission_decrease_at_any_time` | `decoMktMcnmiq6t3u7g5BfgcQu91nKZr6RvMYf9z1Jb` | 304128000 | 299036260 | 318384000 | values | Vote program commission rule; transaction success. |
 | `alt_bn128_little_endian` | `bn2oPgpkzQPT3tohMaAsMVGjhDmmDa4jCaVPqCFmtxM` | 425088000 | 406604256 | 456192000 | values | Syscall variants only. |
 | `bank_transaction_count_fix` | `Vo5siZ442SaZBKPXNocthiXysNviW4UYPwRFggmbgAp` | 171072012 | 168572256 | 184896000 | values | No remaining non-test reader; executed_transaction_count passed to block metadata (replay_stage.rs:4283) counts failed transactions too. |
