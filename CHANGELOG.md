@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v4.5.0-rc.1-fh3.0
+
+* Bumped to [Agave 4.5.0-rc.1](https://github.com/anza-xyz/agave/releases/tag/v4.5.0-rc.1) (`solana-rpc-client`, `solana-rpc-client-api`, `solana-transaction-status`). The Docker image's Solana validator is now `v4.5.0-rc.1-fh3.0`. The Geyser plugin interface stays at `agave-geyser-plugin-interface` `6.0.0`, and Agave 4.5.0-rc.1 changes nothing in the Geyser plugin manager, the plugin host or `transaction-status`.
+* `ACTIVATIONS.md`: Agave 4.5.0-rc.1 adds, removes and rekeys no feature. Since the last check, `account_data_direct_mapping` is activated on mainnet at slot 473904000; it changes values only, not the block's shape. Statuses checked on 2026-11-27.
+
 ## v4.5.0-rc.0-fh3.0
 
 * Bumped to [Agave 4.5.0-rc.0](https://github.com/anza-xyz/agave/releases/tag/v4.5.0-rc.0) (`solana-rpc-client`, `solana-rpc-client-api`, `solana-transaction-status`). The Docker image's Solana validator is now `v4.5.0-rc.0-fh3.0`. The Geyser plugin interface stays at `agave-geyser-plugin-interface` `6.0.0`, and Agave 4.5.0-rc.0 changes nothing in the Geyser plugin manager, the plugin host or `transaction-status`.
