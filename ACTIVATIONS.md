@@ -2,8 +2,8 @@
 
 Every feature Agave defines, with its status on the clusters we serve and its effect on the Firehose block. Statuses are the activation slot, `not activated`, or `pending` (activation requested, takes effect at the next epoch).
 
-* Agave version: `v4.4.1`
-* Statuses checked: 2026-11-05, on `api.mainnet-beta.solana.com` and `api.testnet.solana.com`
+* Agave version: `v4.4.2`
+* Statuses checked: 2026-11-27, on `api.mainnet-beta.solana.com` and `api.testnet.solana.com`
 
 Effects:
 
@@ -34,7 +34,7 @@ On each bump, add the features that are new in the target version, review the on
 | `custom_commission_collector` | `3HcSrCTGXTUnrTueHi4DAwNuMxZSsm5xui2Ax3mgxHqf` | 445392000 | 435116256 | shape | Voting and Staking rewards carry neither commission nor commission_bps ((!custom_commission_collector).then_some(..) in runtime/src/bank/partitioned_epoch_rewards/calculation.rs:715,785,796), so the commission rate is not in the block even with a commission_bps field; commission is paid to the vote account's collector (calculation.rs:787, fee_distribution.rs:157), which may not be the vote account. |
 | `relax_fee_payer_constraint` | `FEEXbxUuKobtrt1qNK5pjtzbPQhsppBTrNNG74xu4mai` | not activated | not activated | shape | Replay commits transactions whose fee payer is invalid or unfunded (svm/src/transaction_processor.rs:808-830, runtime/src/bank.rs:4739): status Err, fee 0, no logs, no inner instructions, and the fee payer account may not exist. Such transactions used to make the block invalid; they now appear in blocks. They are counted in executed_transaction_count (runtime/src/bank.rs:4327, was_processed) and sent to Geyser like other committed transactions (rpc/src/transaction_status_service.rs:168), so the plugin's transaction count check still completes the block. |
 | `abort_on_invalid_curve` | `FuS3FPfJDKSNot99ECLXtp3rueq36hMNStJkPJwWodLh` | 311904000 | 300764256 | values | Changes syscall error behavior in syscalls/src/lib.rs, so tx success/failure and logs. |
-| `account_data_direct_mapping` | `CR3dVN2Yoo95Y96kLSTaziWDAQT2MNEpiWh5cqVq2pNE` | not activated | 408332256 | values | Changes how account data is mapped into the VM (program-runtime/src/cpi.rs, serialization.rs); account data, transaction success and compute units. |
+| `account_data_direct_mapping` | `CR3dVN2Yoo95Y96kLSTaziWDAQT2MNEpiWh5cqVq2pNE` | 473904000 | 408332256 | values | Changes how account data is mapped into the VM (program-runtime/src/cpi.rs, serialization.rs); account data, transaction success and compute units. |
 | `allow_commission_decrease_at_any_time` | `decoMktMcnmiq6t3u7g5BfgcQu91nKZr6RvMYf9z1Jb` | 304128000 | 299036260 | values | Vote program commission rule; transaction success. |
 | `alt_bn128_little_endian` | `bn2oPgpkzQPT3tohMaAsMVGjhDmmDa4jCaVPqCFmtxM` | 425088000 | 406604256 | values | Syscall variants only. |
 | `bank_transaction_count_fix` | `Vo5siZ442SaZBKPXNocthiXysNviW4UYPwRFggmbgAp` | 171072012 | 168572256 | values | No remaining non-test reader; executed_transaction_count passed to block metadata (replay_stage.rs:4283) counts failed transactions too. |
@@ -50,7 +50,7 @@ On each bump, add the features that are new in the target version, review the on
 | `direct_account_pointers_in_program_input` | `ptr9umikaeAS7ZBBp2fsfRhie16F1V2jCKA2y6gXNAK` | not activated | 418268256 | values | Changes program input serialization in program-runtime/src/serialization.rs; tx outcomes/CUs only. |
 | `disable_fees_sysvar` | `JAN1trEUEtZjgXYzNBYHU9DYd7GnThhXfFP7SzPXkPsG` | 208656004 | 213500260 | values | syscalls/src/lib.rs:327,444 only gates registering the sol_get_fees_sysvar syscall; affects which txs succeed. |
 | `disable_sbpf_v0_execution` | `TestFeature11111111111111111111111111111111` | not activated | not activated | values | SBPFv0 programs fail to load (syscalls/src/lib.rs:335); transaction errors and logs. |
-| `disable_sbpf_v0_v1_v2_deployment` | `B8JJXCy5amZyWG9r7EnUYLwzXSXTxG7GZ1qZ1qggo83g` | not activated | not activated | values | Deploying old SBPF versions fails (program-runtime/src/deploy.rs:30). |
+| `disable_sbpf_v0_v1_v2_deployment` | `B8JJXCy5amZyWG9r7EnUYLwzXSXTxG7GZ1qZ1qggo83g` | not activated | 468380256 | values | Deploying old SBPF versions fails (program-runtime/src/deploy.rs:30). |
 | `disable_zk_elgamal_proof_program` | `zkdoVwnSFnSLtGJG7irJPEYUpmb4i7sGMGcnN6T9rnC` | 347760000 | 340508256 | values | The zk-elgamal proof program returns an error (programs/zk-elgamal-proof/src/lib.rs:178). |
 | `double_disinflation_rate` | `ddibiks7RHZR69QXYMCmk4EZNt6WckspTqEEWv6cS38` | not activated | not activated | values | runtime/src/bank.rs:6357,6374,6483 changes the inflation taper, altering reward amounts only. |
 | `enable_alt_bn128_compression_syscall` | `EJJewYSddEEtSZHiqugnvhQHiWyZKjkFDQASd7oKSagn` | 276912000 | 279164260 | values | Enables syscalls; transaction success, logs and compute units. |
@@ -69,11 +69,11 @@ On each bump, add the features that are new in the target version, review the on
 | `full_inflation::mainnet::certusone::enable` | `7XRJcS5Ud5vxGB54JbK9N2vBZVwnwdBNeJW1ibRgD9gx` | 64800004 | not activated | values | Only feeds full_inflation_features_enabled() in runtime/src/bank.rs:3118/6477, changing inflation amounts (reward lamports) but not reward kinds. |
 | `get_sysvar_syscall_enabled` | `CLCoTADvV64PSrnR6QXty6Fwrt9Xc6EdxSJE4wLRePjq` | 321840000 | 316748256 | values | Enables a sysvar-read syscall; execution results only. |
 | `increase_cpi_account_info_limit` | `H6iVbVaDZgDphcPbcZwc5LoznMPWQfnJ1AM7L1xzqvt5` | 403056000 | 385868256 | values | Raises a CPI account info limit. |
-| `increase_tx_account_lock_limit` | `9LZdXeKGeBV6hRLdxS1rHbHoEUsKqesCC2ZAPTPKJAbK` | pending | not activated | values | Raises the per-transaction account lock cap from 64 to 128 (runtime/src/bank.rs:3849); account key lists are copied unchanged. |
+| `increase_tx_account_lock_limit` | `9LZdXeKGeBV6hRLdxS1rHbHoEUsKqesCC2ZAPTPKJAbK` | not activated | not activated | values | Raises the per-transaction account lock cap from 64 to 128 (runtime/src/bank.rs:3849); account key lists are copied unchanged. |
 | `last_restart_slot_sysvar` | `HooKD5NC9QNxk25QuzCssB8ecrEzGt6eXEPBUxWp1LaR` | 282096004 | 283916256 | values | Enables a sysvar syscall (syscalls/src/lib.rs:328). |
 | `loader_v3_minimum_extend_program_size` | `YbbRLkvenrocjGPGyoQE4wjnvYzTgfsk38NFmcYK7a5` | 432864000 | 416540256 | values | Loader-v3 ExtendProgram minimum size (programs/bpf_loader/src/lib.rs:893). |
-| `loader_v3_set_program_data_to_elf_length` | `EhisBfVtGvEA8bVCVN5VMaYEaX6iTfoUrmcDi8LY7Kxy` | not activated | not activated | values | Programdata account size on deploy (programs/bpf_loader/src/lib.rs:380). |
-| `loaderv3_programdata_size_floor` | `8whkDenELnfwYLirBc4Wb4H2Z1z5K7tiykpdxJS7cWg1` | not activated | not activated | values | Charges every loader-v3 ProgramData account a transaction implicitly loads at least the ProgramData metadata size, even when it does not exist (svm/src/account_loader.rs:572), so more transactions can fail with MaxLoadedAccountsDataSizeExceeded. Before activation, the bank adds implicit read locks on those accounts (runtime/src/bank.rs:3868,5819); locks are not in the transaction the plugin receives. |
+| `loader_v3_set_program_data_to_elf_length` | `EhisBfVtGvEA8bVCVN5VMaYEaX6iTfoUrmcDi8LY7Kxy` | not activated | 467084260 | values | Programdata account size on deploy (programs/bpf_loader/src/lib.rs:380). |
+| `loaderv3_programdata_size_floor` | `8whkDenELnfwYLirBc4Wb4H2Z1z5K7tiykpdxJS7cWg1` | 466128000 | 463196260 | values | Charges every loader-v3 ProgramData account a transaction implicitly loads at least the ProgramData metadata size, even when it does not exist (svm/src/account_loader.rs:572), so more transactions can fail with MaxLoadedAccountsDataSizeExceeded. Before activation, the bank adds implicit read locks on those accounts (runtime/src/bank.rs:3868,5819); locks are not in the transaction the plugin receives. |
 | `move_precompile_verification_to_svm` | `9ypxGLzkMxi89eDerRKXWDXe44UY2z4hBig4mDhNq5Dp` | 328320000 | 320636257 | values | Moves precompile signature verification into SVM; changes where precompile failures are detected and errors reported, but the tx is still carried with status/error. |
 | `move_stake_and_move_lamports_ixs` | `7bTK6Jis8Xpfrs8ZoUfiMDPazTcdPcTWheZFJTA5Z6X4` | 314064000 | 302060257 | values | New stake program instructions; transaction success and account data. |
 | `pico_inflation` | `4RWNif6C2WCNiKVW7otP4G7dkmkHGyKQWRpuZ1pxKU5m` | 57456000 | 49772256 | values | Only changes the inflation rate used for Voting/Staking reward amounts (runtime/src/bank.rs:3125). |
@@ -91,10 +91,10 @@ On each bump, add the features that are new in the target version, review the on
 | `relax_programdata_account_check_migration` | `rexav5eNTUSNT1K2N7cfRjnthwhcP5BC25v2tA4rW4h` | 412992000 | 395372256 | values | Relaxes core-BPF migration check in runtime/src/bank.rs:6499-6567; only affects which migrations succeed. |
 | `remaining_compute_units_syscall_enabled` | `5TuppMutoyzhUSfuYdhgzD47F92GL1g89KpCZQKqedxP` | not activated | not activated | values | Syscall registration gate in syscalls/src/lib.rs; not activated. |
 | `remove_bpf_loader_incorrect_program_id` | `2HmTkCj9tXuPE4ueHzdD7jPeMf9JGCoZh5AsyoATiWEe` | 237168000 | 224300256 | values | Changes which BPF loader instructions fail. |
-| `remove_inactive_stakes` | `RMsTKfD6hZnBhhNvgGBeKNrqCNkeoP3DYYxNtcuWtRg` | not activated | not activated | values | Inactive delegations are skipped in reward calculation (partitioned_epoch_rewards/calculation.rs:858); fewer Staking rewards. |
+| `remove_inactive_stakes` | `RMsTKfD6hZnBhhNvgGBeKNrqCNkeoP3DYYxNtcuWtRg` | not activated | 461468256 | values | Inactive delegations are skipped in reward calculation (partitioned_epoch_rewards/calculation.rs:858); fewer Staking rewards. |
 | `replace_spl_token_with_p_token` | `ptokFjwyJtrwCa9Kgo9xoDS59V4QccBGEaRFnRPnSdP` | 419472000 | 396236256 | values | runtime/src/bank.rs:6493 swaps the SPL Token program account data via core-BPF migration (account update for program/programdata). |
 | `set_lamports_per_byte_to_1322` | `rntD7invRBswCAdKtRsh1G4psKjrPdS3BKqtnA78C7N` | not activated | not activated | values | Rent lamports per byte (runtime/src/bank.rs:6447). |
-| `set_lamports_per_byte_to_2575` | `rntCigrTppP5JdZz7K8TyN9sMzLdAcXp8SejYpVpX6D` | not activated | not activated | values | Rewrites the Rent sysvar (runtime/src/bank.rs:6443) and the rent-exempt minimum. |
+| `set_lamports_per_byte_to_2575` | `rntCigrTppP5JdZz7K8TyN9sMzLdAcXp8SejYpVpX6D` | not activated | 466652256 | values | Rewrites the Rent sysvar (runtime/src/bank.rs:6443) and the rent-exempt minimum. |
 | `set_lamports_per_byte_to_5080` | `61BtM7BkDEE8Yq5fskEVAQT9mYA8qCejJWoLe5apqg81` | 446256000 | 437708256 | values | runtime/src/bank.rs:6439 changes rent lamports-per-byte, changing minimum balances. |
 | `set_lamports_per_byte_to_6333` | `4a6f7o7iTcA8hRDCrPLkSatnt5Ykxiu36wo5p1Tt12wC` | 444096000 | 434684256 | values | Rent lamports per byte (runtime/src/bank.rs:6435). |
 | `set_lamports_per_byte_to_696` | `rntTjNZ9boq8owDxjGVFHPfWNQPDaKiM5JcjxmDGg47` | not activated | not activated | values | Same rent lamports-per-byte switch in runtime/src/bank.rs. |
@@ -103,7 +103,7 @@ On each bump, add the features that are new in the target version, review the on
 | `syscall_parameter_address_restrictions` | `EDGMC5kxFxGk4ixsNkGt8bW7QL5hDMXnbwaZvYMwNfzF` | 429840000 | 407468256 | values | Stricter pointer checks in syscalls; transaction status, logs and compute units. |
 | `timely_vote_credits` | `tvcF6b1TRz353zKuhBjinZkKzjmihXmBAHJdjNYw1sQ` | 303696000 | 299036260 | values | Vote credit calculation; vote account data and reward amounts. |
 | `upgrade_bpf_stake_program_to_v5` | `STk5Xj8hdAx3sTzmtJ3QysKkq6X2A3yj73JtxttiRyk` | 427248000 | 407036256 | values | Replaces the Core BPF Stake program account at activation (runtime/src/bank.rs:6509). |
-| `virtual_address_space_adjustments` | `7VgiehxNxu53KdxgLspGQY8myE6f7UokaWa4jsGcaSz` | pending | 407900256 | values | Changes program input serialization/memory mapping in program-runtime (serialization.rs, vm.rs) so tx results/CUs/account data may differ, but no field or kind change. |
+| `virtual_address_space_adjustments` | `7VgiehxNxu53KdxgLspGQY8myE6f7UokaWa4jsGcaSz` | 473472000 | 407900256 | values | Changes program input serialization/memory mapping in program-runtime (serialization.rs, vm.rs) so tx results/CUs/account data may differ, but no field or kind change. |
 | `vote_account_initialize_v2` | `VoteAccount1nitia1izeV211111111111111111111` | not activated | not activated | values | New vote program InitializeAccountV2 instruction (programs/vote/src/vote_processor.rs:69). |
 | `vote_authorize_with_seed` | `6tRxEYKuy2L5nnv5bgn7iT28MxUbYxp5h7F3Ncf1exrT` | 148608004 | 144380257 | values | Vote program instruction; transaction success and vote account data. |
 | `vote_state_v4` | `Gx4XFcrVMt4HUvPzTpTSVkdDVgcDSjKhDN1RqRS6KDuZ` | 409968000 | 387596256 | values | New vote account data layout (programs/vote/src/vote_state/mod.rs:977); bytes copied unchanged. |
@@ -112,7 +112,7 @@ On each bump, add the features that are new in the target version, review the on
 | `blake3_syscall_enabled` | `HTW2pSyErTj4BV6KBM9NZ9VBUJVxt7sacNWcf76wtzb3` | not activated | not activated | none | Only registers a BPF syscall (syscalls/src/lib.rs:323). |
 | `credits_auto_rewind` | `BUS12ciZ5gCoFafUHWW8qaFMMtwFQGVxjsDheWLdqBE2` | 200448008 | 195356264 | none | No runtime reader remains; only referenced by ledger-tool/src/main.rs:2825. |
 | `deprecate_rewards_sysvar` | `GaBtBJvmS4Arjj5W1NmFcyvPjsHN38UGYDq2MDwbs9Qu` | 55728001 | 39404256 | none | Only used as a feature id in ledger-tool/src/main.rs:2843; no runtime reader. |
-| `enforce_correct_proof_size` | `turbzzBJLGMJJikLvgCCJu9e1hTmfxwarrbLndYAsK5` | not activated | not activated | none | Shred Merkle proof size enforcement in ledger/gossip only. |
+| `enforce_correct_proof_size` | `turbzzBJLGMJJikLvgCCJu9e1hTmfxwarrbLndYAsK5` | not activated | 466220260 | none | Shred Merkle proof size enforcement in ledger/gossip only. |
 | `full_inflation::mainnet::certusone::vote` | `BzBBveUDymEYoYzcMWNQCx3cd4jQs7puaVFHLtsbB6fm` | 64800004 | not activated | none | Governance vote feature consumed only by the full_inflation activation logic. |
 | `set_exempt_rent_epoch_max` | `5wAGiy15X1Jb2hkHnPDCM8oB9V42VNA9ftNVFK84dEgv` | 246240000 | 247628260 | none | Only defined in feature-set and a conformance comment (conformance/src/txn.rs:460); no runtime reader changes account rent_epoch. |
 | `switch_to_chacha8_turbine` | `CHaChatUnR3s6cPyPMMGNJa3VdQQ8PNH2JqdD4LpCKnB` | 408672000 | 387164256 | none | Turbine shuffle RNG only (turbine/src/cluster_nodes.rs). |
@@ -191,7 +191,7 @@ On each bump, add the features that are new in the target version, review the on
 | `enable_turbine_fanout_experiments` | `D31EFnLgdiysi84Woo3of4JMu7VmasUS3Z7j9HYXCeLY` | 247104008 | 247628260 | enable turbine fanout experiments #29393 |
 | `enable_tx_v1` | `txv1aq4pp281K9um3tnPgkfX8UqtFT6wcVW3hNezGLL` | 447120000 | 437276256 | SIMD-0385: Transaction V1 |
 | `enable_vote_address_leader_schedule` | `5JsG4NWH8Jbrqdd8uL6BNwnyZK3dQSoieRXG5vmofj9y` | 363312000 | 352604256 | SIMD-0180: Enable vote address leader schedule #4573 |
-| `enable_zk_proof_from_account` | `zkiTNuzBKxrCLMKehzuQeKZyLtX2yvFcEKMML8nExU8` | not activated | pending | Enable zk token proof program to read proof from accounts instead of instruction data #34750 |
+| `enable_zk_proof_from_account` | `zkiTNuzBKxrCLMKehzuQeKZyLtX2yvFcEKMML8nExU8` | not activated | not activated | Enable zk token proof program to read proof from accounts instead of instruction data #34750 |
 | `enable_zk_transfer_with_fee` | `zkNLP7EQALfC1TYeB3biDU7akDckj8iPkvh9y2Mt2K3` | not activated | not activated | enable Zk Token proof program transfer with fee |
 | `enforce_fixed_fec_set` | `fixfecLZYMfkGzwq6NJA11Yw6KYztzXiK9QcL3K78in` | 403920000 | 385868256 | SIMD-0317: Enforce 32 data + 32 coding shreds |
 | `epoch_accounts_hash` | `5GpmAKxaGsWWbPp4bNXFLJxZVvG92ctxf7jQnzTQjF3n` | 228528004 | 217388260 | enable epoch accounts hash calculation #27539 |

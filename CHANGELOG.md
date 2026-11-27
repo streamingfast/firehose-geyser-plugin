@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v4.4.2-fh3.0
+
+* Bumped to [Agave 4.4.2](https://github.com/anza-xyz/agave/releases/tag/v4.4.2) (`solana-rpc-client`, `solana-rpc-client-api`, `solana-transaction-status`). The Docker image's Solana validator is now `v4.4.2-fh3.0`. The Geyser plugin interface stays at `agave-geyser-plugin-interface` `5.0.0`. Agave 4.4.2 changes no feature, and nothing in the Geyser plugin manager or `transaction-status`.
+* `ACTIVATIONS.md`: statuses refreshed on 2026-11-27. On mainnet, `loaderv3_programdata_size_floor` is activated at slot 466128000, `virtual_address_space_adjustments` at 473472000 and `account_data_direct_mapping` at 473904000; `increase_tx_account_lock_limit` is not activated. All three change values only. Six features are newly activated on testnet, and `enable_zk_proof_from_account` is not activated there.
+
 ## v4.4.1-fh3.0
 
 * Bumped to [Agave 4.4.1](https://github.com/anza-xyz/agave/releases/tag/v4.4.1) (`solana-rpc-client`, `solana-rpc-client-api`, `solana-transaction-status`). The Docker image's Solana validator is now `v4.4.1-fh3.0`. The Geyser plugin interface stays at `agave-geyser-plugin-interface` `5.0.0`. Agave 4.4.1 changes nothing in the Geyser plugin manager or `transaction-status`.
