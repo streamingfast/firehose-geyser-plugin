@@ -1,6 +1,4 @@
 global:
   language: rust
-  variant: application
-release:
-  # For Rust application variant, binaries are not automatically built
-  no-binaries: true
+  kind: application
+  variant: chain
